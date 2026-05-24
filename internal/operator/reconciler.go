@@ -1,0 +1,179 @@
+// internal/operator/reconciler.go
+package operator
+
+import (
+	"context"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	agentv1alpha1 "github.com/agent-platform/poc/api/v1alpha1"
+	"github.com/agent-platform/poc/internal/registry"
+)
+
+const finalizer = "agent-platform.io/cleanup"
+
+type AgentWorkloadReconciler struct {
+	client.Client
+	Scheme       *runtime.Scheme
+	Registry     registry.Client
+	RegistryURL  string
+	ISTokenURL   string
+	SampleAPIURL string
+}
+
+func (r *AgentWorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	var aw agentv1alpha1.AgentWorkload
+	if err := r.Get(ctx, req.NamespacedName, &aw); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if !aw.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, &aw)
+	}
+	if !controllerutil.ContainsFinalizer(&aw, finalizer) {
+		controllerutil.AddFinalizer(&aw, finalizer)
+		if err := r.Update(ctx, &aw); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	logger.Info("reconciling", "phase", aw.Status.Phase, "agentType", aw.Spec.AgentType)
+	switch aw.Status.Phase {
+	case "":
+		return r.handleNew(ctx, &aw)
+	case "Running":
+		return r.handleRunning(ctx, &aw)
+	default:
+		return ctrl.Result{}, nil
+	}
+}
+
+func (r *AgentWorkloadReconciler) handleNew(ctx context.Context, aw *agentv1alpha1.AgentWorkload) (ctrl.Result, error) {
+	tpl, err := r.Registry.GetTemplate(ctx, aw.Spec.AgentType)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	pod := r.buildPod(aw, tpl)
+	if err := controllerutil.SetControllerReference(aw, pod, r.Scheme); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.Create(ctx, pod); err != nil && !apierrors.IsAlreadyExists(err) {
+		return ctrl.Result{}, err
+	}
+
+	aw.Status.Phase = "Running"
+	aw.Status.PodName = pod.Name
+	return ctrl.Result{}, r.Status().Update(ctx, aw)
+}
+
+func (r *AgentWorkloadReconciler) handleRunning(ctx context.Context, aw *agentv1alpha1.AgentWorkload) (ctrl.Result, error) {
+	var pod corev1.Pod
+	key := types.NamespacedName{Name: aw.Status.PodName, Namespace: aw.Namespace}
+	if err := r.Get(ctx, key, &pod); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	if pod.Status.Phase == corev1.PodSucceeded {
+		return r.handleCompletion(ctx, aw, false)
+	}
+	if pod.Status.Phase == corev1.PodFailed {
+		return r.handleCompletion(ctx, aw, true)
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *AgentWorkloadReconciler) handleCompletion(ctx context.Context, aw *agentv1alpha1.AgentWorkload, failed bool) (ctrl.Result, error) {
+	if failed {
+		_ = r.Registry.Fail(ctx, aw.Name)
+		aw.Status.Phase = "Failed"
+	} else {
+		_ = r.Registry.Complete(ctx, aw.Name)
+		aw.Status.Phase = "Completed"
+	}
+	return ctrl.Result{}, r.Status().Update(ctx, aw)
+}
+
+func (r *AgentWorkloadReconciler) handleDeletion(ctx context.Context, aw *agentv1alpha1.AgentWorkload) (ctrl.Result, error) {
+	if controllerutil.ContainsFinalizer(aw, finalizer) {
+		_ = r.Registry.Fail(ctx, aw.Name)
+		controllerutil.RemoveFinalizer(aw, finalizer)
+		return ctrl.Result{}, r.Update(ctx, aw)
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl registry.AgentTemplate) *corev1.Pod {
+	env := []corev1.EnvVar{
+		{Name: "TENANT_ID", Value: aw.Spec.TenantID},
+		{Name: "USER_ID", Value: aw.Spec.UserID},
+		{Name: "AGENT_TYPE", Value: aw.Spec.AgentType},
+		{Name: "REGISTRY_URL", Value: r.RegistryURL},
+		{Name: "IS_TOKEN_URL", Value: r.ISTokenURL},
+		{Name: "SAMPLE_API_URL", Value: r.SampleAPIURL},
+		{Name: "SPIFFE_ENDPOINT_SOCKET", Value: "unix:///spiffe-workload-api/agent.sock"},
+	}
+	for k, v := range tpl.Runtime.EnvDefaults {
+		env = append(env, corev1.EnvVar{Name: k, Value: v})
+	}
+
+	resources := corev1.ResourceRequirements{}
+	if tpl.Runtime.Resources.CPULimit != "" {
+		resources.Limits = corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse(tpl.Runtime.Resources.CPULimit),
+			corev1.ResourceMemory: resource.MustParse(tpl.Runtime.Resources.MemoryLimit),
+		}
+	}
+
+	readOnly := true
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      aw.Name + "-pod",
+			Namespace: aw.Namespace,
+			Labels: map[string]string{
+				"agent-id":                  aw.Name,
+				"agent-platform.io/managed": "true",
+			},
+		},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyNever,
+			Containers: []corev1.Container{{
+				Name:      "agent",
+				Image:     tpl.Runtime.Image,
+				Env:       env,
+				Resources: resources,
+				VolumeMounts: []corev1.VolumeMount{{
+					Name:      "spiffe-workload-api",
+					MountPath: "/spiffe-workload-api",
+					ReadOnly:  true,
+				}},
+			}},
+			Volumes: []corev1.Volume{{
+				Name: "spiffe-workload-api",
+				VolumeSource: corev1.VolumeSource{
+					CSI: &corev1.CSIVolumeSource{
+						Driver:   "csi.spiffe.io",
+						ReadOnly: &readOnly,
+					},
+				},
+			}},
+		},
+	}
+}
+
+func (r *AgentWorkloadReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&agentv1alpha1.AgentWorkload{}).
+		Owns(&corev1.Pod{}).
+		Complete(r)
+}
