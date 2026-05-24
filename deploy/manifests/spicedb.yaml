@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spicedb
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spicedb
+  template:
+    metadata:
+      labels:
+        app: spicedb
+    spec:
+      containers:
+        - name: spicedb
+          image: authzed/spicedb:latest
+          args:
+            - serve
+            - --grpc-preshared-key=poc-secret
+            - --datastore-engine=memory
+            - --grpc-no-tls
+          ports:
+            - containerPort: 50051
+              name: grpc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spicedb
+  namespace: default
+spec:
+  selector:
+    app: spicedb
+  ports:
+    - port: 50051
+      targetPort: 50051
+      name: grpc

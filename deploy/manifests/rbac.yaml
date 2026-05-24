@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-operator
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agent-operator-role
+rules:
+  - apiGroups: ["agent-platform.io"]
+    resources: ["agentworkloads"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["agent-platform.io"]
+    resources: ["agentworkloads/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["agent-platform.io"]
+    resources: ["agentworkloads/finalizers"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agent-operator-binding
+subjects:
+  - kind: ServiceAccount
+    name: agent-operator
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: agent-operator-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-orchestrator
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agent-orchestrator-role
+rules:
+  - apiGroups: ["agent-platform.io"]
+    resources: ["agentworkloads"]
+    verbs: ["create", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agent-orchestrator-binding
+subjects:
+  - kind: ServiceAccount
+    name: agent-orchestrator
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: agent-orchestrator-role
+  apiGroup: rbac.authorization.k8s.io

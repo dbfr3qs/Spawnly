@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-operator
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-operator
+  template:
+    metadata:
+      labels:
+        app: agent-operator
+    spec:
+      serviceAccountName: agent-operator
+      containers:
+        - name: operator
+          image: agent-operator:latest
+          imagePullPolicy: Never
+          env:
+            - name: REGISTRY_URL
+              value: "http://registry:8080"
+            - name: IS_TOKEN_URL
+              value: "http://identity-server:8080/connect/token"
+            - name: SAMPLE_API_URL
+              value: "http://sample-api:8080"

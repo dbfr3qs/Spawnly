@@ -1,0 +1,38 @@
+global:
+  spire:
+    trustDomain: "cluster.local"
+    clusterName: "agent-platform"
+
+spire-server:
+  replicaCount: 1
+  ca_subject:
+    country: US
+    organization: agent-platform-poc
+    common_name: cluster.local
+
+spire-agent:
+  fullnameOverride: spire-agent
+  logLevel: DEBUG
+  server:
+    address: spire-server
+    port: 8081
+  workloadAttestors:
+    k8s:
+      enabled: true
+      disableContainerSelectors: false
+      useNewContainerLocator: false
+      verboseContainerLocatorLogs: false
+
+spiffe-csi-driver:
+  fullnameOverride: spiffe-csi-driver
+  agentSocketPath: /run/spire/agent-sockets/spire-agent.sock
+
+spiffe-oidc-discovery-provider:
+  enabled: true
+  fullnameOverride: spire-spiffe-oidc-discovery-provider
+
+spire-controller-manager:
+  enabled: true
+  fullnameOverride: spire-controller-manager
+  validatingWebhookConfiguration:
+    enabled: false

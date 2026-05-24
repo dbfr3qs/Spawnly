@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: registry
+  template:
+    metadata:
+      labels:
+        app: registry
+    spec:
+      containers:
+        - name: registry
+          image: agent-registry:latest
+          imagePullPolicy: Never
+          env:
+            - name: SPICEDB_ENDPOINT
+              value: "spicedb:50051"
+            - name: SPICEDB_PSK
+              value: "poc-secret"
+            - name: SPIRE_JWKS_URL
+              value: "http://spire-spiffe-oidc-discovery-provider.spire-system/.well-known/jwks.json"
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: default
+spec:
+  selector:
+    app: registry
+  ports:
+    - port: 8080
+      targetPort: 8080

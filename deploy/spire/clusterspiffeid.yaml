@@ -1,0 +1,11 @@
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: agent-workloads
+spec:
+  spiffeIDTemplate: 'spiffe://cluster.local/agent/{{ index .PodMeta.Labels "agent-id" }}'
+  podSelector:
+    matchLabels:
+      agent-platform.io/managed: "true"
+  workloadSelectorTemplates:
+    - "k8s:ns:default"
