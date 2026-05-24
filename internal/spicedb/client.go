@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	v1 "github.com/authzed/authzed-go/proto/authzed/api/v1"
 	authzed "github.com/authzed/authzed-go/v1"
@@ -11,6 +12,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+var _ Client = (*Mock)(nil)
 
 // Client is the interface used by operator, sample-api, and orchestrator.
 // resource and subject are SpiceDB object strings: "type:id".
@@ -101,7 +104,9 @@ func (r *realClient) CheckPermission(ctx context.Context, resource, permission, 
 
 // Mock is an in-memory Client for tests.
 // Tuples are stored as "resource#relation@subject" strings.
+// Mock is goroutine-safe.
 type Mock struct {
+	mu     sync.RWMutex
 	tuples map[string]bool
 }
 
@@ -110,12 +115,16 @@ func NewMock() *Mock { return &Mock{tuples: map[string]bool{}} }
 func (m *Mock) WriteSchema(_ context.Context, _ string) error { return nil }
 
 func (m *Mock) WriteRelationship(_ context.Context, resource, relation, subject string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.tuples[resource+"#"+relation+"@"+subject] = true
 	return nil
 }
 
 func (m *Mock) DeleteAgentRelationships(_ context.Context, agentID string) error {
 	suffix := "@agent:" + agentID
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for k := range m.tuples {
 		if strings.HasSuffix(k, suffix) {
 			delete(m.tuples, k)
@@ -124,10 +133,12 @@ func (m *Mock) DeleteAgentRelationships(_ context.Context, agentID string) error
 	return nil
 }
 
-// CheckPermission in the mock checks if any tuple grants the subject the
-// permission via direct relation membership (sufficient for POC tests).
-func (m *Mock) CheckPermission(_ context.Context, resource, permission, subject string) (bool, error) {
-	// For the POC schema, work_on is satisfied by the "agent" relation.
+// CheckPermission checks whether subject holds permission on resource.
+// The mock only models the POC schema: work_on is satisfied by the "agent"
+// relation, so any permission name resolves via the #agent@ tuple key.
+func (m *Mock) CheckPermission(_ context.Context, resource, _ /*permission*/ string, subject string) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	key := resource + "#agent@" + subject
 	return m.tuples[key], nil
 }
