@@ -43,11 +43,7 @@ func (v *JWKSValidator) ValidateAccessToken(ctx context.Context, token string) (
 	if err != nil {
 		return "", fmt.Errorf("invalid access token: %w", err)
 	}
-	raw, ok := tok.Get("spiffe_id")
-	if !ok {
-		return "", fmt.Errorf("missing spiffe_id claim")
-	}
-	return fmt.Sprintf("%v", raw), nil
+	return tok.Subject(), nil
 }
 
 type MockValidator struct {
