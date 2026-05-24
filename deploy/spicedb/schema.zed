@@ -1,0 +1,6 @@
+definition agent {}
+
+definition tenant {
+    relation agent: agent
+    permission work_on = agent
+}
