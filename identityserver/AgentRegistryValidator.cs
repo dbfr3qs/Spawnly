@@ -26,7 +26,8 @@ public class AgentRegistryValidator : ICustomTokenRequestValidator
             return;
         }
 
-        context.Result.ValidatedRequest.ClientClaims.Add(new Claim("spiffe_id", spiffeId));
+        // Set sub to the SPIFFE URI — this becomes the agent's identity in the access token
+        context.Result.ValidatedRequest.ClientClaims.Add(new Claim("sub", spiffeId));
     }
 
     private static void Reject(CustomTokenRequestValidationContext ctx, string desc)

@@ -15,6 +15,8 @@ public static class Config
                 ClientId = "worker",
                 AllowedGrantTypes = GrantTypes.ClientCredentials,
                 RequireClientSecret = true,
+                AlwaysSendClientClaims = true,
+                ClientClaimsPrefix = "",
                 AllowedScopes = { "sample-api" },
             }
         };
