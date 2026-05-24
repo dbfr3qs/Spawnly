@@ -37,10 +37,16 @@ func TestAgentWorkloadRoundtrip(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if got.Spec.TenantID != "tenant-1" {
-		t.Errorf("got TenantID %q, want %q", got.Spec.TenantID, "tenant-1")
+	if got.Spec.AgentType != "worker" {
+		t.Errorf("got AgentType %q, want %q", got.Spec.AgentType, "worker")
 	}
 	if got.Spec.UserID != "user-1" {
 		t.Errorf("got UserID %q, want %q", got.Spec.UserID, "user-1")
+	}
+	if got.Spec.TenantID != "tenant-1" {
+		t.Errorf("got TenantID %q, want %q", got.Spec.TenantID, "tenant-1")
+	}
+	if got.Spec.Lifecycle != "short-lived" {
+		t.Errorf("got Lifecycle %q, want %q", got.Spec.Lifecycle, "short-lived")
 	}
 }
