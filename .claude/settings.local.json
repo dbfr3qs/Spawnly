@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:spiffe.io)",
+      "Bash(ls /home/chris/.claude/projects/-home-chris-dev-agent-platform/memory/ 2>/dev/null && echo \"---\" && find /home/chris/.claude -name \"*.md\" -type f | grep -i plan | head -20)",
+      "Read(//home/chris/.claude/**)",
+      "Bash(go mod *)",
+      "Bash(apt-get update *)",
+      "Bash(apt-get install *)",
+      "Bash(find /usr -name go 2>/dev/null | head -5 || echo \"Go not found in /usr\")",
+      "Read(//usr/**)",
+      "Bash(ls -la /usr/local/go/bin/ 2>/dev/null || echo \"Not in /usr/local/go\" && echo \"---\" && echo \"Checking home directory...\" && ls ~/.local/bin/go 2>/dev/null || echo \"Not in ~/.local/bin\")",
+      "Read(//home/chris/.local/bin/**)",
+      "Bash(sudo apt-get update)",
+      "Bash(sudo apt-get install -y golang-go)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git config *)"
+    ]
+  }
+}
