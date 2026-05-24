@@ -17,7 +17,11 @@
       "Bash(git init *)",
       "Bash(git add *)",
       "Bash(git commit *)",
-      "Bash(git config *)"
+      "Bash(git config *)",
+      "Bash(go version *)",
+      "Bash(find /usr/local /home/chris -name \"go\" -type f 2>/dev/null | grep -v \".go\" | head -5; echo \"PATH=$PATH\" | tr ':' '\\\\n' | head -10)",
+      "Read(//home/chris/**)",
+      "Bash(docker pull *)"
     ]
   }
 }
