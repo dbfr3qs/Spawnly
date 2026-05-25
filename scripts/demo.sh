@@ -2,34 +2,41 @@
 # scripts/demo.sh
 set -euo pipefail
 
+DASHBOARD_PORT=8090
+ORCH_PORT=8080
+
 echo "==> Cleaning up any stale port-forwards..."
 pkill -f "kubectl port-forward" 2>/dev/null || true
 sleep 1
 
-echo "==> Port-forwarding orchestrator..."
-kubectl port-forward svc/orchestrator 8080:8080 &
+echo "==> Port-forwarding orchestrator (localhost:${ORCH_PORT}) and dashboard (localhost:${DASHBOARD_PORT})..."
+kubectl port-forward svc/orchestrator ${ORCH_PORT}:8080 &
 PF_ORCH=$!
+kubectl port-forward svc/dashboard ${DASHBOARD_PORT}:8080 &
+PF_DASH=$!
 sleep 2
 
-echo "==> Spawning agent..."
-RESPONSE=$(curl -sf -X POST http://localhost:8080/spawn \
+echo ""
+echo "  Dashboard: http://localhost:${DASHBOARD_PORT}"
+echo ""
+
+echo "==> Spawning demo agent with task 'hello from the demo'..."
+RESPONSE=$(curl -sf -X POST http://localhost:${ORCH_PORT}/spawn \
   -H 'Content-Type: application/json' \
-  -d '{"userId":"user-1","tenantId":"tenant-1","agentType":"worker"}')
+  -d '{"userId":"user-1","tenantId":"tenant-1","agentType":"worker","task":"hello from the demo"}')
 
 echo "Spawn response: $RESPONSE"
 AGENT_ID=$(echo "$RESPONSE" | jq -r '.workloadName')
-echo "Workload name: $AGENT_ID"
+echo "Agent ID: $AGENT_ID"
 
 echo ""
-echo "==> Watching AgentWorkload lifecycle (Ctrl+C to stop)..."
+echo "==> Waiting for agent to complete (watching in background)..."
 kubectl get agentworkloads -w &
 WATCH_PID=$!
 
-echo ""
-echo "==> Waiting for agent pod to complete..."
 for i in $(seq 1 30); do
   PHASE=$(kubectl get agentworkload "$AGENT_ID" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
-  echo "  phase: $PHASE"
+  echo "  [$i] phase: ${PHASE:-pending}"
   if [ "$PHASE" = "Completed" ] || [ "$PHASE" = "Failed" ]; then
     break
   fi
@@ -40,17 +47,23 @@ kill $WATCH_PID 2>/dev/null || true
 
 echo ""
 echo "==> Agent pod logs:"
-kubectl logs "$AGENT_ID-pod" 2>/dev/null || echo "(pod already cleaned up)"
+kubectl logs "${AGENT_ID}-pod" 2>/dev/null || echo "(pod already cleaned up)"
 
 echo ""
-echo "==> Checking registry (port-forwarding)..."
-kubectl port-forward svc/registry 8081:8080 &
-PF_REG=$!
-sleep 2
-
-curl -sf http://localhost:8081/v1/agents/$AGENT_ID | jq . 2>/dev/null || echo "(agent record not found)"
-
-kill $PF_ORCH $PF_REG 2>/dev/null || true
+echo "==> Lifecycle events via API:"
+curl -sf http://localhost:${ORCH_PORT}/v1/agents/${AGENT_ID}/events \
+  | jq '[.[] | {source: .source, type: .type, time: .timestamp}]' 2>/dev/null \
+  || echo "(no events found)"
 
 echo ""
-echo "Demo complete."
+echo "================================================================"
+echo "  Dashboard: http://localhost:${DASHBOARD_PORT}"
+echo "  Click on '${AGENT_ID}' to see the full event timeline,"
+echo "  including decoded JWT tokens, SpiceDB relations, and API calls."
+echo "================================================================"
+echo ""
+echo "Port-forwards are still running. Press Ctrl+C or run:"
+echo "  pkill -f 'kubectl port-forward'"
+
+# Keep port-forwards alive until user exits
+wait $PF_ORCH $PF_DASH

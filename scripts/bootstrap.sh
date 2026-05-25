@@ -17,13 +17,13 @@ CONTROL_PLANE_IP=$(docker inspect "${KIND_CLUSTER}-control-plane" \
 kubectl config set-cluster "kind-${KIND_CLUSTER}" --server="https://${CONTROL_PLANE_IP}:6443"
 
 echo "==> Building Docker images..."
-for svc in operator orchestrator registry sample-api agent; do
+for svc in operator orchestrator registry sample-api agent dashboard; do
   docker build --target "$svc" -t "agent-$svc:$IMAGE_TAG" .
 done
 docker build --target identity-server -t agent-identity-server:$IMAGE_TAG .
 
 echo "==> Loading images into Kind..."
-for svc in operator orchestrator registry sample-api agent identity-server; do
+for svc in operator orchestrator registry sample-api agent dashboard identity-server; do
   kind load docker-image "agent-$svc:$IMAGE_TAG" --name "$KIND_CLUSTER"
 done
 
@@ -56,6 +56,7 @@ kubectl apply -f deploy/manifests/identityserver.yaml
 kubectl apply -f deploy/manifests/sample-api.yaml
 kubectl apply -f deploy/manifests/operator.yaml
 kubectl apply -f deploy/manifests/orchestrator.yaml
+kubectl apply -f deploy/manifests/dashboard.yaml
 
 echo "==> Waiting for all services to be ready..."
 kubectl wait --for=condition=ready pod -l app=spicedb --timeout=120s
@@ -64,6 +65,7 @@ kubectl wait --for=condition=available deployment/identity-server --timeout=120s
 kubectl wait --for=condition=available deployment/sample-api --timeout=120s
 kubectl wait --for=condition=available deployment/agent-operator --timeout=120s
 kubectl wait --for=condition=available deployment/orchestrator --timeout=120s
+kubectl wait --for=condition=available deployment/dashboard --timeout=120s
 
 echo "==> Seeding agent templates..."
 kubectl port-forward svc/registry 18080:8080 &
@@ -93,4 +95,7 @@ echo "  worker template seeded"
 kill $PF_REG_SEED 2>/dev/null || true
 
 echo ""
-echo "Bootstrap complete. Run: ./scripts/demo.sh"
+echo "Bootstrap complete."
+echo ""
+echo "Run the interactive demo:  ./scripts/demo.sh"
+echo "This will port-forward the dashboard to http://localhost:8090"
