@@ -39,12 +39,12 @@ FROM gcr.io/distroless/static-debian12 AS agent
 COPY --from=build-agent /bin/agent /
 ENTRYPOINT ["/agent"]
 
-FROM mcr.io/dotnet/sdk:8.0 AS build-identity-server
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build-identity-server
 WORKDIR /src
 COPY identityserver/ .
 RUN dotnet publish -c Release -o /app/publish
 
-FROM mcr.io/dotnet/aspnet:8.0 AS identity-server
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS identity-server
 WORKDIR /app
 COPY --from=build-identity-server /app/publish .
 ENTRYPOINT ["dotnet", "IdentityServer.dll"]
