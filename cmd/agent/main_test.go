@@ -3,10 +3,12 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/agent-platform/poc/internal/registry"
@@ -24,18 +26,31 @@ func (m *MockFetcher) FetchJWT(_ context.Context, audience string) (string, erro
 	return m.Tokens[audience], nil
 }
 
-func TestRunAgentSuccess(t *testing.T) {
-	regSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// newRegistryHandler returns an http.HandlerFunc that handles POST /v1/agents
+// (self-registration) and POST /v1/agents/{id}/events (event emission).
+func newRegistryHandler(agentID string, checkAuth bool, authToken string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" && r.URL.Path == "/v1/agents" {
-			if r.Header.Get("Authorization") != "Bearer reg-svid" {
+			if checkAuth && r.Header.Get("Authorization") != "Bearer "+authToken {
 				http.Error(w, "bad auth", http.StatusUnauthorized)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			json.NewEncoder(w).Encode(registry.AgentRecord{AgentID: "agent-test", Status: "active"})
+			json.NewEncoder(w).Encode(registry.AgentRecord{AgentID: agentID, Status: "active"})
+			return
 		}
-	}))
+		// Handle event POST calls: POST /v1/agents/{id}/events
+		if r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/v1/agents/") {
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
+		http.NotFound(w, r)
+	}
+}
+
+func TestRunAgentSuccess(t *testing.T) {
+	regSrv := httptest.NewServer(newRegistryHandler("agent-test", true, "reg-svid"))
 	defer regSrv.Close()
 
 	isSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -95,11 +110,7 @@ func TestRunAgentRegistryRejects(t *testing.T) {
 }
 
 func TestRunAgentSampleAPIForbidden(t *testing.T) {
-	regSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(registry.AgentRecord{AgentID: "agent-test", Status: "active"})
-	}))
+	regSrv := httptest.NewServer(newRegistryHandler("agent-test", false, ""))
 	defer regSrv.Close()
 
 	isSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -118,5 +129,93 @@ func TestRunAgentSampleAPIForbidden(t *testing.T) {
 		RegistryURL: regSrv.URL, ISTokenURL: isSrv.URL, SampleAPIURL: apiSrv.URL}
 	if err := runAgent(context.Background(), cfg, fetcher); err == nil {
 		t.Fatal("expected error on 403 from sample API")
+	}
+}
+
+func TestDecodeJWTPayload(t *testing.T) {
+	payload := map[string]any{"sub": "test"}
+	b, _ := json.Marshal(payload)
+	encoded := base64.RawURLEncoding.EncodeToString(b)
+	token := "header." + encoded + ".sig"
+
+	claims := decodeJWTPayload(token)
+	if claims == nil {
+		t.Fatal("expected non-nil claims")
+	}
+	if claims["sub"] != "test" {
+		t.Fatalf("expected sub=test, got %v", claims["sub"])
+	}
+}
+
+func TestDecodeJWTPayloadInvalid(t *testing.T) {
+	if decodeJWTPayload("notajwt") != nil {
+		t.Fatal("expected nil for non-JWT string")
+	}
+	if decodeJWTPayload("a.b") != nil {
+		t.Fatal("expected nil for two-part string")
+	}
+}
+
+func TestSelfRegisterReturnsAgentID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && r.URL.Path == "/v1/agents" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(registry.AgentRecord{
+				AgentID: "agent-abc", AgentType: "worker",
+				TenantID: "t1", UserID: "u1", Status: "active",
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	id, err := selfRegister(context.Background(), srv.URL, "svid-token", "worker", "t1", "u1")
+	if err != nil {
+		t.Fatalf("selfRegister: %v", err)
+	}
+	if id != "agent-abc" {
+		t.Fatalf("expected agent-abc, got %q", id)
+	}
+}
+
+func TestRunAgentWithTask(t *testing.T) {
+	regSrv := httptest.NewServer(newRegistryHandler("agent-test", false, ""))
+	defer regSrv.Close()
+
+	isSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"access_token": "task-access-token"})
+	}))
+	defer isSrv.Close()
+
+	apiSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" && r.URL.Path == "/task" {
+			var body map[string]string
+			json.NewDecoder(r.Body).Decode(&body)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{
+				"result":    "echo: " + body["task"],
+				"task":      body["task"],
+				"agentName": "agent-test",
+			})
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer apiSrv.Close()
+
+	fetcher := &MockFetcher{Tokens: map[string]string{
+		"registry": "reg-svid",
+		isSrv.URL: "is-svid",
+	}}
+	cfg := AgentConfig{
+		TenantID: "tenant-1", UserID: "user-1", AgentType: "worker",
+		RegistryURL: regSrv.URL, ISTokenURL: isSrv.URL, SampleAPIURL: apiSrv.URL,
+		Task: "hello",
+	}
+	if err := runAgent(context.Background(), cfg, fetcher); err != nil {
+		t.Fatalf("runAgent with task: %v", err)
 	}
 }
