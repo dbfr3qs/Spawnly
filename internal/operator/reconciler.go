@@ -148,10 +148,11 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
 			Containers: []corev1.Container{{
-				Name:      "agent",
-				Image:     tpl.Runtime.Image,
-				Env:       env,
-				Resources: resources,
+				Name:            "agent",
+				Image:           tpl.Runtime.Image,
+				ImagePullPolicy: corev1.PullIfNotPresent,
+				Env:             env,
+				Resources:       resources,
 				VolumeMounts: []corev1.VolumeMount{{
 					Name:      "spiffe-workload-api",
 					MountPath: "/spiffe-workload-api",
