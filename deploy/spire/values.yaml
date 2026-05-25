@@ -5,10 +5,10 @@ global:
 
 spire-server:
   replicaCount: 1
-  ca_subject:
+  caSubject:
     country: US
     organization: agent-platform-poc
-    common_name: cluster.local
+    commonName: cluster.local
 
 spire-agent:
   fullnameOverride: spire-agent
