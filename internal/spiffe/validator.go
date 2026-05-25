@@ -3,7 +3,9 @@ package spiffe
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"net/http"
 
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
@@ -19,8 +21,14 @@ type JWKSValidator struct {
 }
 
 func NewJWKSValidator(ctx context.Context, jwksURL string) (*JWKSValidator, error) {
+	// SPIRE OIDC provider uses a self-signed cert — skip verification for in-cluster fetches.
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+		},
+	}
 	cache := jwk.NewCache(ctx)
-	if err := cache.Register(jwksURL); err != nil {
+	if err := cache.Register(jwksURL, jwk.WithHTTPClient(httpClient)); err != nil {
 		return nil, err
 	}
 	if _, err := cache.Get(ctx, jwksURL); err != nil {
