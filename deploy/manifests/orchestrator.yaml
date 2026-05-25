@@ -23,6 +23,8 @@ spec:
               value: "spicedb:50051"
             - name: SPICEDB_PSK
               value: "poc-secret"
+            - name: REGISTRY_URL
+              value: "http://registry:8080"
           ports:
             - containerPort: 8080
 ---
