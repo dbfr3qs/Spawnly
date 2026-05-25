@@ -20,7 +20,6 @@ spec:
             - serve
             - --grpc-preshared-key=poc-secret
             - --datastore-engine=memory
-            - --grpc-no-tls
           ports:
             - containerPort: 50051
               name: grpc
