@@ -4,7 +4,7 @@ KIND_CLUSTER  := agent-platform
 IMAGE_TAG     := latest
 SERVICES      := operator orchestrator registry sample-api agent
 
-.PHONY: build test docker-build kind-up kind-down kind-load deploy bootstrap demo
+.PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo
 
 build:
 	@for svc in $(SERVICES); do \
@@ -34,7 +34,20 @@ kind-load: docker-build
 	done
 	kind load docker-image agent-identity-server:$(IMAGE_TAG) --name $(KIND_CLUSTER)
 
-deploy:
+spire:
+	helm repo add spiffe https://spiffe.github.io/helm-charts-hardened/ 2>/dev/null || true
+	helm repo update
+	helm upgrade --install spire-crds spiffe/spire-crds \
+		--namespace spire-system --create-namespace --wait
+	helm upgrade --install spire spiffe/spire \
+		--namespace spire-system \
+		--values deploy/spire/values.yaml \
+		--wait --timeout=5m
+	kubectl -n spire-system wait --for=condition=available \
+		deployment/spire-spiffe-oidc-discovery-provider --timeout=120s
+	kubectl apply -f deploy/spire/clusterspiffeid.yaml
+
+deploy: spire
 	kubectl apply -f deploy/crds/
 	kubectl apply -f deploy/manifests/
 
