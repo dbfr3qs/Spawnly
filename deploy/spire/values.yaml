@@ -15,7 +15,7 @@ spire-agent:
   logLevel: DEBUG
   server:
     address: spire-server
-    port: 8081
+    port: 443
   workloadAttestors:
     k8s:
       enabled: true
