@@ -12,7 +12,7 @@ public class AgentRegistryValidator : ICustomTokenRequestValidator
 
     public async Task ValidateAsync(CustomTokenRequestValidationContext context)
     {
-        var assertion = context.Result.ValidatedRequest.ClientAssertion?.Value;
+        var assertion = context.Result.ValidatedRequest.Raw?.Get("client_assertion");
         if (assertion is null) { Reject(context, "missing client_assertion"); return; }
 
         var handler = new JsonWebTokenHandler();
@@ -27,7 +27,7 @@ public class AgentRegistryValidator : ICustomTokenRequestValidator
         }
 
         // Set sub to the SPIFFE URI — this becomes the agent's identity in the access token
-        context.Result.ValidatedRequest.ClientClaims.Add(new Claim("sub", spiffeId));
+        context.Result.ValidatedRequest.ClientClaims?.Add(new Claim("sub", spiffeId));
     }
 
     private static void Reject(CustomTokenRequestValidationContext ctx, string desc)
