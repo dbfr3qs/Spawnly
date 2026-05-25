@@ -39,6 +39,13 @@ FROM gcr.io/distroless/static-debian12 AS agent
 COPY --from=build-agent /bin/agent /
 ENTRYPOINT ["/agent"]
 
+FROM builder AS build-dashboard
+RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/dashboard ./cmd/dashboard
+
+FROM gcr.io/distroless/static-debian12 AS dashboard
+COPY --from=build-dashboard /bin/dashboard /
+ENTRYPOINT ["/dashboard"]
+
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build-identity-server
 WORKDIR /src
 COPY identityserver/ .

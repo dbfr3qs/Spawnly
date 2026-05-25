@@ -2,7 +2,7 @@
 MODULE        := github.com/agent-platform/poc
 KIND_CLUSTER  := agent-platform
 IMAGE_TAG     := latest
-SERVICES      := operator orchestrator registry sample-api agent
+SERVICES      := operator orchestrator registry sample-api agent dashboard
 
 .PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo
 

@@ -1,0 +1,735 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agent Platform</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:          #1a1a2e;
+      --card:        #16213e;
+      --accent:      #0f3460;
+      --accent-hi:   #1a5276;
+      --border:      #1e3a5f;
+      --text:        #e0e6f0;
+      --text-dim:    #7f8fa6;
+      --green:       #27ae60;
+      --blue:        #2980b9;
+      --red:         #c0392b;
+      --grey:        #5d6d7e;
+      --indigo:      #4a5bc7;
+      --purple:      #8e44ad;
+      --orange:      #d35400;
+      --font:        'Segoe UI', system-ui, -apple-system, sans-serif;
+      --mono:        'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 14px;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: var(--accent);
+      border-bottom: 1px solid var(--border);
+      padding: 0 24px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      box-shadow: 0 2px 12px rgba(0,0,0,.4);
+    }
+
+    header h1 {
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: .5px;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    header h1::before {
+      content: '';
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #27ae60;
+      box-shadow: 0 0 8px #27ae60;
+    }
+
+    /* ── Buttons ── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 16px;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+      font-family: var(--font);
+      font-size: 13px;
+      font-weight: 500;
+      transition: filter .15s, transform .1s;
+    }
+    .btn:active { transform: scale(.97); }
+    .btn:hover  { filter: brightness(1.15); }
+
+    .btn-primary  { background: #27ae60; color: #fff; }
+    .btn-danger   { background: var(--red); color: #fff; }
+    .btn-ghost    { background: rgba(255,255,255,.08); color: var(--text); }
+    .btn-events   { background: var(--accent-hi); color: var(--text); }
+    .btn-events.active { background: #1a5276; outline: 1px solid #2980b9; }
+
+    /* ── Main content ── */
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 28px 20px;
+    }
+
+    .section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+
+    .section-title {
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-dim);
+    }
+
+    .agent-count {
+      font-size: 12px;
+      color: var(--text-dim);
+      background: var(--accent);
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+
+    /* ── Agent list ── */
+    #agent-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .agent-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      transition: border-color .2s;
+    }
+    .agent-card:hover { border-color: var(--accent-hi); }
+
+    .agent-row {
+      display: grid;
+      grid-template-columns: minmax(200px,1fr) 120px 110px 130px auto;
+      align-items: center;
+      gap: 16px;
+      padding: 14px 18px;
+    }
+
+    .agent-id {
+      font-family: var(--mono);
+      font-size: 13px;
+      color: #a8d8ff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .agent-meta {
+      color: var(--text-dim);
+      font-size: 12px;
+    }
+
+    .agent-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+    }
+
+    /* ── Badges ── */
+    .badge {
+      display: inline-block;
+      padding: 3px 9px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      white-space: nowrap;
+    }
+
+    .badge-active    { background: rgba(39,174,96,.2);  color: #2ecc71; border: 1px solid rgba(39,174,96,.4); }
+    .badge-completed { background: rgba(41,128,185,.2); color: #5dade2; border: 1px solid rgba(41,128,185,.4); }
+    .badge-failed    { background: rgba(192,57,43,.2);  color: #e74c3c; border: 1px solid rgba(192,57,43,.4); }
+    .badge-pending   { background: rgba(93,109,126,.2); color: #95a5a6; border: 1px solid rgba(93,109,126,.4); }
+
+    .src-badge {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      white-space: nowrap;
+    }
+    .src-ORCHESTRATOR { background: rgba(74,91,199,.25); color: #7b8fe8; border: 1px solid rgba(74,91,199,.4); }
+    .src-OPERATOR     { background: rgba(142,68,173,.25); color: #bb8fce; border: 1px solid rgba(142,68,173,.4); }
+    .src-REGISTRY     { background: rgba(39,174,96,.25); color: #58d68d; border: 1px solid rgba(39,174,96,.4); }
+    .src-AGENT        { background: rgba(211,84,0,.25);  color: #f0a500; border: 1px solid rgba(211,84,0,.4); }
+
+    /* ── Event panel ── */
+    .event-panel {
+      border-top: 1px solid var(--border);
+      padding: 14px 18px;
+      background: rgba(0,0,0,.2);
+    }
+
+    .event-panel-header {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-dim);
+      margin-bottom: 10px;
+    }
+
+    .event-list {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .event-item {
+      border-radius: 6px;
+      overflow: hidden;
+      border: 1px solid transparent;
+      transition: border-color .15s;
+    }
+    .event-item:hover { border-color: var(--border); }
+
+    .event-item details > summary {
+      display: grid;
+      grid-template-columns: 75px 120px 1fr;
+      align-items: center;
+      gap: 12px;
+      padding: 7px 10px;
+      cursor: pointer;
+      border-radius: 6px;
+      list-style: none;
+      transition: background .15s;
+    }
+    .event-item details > summary::-webkit-details-marker { display: none; }
+    .event-item details > summary:hover { background: rgba(255,255,255,.04); }
+    .event-item details[open] > summary { background: rgba(255,255,255,.06); }
+
+    .event-ts {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+
+    .event-type {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text);
+    }
+
+    .event-payload {
+      margin: 0 10px 8px 10px;
+      padding: 10px 14px;
+      background: rgba(0,0,0,.3);
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      font-family: var(--mono);
+      font-size: 11px;
+      color: #8bc4e8;
+      white-space: pre;
+      overflow-x: auto;
+      line-height: 1.6;
+    }
+
+    .no-events {
+      color: var(--text-dim);
+      font-size: 12px;
+      text-align: center;
+      padding: 16px 0;
+    }
+
+    /* ── Empty state ── */
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--text-dim);
+    }
+    .empty-state .icon {
+      font-size: 48px;
+      margin-bottom: 12px;
+      opacity: .4;
+    }
+    .empty-state p { font-size: 15px; }
+    .empty-state small { font-size: 12px; margin-top: 6px; display: block; }
+
+    /* ── Modal ── */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.7);
+      z-index: 200;
+      align-items: center;
+      justify-content: center;
+      backdrop-filter: blur(3px);
+    }
+    .modal-overlay.open { display: flex; }
+
+    .modal {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px 32px;
+      width: 420px;
+      box-shadow: 0 20px 60px rgba(0,0,0,.6);
+      animation: slide-in .2s ease;
+    }
+
+    @keyframes slide-in {
+      from { opacity: 0; transform: translateY(-12px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .modal h2 {
+      font-size: 17px;
+      font-weight: 600;
+      margin-bottom: 22px;
+      color: #fff;
+    }
+
+    .form-group {
+      margin-bottom: 16px;
+    }
+
+    .form-group label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .5px;
+      color: var(--text-dim);
+      margin-bottom: 6px;
+    }
+
+    .form-group input,
+    .form-group textarea {
+      width: 100%;
+      background: rgba(255,255,255,.06);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 13px;
+      padding: 8px 12px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .form-group input:focus,
+    .form-group textarea:focus {
+      border-color: #2980b9;
+    }
+    .form-group textarea {
+      min-height: 70px;
+      resize: vertical;
+    }
+
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 24px;
+    }
+
+    /* ── Toast ── */
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #1e3a5f;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 20px;
+      font-size: 13px;
+      color: var(--text);
+      box-shadow: 0 4px 20px rgba(0,0,0,.4);
+      z-index: 300;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity .2s, transform .2s;
+      pointer-events: none;
+    }
+    #toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--accent-hi); border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Agent Platform</h1>
+  <button class="btn btn-primary" id="open-modal-btn">+ New Agent</button>
+</header>
+
+<main>
+  <div class="section-header">
+    <span class="section-title">Running Agents</span>
+    <span class="agent-count" id="agent-count">0 agents</span>
+  </div>
+  <div id="agent-list"></div>
+</main>
+
+<!-- Spawn modal -->
+<div class="modal-overlay" id="spawn-modal">
+  <div class="modal">
+    <h2>Spawn New Agent</h2>
+    <div class="form-group">
+      <label>Agent Type</label>
+      <input id="f-type" type="text" value="worker" placeholder="worker" />
+    </div>
+    <div class="form-group">
+      <label>User ID</label>
+      <input id="f-user" type="text" value="user-1" placeholder="user-1" />
+    </div>
+    <div class="form-group">
+      <label>Tenant ID</label>
+      <input id="f-tenant" type="text" value="tenant-1" placeholder="tenant-1" />
+    </div>
+    <div class="form-group">
+      <label>Task</label>
+      <textarea id="f-task" placeholder="Describe the task…"></textarea>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="close-modal-btn">Cancel</button>
+      <button class="btn btn-primary" id="spawn-btn">Spawn</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<script>
+  'use strict';
+
+  const POLL_MS = 2000;
+
+  // agentId -> intervalId for per-agent event polling
+  let agentEventPollers = {};
+  // Set of agentIds with events panel open
+  let expandedAgents = new Set();
+  // agentId -> latest events array (for re-render without flicker)
+  let agentEvents = {};
+
+  // ── API helpers ──────────────────────────────────────────────────────────
+
+  async function fetchAgents() {
+    const res = await fetch('/api/agents');
+    if (!res.ok) return [];
+    return res.json();
+  }
+
+  async function fetchEvents(id) {
+    const res = await fetch(`/api/agents/${id}/events`);
+    if (!res.ok) return [];
+    return res.json();
+  }
+
+  async function spawnAgent(data) {
+    const res = await fetch('/api/spawn', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+  }
+
+  async function killAgent(id) {
+    const res = await fetch(`/api/agents/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(await res.text());
+  }
+
+  // ── Badge helpers ────────────────────────────────────────────────────────
+
+  function statusBadge(status) {
+    const s = (status || 'pending').toLowerCase();
+    const cls = {
+      active:    'badge-active',
+      completed: 'badge-completed',
+      failed:    'badge-failed',
+    }[s] || 'badge-pending';
+    return `<span class="badge ${cls}">${s}</span>`;
+  }
+
+  function sourceBadge(source) {
+    const s = (source || '').toUpperCase();
+    return `<span class="src-badge src-${s}">${s}</span>`;
+  }
+
+  // ── Event timeline ───────────────────────────────────────────────────────
+
+  function fmtTime(ts) {
+    if (!ts) return '—';
+    const d = new Date(ts);
+    if (isNaN(d)) return ts.slice(0,8);
+    return d.toLocaleTimeString('en-GB', { hour12: false });
+  }
+
+  function renderEvents(agentId, evts) {
+    const panel = document.getElementById(`events-${agentId}`);
+    if (!panel) return;
+
+    if (!evts || evts.length === 0) {
+      panel.innerHTML = `<div class="event-panel-header">Event Timeline</div>
+        <div class="no-events">No events yet — waiting for lifecycle…</div>`;
+      return;
+    }
+
+    const rows = evts.map(e => {
+      const payload = JSON.stringify(e.payload ?? {}, null, 2);
+      return `<div class="event-item">
+        <details>
+          <summary>
+            <span class="event-ts">${fmtTime(e.timestamp)}</span>
+            ${sourceBadge(e.source)}
+            <span class="event-type">${e.type || ''}</span>
+          </summary>
+          <pre class="event-payload">${escHtml(payload)}</pre>
+        </details>
+      </div>`;
+    }).join('');
+
+    panel.innerHTML = `<div class="event-panel-header">Event Timeline — ${evts.length} event${evts.length !== 1 ? 's' : ''}</div>
+      <div class="event-list">${rows}</div>`;
+  }
+
+  // ── Agent list ───────────────────────────────────────────────────────────
+
+  function renderAgents(agents) {
+    const list = document.getElementById('agent-list');
+    const count = document.getElementById('agent-count');
+
+    count.textContent = `${agents.length} agent${agents.length !== 1 ? 's' : ''}`;
+
+    if (agents.length === 0) {
+      list.innerHTML = `<div class="empty-state">
+        <div class="icon">🤖</div>
+        <p>No agents running</p>
+        <small>Click "New Agent" to spawn one</small>
+      </div>`;
+      return;
+    }
+
+    // Build new HTML, preserving expanded state
+    const html = agents.map(a => {
+      const isExpanded = expandedAgents.has(a.agentId);
+      const eventsPanel = isExpanded
+        ? `<div class="event-panel" id="events-${a.agentId}">
+             <div class="event-panel-header">Event Timeline</div>
+             <div class="no-events">Loading…</div>
+           </div>`
+        : '';
+
+      const isActive = (a.status || '').toLowerCase() === 'active';
+      const killBtn = isActive
+        ? `<button class="btn btn-danger" onclick="handleKill('${a.agentId}')">Kill</button>`
+        : '';
+
+      return `<div class="agent-card" id="card-${a.agentId}">
+        <div class="agent-row">
+          <span class="agent-id">${escHtml(a.agentId)}</span>
+          <span class="agent-meta">${escHtml(a.agentType || '—')}</span>
+          ${statusBadge(a.status)}
+          <span class="agent-meta">${escHtml(a.tenantId || '—')}</span>
+          <div class="agent-actions">
+            <button class="btn btn-events${isExpanded ? ' active' : ''}" onclick="toggleEvents('${a.agentId}')">
+              ${isExpanded ? '▲ Events' : '▼ Events'}
+            </button>
+            ${killBtn}
+          </div>
+        </div>
+        ${eventsPanel}
+      </div>`;
+    }).join('');
+
+    list.innerHTML = html;
+
+    // Re-fill event panels for already-expanded agents
+    for (const id of expandedAgents) {
+      if (agentEvents[id]) {
+        renderEvents(id, agentEvents[id]);
+      }
+    }
+  }
+
+  // ── Toggle events panel ──────────────────────────────────────────────────
+
+  function toggleEvents(agentId) {
+    if (expandedAgents.has(agentId)) {
+      // Close
+      expandedAgents.delete(agentId);
+      clearInterval(agentEventPollers[agentId]);
+      delete agentEventPollers[agentId];
+      delete agentEvents[agentId];
+    } else {
+      // Open
+      expandedAgents.add(agentId);
+      // Fetch immediately, then poll
+      fetchEvents(agentId).then(evts => {
+        agentEvents[agentId] = evts;
+        renderEvents(agentId, evts);
+      });
+      agentEventPollers[agentId] = setInterval(async () => {
+        const evts = await fetchEvents(agentId);
+        agentEvents[agentId] = evts;
+        renderEvents(agentId, evts);
+      }, POLL_MS);
+    }
+
+    // Trigger a re-render to update the button and panel visibility
+    fetchAgents().then(renderAgents);
+  }
+
+  // ── Kill handler ─────────────────────────────────────────────────────────
+
+  async function handleKill(agentId) {
+    try {
+      await killAgent(agentId);
+      showToast(`Agent ${agentId} terminated`);
+      // Tidy up any open event poller
+      if (agentEventPollers[agentId]) {
+        clearInterval(agentEventPollers[agentId]);
+        delete agentEventPollers[agentId];
+      }
+      expandedAgents.delete(agentId);
+    } catch (e) {
+      showToast(`Error: ${e.message}`, true);
+    }
+  }
+
+  // ── Spawn modal ──────────────────────────────────────────────────────────
+
+  document.getElementById('open-modal-btn').addEventListener('click', () => {
+    document.getElementById('spawn-modal').classList.add('open');
+    document.getElementById('f-task').focus();
+  });
+
+  document.getElementById('close-modal-btn').addEventListener('click', closeModal);
+
+  document.getElementById('spawn-modal').addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeModal();
+  });
+
+  function closeModal() {
+    document.getElementById('spawn-modal').classList.remove('open');
+  }
+
+  document.getElementById('spawn-btn').addEventListener('click', async () => {
+    const agentType = document.getElementById('f-type').value.trim() || 'worker';
+    const userId    = document.getElementById('f-user').value.trim() || 'user-1';
+    const tenantId  = document.getElementById('f-tenant').value.trim() || 'tenant-1';
+    const task      = document.getElementById('f-task').value.trim();
+
+    if (!task) {
+      document.getElementById('f-task').focus();
+      return;
+    }
+
+    const btn = document.getElementById('spawn-btn');
+    btn.disabled = true;
+    btn.textContent = 'Spawning…';
+
+    try {
+      const result = await spawnAgent({ agentType, userId, tenantId, task });
+      showToast(`Spawned: ${result.workloadName || 'agent'}`);
+      closeModal();
+      document.getElementById('f-task').value = '';
+      // Immediate refresh
+      const agents = await fetchAgents();
+      renderAgents(agents);
+    } catch (e) {
+      showToast(`Spawn failed: ${e.message}`, true);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Spawn';
+    }
+  });
+
+  // ── Toast ────────────────────────────────────────────────────────────────
+
+  let toastTimer = null;
+
+  function showToast(msg, isError = false) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.style.background = isError ? '#4a1010' : '#1e3a5f';
+    t.style.borderColor = isError ? '#c0392b' : 'var(--border)';
+    t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
+  }
+
+  // ── Utility ──────────────────────────────────────────────────────────────
+
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // ── Main poll loop ───────────────────────────────────────────────────────
+
+  async function poll() {
+    try {
+      const agents = await fetchAgents();
+      renderAgents(agents);
+    } catch (_) { /* network hiccup — ignore */ }
+  }
+
+  // Initial load + recurring poll
+  poll();
+  setInterval(poll, POLL_MS);
+
+  // Keyboard shortcut: Escape closes modal
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeModal();
+  });
+</script>
+</body>
+</html>

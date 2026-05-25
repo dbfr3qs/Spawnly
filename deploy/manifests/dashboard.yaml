@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard
+  template:
+    metadata:
+      labels:
+        app: dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: agent-dashboard:latest
+          imagePullPolicy: Never
+          env:
+            - name: ORCHESTRATOR_URL
+              value: "http://orchestrator:8080"
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard
+  namespace: default
+spec:
+  selector:
+    app: dashboard
+  ports:
+    - port: 8080
+      targetPort: 8080
