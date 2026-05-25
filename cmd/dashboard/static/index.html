@@ -447,51 +447,41 @@
 
   const POLL_MS = 2000;
 
-  // agentId -> intervalId for per-agent event polling
-  let agentEventPollers = {};
-  // Set of agentIds with events panel open
-  let expandedAgents = new Set();
-  // agentId -> latest events array (for re-render without flicker)
-  let agentEvents = {};
+  let agentEventPollers  = {};   // agentId -> intervalId
+  let expandedAgents     = new Set();
+  let renderedEventCount = {};   // agentId -> number of events already in the DOM
 
   // ── API helpers ──────────────────────────────────────────────────────────
 
   async function fetchAgents() {
-    const res = await fetch('/api/agents');
-    if (!res.ok) return [];
-    return res.json();
+    try { const r = await fetch('/api/agents'); return r.ok ? r.json() : []; }
+    catch { return []; }
   }
 
   async function fetchEvents(id) {
-    const res = await fetch(`/api/agents/${id}/events`);
-    if (!res.ok) return [];
-    return res.json();
+    try { const r = await fetch(`/api/agents/${id}/events`); return r.ok ? r.json() : []; }
+    catch { return []; }
   }
 
   async function spawnAgent(data) {
-    const res = await fetch('/api/spawn', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    const r = await fetch('/api/spawn', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify(data),
     });
-    if (!res.ok) throw new Error(await res.text());
-    return res.json();
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
   }
 
   async function killAgent(id) {
-    const res = await fetch(`/api/agents/${id}`, { method: 'DELETE' });
-    if (!res.ok) throw new Error(await res.text());
+    const r = await fetch(`/api/agents/${id}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(await r.text());
   }
 
   // ── Badge helpers ────────────────────────────────────────────────────────
 
   function statusBadge(status) {
     const s = (status || 'pending').toLowerCase();
-    const cls = {
-      active:    'badge-active',
-      completed: 'badge-completed',
-      failed:    'badge-failed',
-    }[s] || 'badge-pending';
+    const cls = {active:'badge-active', completed:'badge-completed', failed:'badge-failed'}[s] || 'badge-pending';
     return `<span class="badge ${cls}">${s}</span>`;
   }
 
@@ -500,128 +490,149 @@
     return `<span class="src-badge src-${s}">${s}</span>`;
   }
 
-  // ── Event timeline ───────────────────────────────────────────────────────
-
   function fmtTime(ts) {
     if (!ts) return '—';
     const d = new Date(ts);
-    if (isNaN(d)) return ts.slice(0,8);
-    return d.toLocaleTimeString('en-GB', { hour12: false });
+    return isNaN(d) ? ts.slice(0,8) : d.toLocaleTimeString('en-GB', {hour12:false});
   }
 
-  function renderEvents(agentId, evts) {
-    const panel = document.getElementById(`events-${agentId}`);
-    if (!panel) return;
+  function escHtml(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
 
-    if (!evts || evts.length === 0) {
-      panel.innerHTML = `<div class="event-panel-header">Event Timeline</div>
-        <div class="no-events">No events yet — waiting for lifecycle…</div>`;
-      return;
-    }
+  // ── Build a fresh agent card element (first appearance only) ─────────────
 
-    const rows = evts.map(e => {
-      const payload = JSON.stringify(e.payload ?? {}, null, 2);
-      return `<div class="event-item">
-        <details>
-          <summary>
-            <span class="event-ts">${fmtTime(e.timestamp)}</span>
-            ${sourceBadge(e.source)}
-            <span class="event-type">${e.type || ''}</span>
-          </summary>
-          <pre class="event-payload">${escHtml(payload)}</pre>
-        </details>
+  function buildCard(a) {
+    const card = document.createElement('div');
+    card.className = 'agent-card';
+    card.id = `card-${a.agentId}`;
+    const isActive = (a.status || '').toLowerCase() === 'active';
+    card.innerHTML = `
+      <div class="agent-row">
+        <span class="agent-id">${escHtml(a.agentId)}</span>
+        <span class="agent-meta">${escHtml(a.agentType || '—')}</span>
+        <span class="status-wrap">${statusBadge(a.status)}</span>
+        <span class="agent-meta">${escHtml(a.tenantId || '—')}</span>
+        <div class="agent-actions">
+          <button class="btn btn-events" id="evtbtn-${a.agentId}"
+                  onclick="toggleEvents('${a.agentId}')">▼ Events</button>
+          <span id="killwrap-${a.agentId}">
+            ${isActive ? `<button class="btn btn-danger" onclick="handleKill('${a.agentId}')">Kill</button>` : ''}
+          </span>
+        </div>
       </div>`;
-    }).join('');
-
-    panel.innerHTML = `<div class="event-panel-header">Event Timeline — ${evts.length} event${evts.length !== 1 ? 's' : ''}</div>
-      <div class="event-list">${rows}</div>`;
+    return card;
   }
 
-  // ── Agent list ───────────────────────────────────────────────────────────
+  // ── Surgical agent list update — never rebuilds existing cards ───────────
 
-  function renderAgents(agents) {
-    const list = document.getElementById('agent-list');
-    const count = document.getElementById('agent-count');
-
-    count.textContent = `${agents.length} agent${agents.length !== 1 ? 's' : ''}`;
+  function updateAgentList(agents) {
+    const list    = document.getElementById('agent-list');
+    const countEl = document.getElementById('agent-count');
+    countEl.textContent = `${agents.length} agent${agents.length !== 1 ? 's' : ''}`;
 
     if (agents.length === 0) {
-      list.innerHTML = `<div class="empty-state">
-        <div class="icon">🤖</div>
-        <p>No agents running</p>
-        <small>Click "New Agent" to spawn one</small>
-      </div>`;
+      if (!list.querySelector('.empty-state')) {
+        list.innerHTML = `<div class="empty-state">
+          <div class="icon">🤖</div><p>No agents running</p>
+          <small>Click "New Agent" to spawn one</small></div>`;
+      }
       return;
     }
 
-    // Build new HTML, preserving expanded state
-    const html = agents.map(a => {
-      const isExpanded = expandedAgents.has(a.agentId);
-      const eventsPanel = isExpanded
-        ? `<div class="event-panel" id="events-${a.agentId}">
-             <div class="event-panel-header">Event Timeline</div>
-             <div class="no-events">Loading…</div>
-           </div>`
-        : '';
+    const empty = list.querySelector('.empty-state');
+    if (empty) list.innerHTML = '';
 
-      const isActive = (a.status || '').toLowerCase() === 'active';
-      const killBtn = isActive
-        ? `<button class="btn btn-danger" onclick="handleKill('${a.agentId}')">Kill</button>`
-        : '';
+    for (const a of agents) {
+      const existing = document.getElementById(`card-${a.agentId}`);
+      if (!existing) {
+        list.appendChild(buildCard(a));
+      } else {
+        // Only patch the parts that can change: status badge + kill button
+        const sw = existing.querySelector('.status-wrap');
+        if (sw && sw.innerHTML !== statusBadge(a.status)) sw.innerHTML = statusBadge(a.status);
 
-      return `<div class="agent-card" id="card-${a.agentId}">
-        <div class="agent-row">
-          <span class="agent-id">${escHtml(a.agentId)}</span>
-          <span class="agent-meta">${escHtml(a.agentType || '—')}</span>
-          ${statusBadge(a.status)}
-          <span class="agent-meta">${escHtml(a.tenantId || '—')}</span>
-          <div class="agent-actions">
-            <button class="btn btn-events${isExpanded ? ' active' : ''}" onclick="toggleEvents('${a.agentId}')">
-              ${isExpanded ? '▲ Events' : '▼ Events'}
-            </button>
-            ${killBtn}
-          </div>
-        </div>
-        ${eventsPanel}
-      </div>`;
-    }).join('');
-
-    list.innerHTML = html;
-
-    // Re-fill event panels for already-expanded agents
-    for (const id of expandedAgents) {
-      if (agentEvents[id]) {
-        renderEvents(id, agentEvents[id]);
+        const kw = document.getElementById(`killwrap-${a.agentId}`);
+        if (kw) {
+          const isActive  = (a.status || '').toLowerCase() === 'active';
+          const hasButton = !!kw.querySelector('button');
+          if (isActive && !hasButton)
+            kw.innerHTML = `<button class="btn btn-danger" onclick="handleKill('${a.agentId}')">Kill</button>`;
+          else if (!isActive && hasButton)
+            kw.innerHTML = '';
+        }
       }
     }
   }
 
-  // ── Toggle events panel ──────────────────────────────────────────────────
+  // ── Append-only event update — never touches already-rendered rows ────────
+
+  function updateEventPanel(agentId, evts) {
+    const panel = document.getElementById(`events-${agentId}`);
+    if (!panel) return;
+
+    const hdr = panel.querySelector('.event-panel-header');
+    if (hdr) hdr.textContent = `Event Timeline — ${evts.length} event${evts.length !== 1 ? 's' : ''}`;
+
+    let listEl = panel.querySelector('.event-list');
+    if (!listEl) {
+      // First events arriving — replace placeholder
+      panel.innerHTML = `<div class="event-panel-header">Event Timeline — ${evts.length} event${evts.length !== 1 ? 's' : ''}</div>
+        <div class="event-list"></div>`;
+      listEl = panel.querySelector('.event-list');
+    }
+
+    const already = renderedEventCount[agentId] || 0;
+    for (const e of evts.slice(already)) {
+      const payload = JSON.stringify(e.payload ?? {}, null, 2);
+      const item = document.createElement('div');
+      item.className = 'event-item';
+      item.innerHTML = `<details>
+        <summary>
+          <span class="event-ts">${fmtTime(e.timestamp)}</span>
+          ${sourceBadge(e.source)}
+          <span class="event-type">${escHtml(e.type || '')}</span>
+        </summary>
+        <pre class="event-payload">${escHtml(payload)}</pre>
+      </details>`;
+      listEl.appendChild(item);
+    }
+    renderedEventCount[agentId] = evts.length;
+  }
+
+  // ── Toggle events panel — direct DOM, no full re-render ──────────────────
 
   function toggleEvents(agentId) {
+    const card = document.getElementById(`card-${agentId}`);
+    const btn  = document.getElementById(`evtbtn-${agentId}`);
+    if (!card || !btn) return;
+
     if (expandedAgents.has(agentId)) {
-      // Close
       expandedAgents.delete(agentId);
       clearInterval(agentEventPollers[agentId]);
       delete agentEventPollers[agentId];
-      delete agentEvents[agentId];
+      delete renderedEventCount[agentId];
+      const panel = document.getElementById(`events-${agentId}`);
+      if (panel) panel.remove();
+      btn.textContent = '▼ Events';
+      btn.classList.remove('active');
     } else {
-      // Open
       expandedAgents.add(agentId);
-      // Fetch immediately, then poll
-      fetchEvents(agentId).then(evts => {
-        agentEvents[agentId] = evts;
-        renderEvents(agentId, evts);
-      });
+      btn.textContent = '▲ Events';
+      btn.classList.add('active');
+
+      const panel = document.createElement('div');
+      panel.className = 'event-panel';
+      panel.id = `events-${agentId}`;
+      panel.innerHTML = `<div class="event-panel-header">Event Timeline</div>
+        <div class="no-events">Loading…</div>`;
+      card.appendChild(panel);
+
+      fetchEvents(agentId).then(evts => updateEventPanel(agentId, evts));
       agentEventPollers[agentId] = setInterval(async () => {
-        const evts = await fetchEvents(agentId);
-        agentEvents[agentId] = evts;
-        renderEvents(agentId, evts);
+        updateEventPanel(agentId, await fetchEvents(agentId));
       }, POLL_MS);
     }
-
-    // Trigger a re-render to update the button and panel visibility
-    fetchAgents().then(renderAgents);
   }
 
   // ── Kill handler ─────────────────────────────────────────────────────────
@@ -630,12 +641,12 @@
     try {
       await killAgent(agentId);
       showToast(`Agent ${agentId} terminated`);
-      // Tidy up any open event poller
-      if (agentEventPollers[agentId]) {
-        clearInterval(agentEventPollers[agentId]);
-        delete agentEventPollers[agentId];
-      }
+      clearInterval(agentEventPollers[agentId]);
+      delete agentEventPollers[agentId];
       expandedAgents.delete(agentId);
+      delete renderedEventCount[agentId];
+      const panel = document.getElementById(`events-${agentId}`);
+      if (panel) panel.remove();
     } catch (e) {
       showToast(`Error: ${e.message}`, true);
     }
@@ -647,9 +658,7 @@
     document.getElementById('spawn-modal').classList.add('open');
     document.getElementById('f-task').focus();
   });
-
   document.getElementById('close-modal-btn').addEventListener('click', closeModal);
-
   document.getElementById('spawn-modal').addEventListener('click', e => {
     if (e.target === e.currentTarget) closeModal();
   });
@@ -663,73 +672,44 @@
     const userId    = document.getElementById('f-user').value.trim() || 'user-1';
     const tenantId  = document.getElementById('f-tenant').value.trim() || 'tenant-1';
     const task      = document.getElementById('f-task').value.trim();
-
-    if (!task) {
-      document.getElementById('f-task').focus();
-      return;
-    }
+    if (!task) { document.getElementById('f-task').focus(); return; }
 
     const btn = document.getElementById('spawn-btn');
-    btn.disabled = true;
-    btn.textContent = 'Spawning…';
-
+    btn.disabled = true; btn.textContent = 'Spawning…';
     try {
       const result = await spawnAgent({ agentType, userId, tenantId, task });
       showToast(`Spawned: ${result.workloadName || 'agent'}`);
       closeModal();
       document.getElementById('f-task').value = '';
-      // Immediate refresh
-      const agents = await fetchAgents();
-      renderAgents(agents);
     } catch (e) {
       showToast(`Spawn failed: ${e.message}`, true);
     } finally {
-      btn.disabled = false;
-      btn.textContent = 'Spawn';
+      btn.disabled = false; btn.textContent = 'Spawn';
     }
   });
 
   // ── Toast ────────────────────────────────────────────────────────────────
 
   let toastTimer = null;
-
   function showToast(msg, isError = false) {
     const t = document.getElementById('toast');
     t.textContent = msg;
-    t.style.background = isError ? '#4a1010' : '#1e3a5f';
-    t.style.borderColor = isError ? '#c0392b' : 'var(--border)';
+    t.style.background   = isError ? '#4a1010' : '#1e3a5f';
+    t.style.borderColor  = isError ? '#c0392b' : 'var(--border)';
     t.classList.add('show');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => t.classList.remove('show'), 3000);
   }
 
-  // ── Utility ──────────────────────────────────────────────────────────────
-
-  function escHtml(str) {
-    return String(str)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
-  }
-
   // ── Main poll loop ───────────────────────────────────────────────────────
 
   async function poll() {
-    try {
-      const agents = await fetchAgents();
-      renderAgents(agents);
-    } catch (_) { /* network hiccup — ignore */ }
+    try { updateAgentList(await fetchAgents()); } catch (_) {}
   }
 
-  // Initial load + recurring poll
   poll();
   setInterval(poll, POLL_MS);
-
-  // Keyboard shortcut: Escape closes modal
-  document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') closeModal();
-  });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 </script>
 </body>
 </html>

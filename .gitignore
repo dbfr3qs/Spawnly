@@ -1,5 +1,11 @@
-# Go
+# Go binaries (root-level and bin/)
 /agent
+/operator
+/orchestrator
+/registry
+/sample-api
+/dashboard
+/bin/
 *.test
 vendor/
 
@@ -19,6 +25,7 @@ identityserver/.idea/
 
 # Claude Code worktrees
 .claude/worktrees/
+.claude/
 
 # Kubernetes / local dev
 kubeconfig
