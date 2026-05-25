@@ -1,6 +1,6 @@
 module github.com/agent-platform/poc
 
-go 1.25.8
+go 1.25.0
 
 require (
 	github.com/authzed/authzed-go v1.2.0
