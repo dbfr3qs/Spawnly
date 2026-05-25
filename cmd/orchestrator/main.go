@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -184,8 +185,16 @@ func main() {
 		log.Fatalf("spicedb connect: %v", err)
 	}
 
-	if err := sdb.WriteSchema(context.Background(), spicedbSchema); err != nil {
-		log.Printf("warn: WriteSchema: %v (schema may already exist)", err)
+	// Retry schema write — SpiceDB may not be ready immediately on first start.
+	for i := 1; i <= 10; i++ {
+		if err := sdb.WriteSchema(context.Background(), spicedbSchema); err == nil {
+			break
+		} else if i == 10 {
+			log.Fatalf("WriteSchema failed after 10 attempts: %v", err)
+		} else {
+			log.Printf("WriteSchema attempt %d/10 failed, retrying: %v", i, err)
+			time.Sleep(3 * time.Second)
+		}
 	}
 
 	k8s, err := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme})
