@@ -34,7 +34,8 @@ public class SpireClientSecretValidator : IClientSecretValidator
         var client = await _clients.FindClientByIdAsync(clientId);
         if (client is null) return Fail();
 
-        var http = _httpFactory.CreateClient();
+        // SPIRE OIDC provider uses a self-signed cert — use named client with TLS bypass.
+        var http = _httpFactory.CreateClient("spire");
         var jwksJson = await http.GetStringAsync(_spireJwksUrl);
         var jwks = new JsonWebKeySet(jwksJson);
 

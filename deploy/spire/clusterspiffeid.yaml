@@ -3,6 +3,7 @@ kind: ClusterSPIFFEID
 metadata:
   name: agent-workloads
 spec:
+  className: "spire-system-spire"
   spiffeIDTemplate: 'spiffe://cluster.local/agent/{{ index .PodMeta.Labels "agent-id" }}'
   podSelector:
     matchLabels:

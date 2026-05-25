@@ -15,6 +15,9 @@ public static class Config
                 ClientId = "worker",
                 AllowedGrantTypes = GrantTypes.ClientCredentials,
                 RequireClientSecret = true,
+                // Placeholder so Duende's config validator is satisfied;
+                // actual auth is via SpireClientSecretValidator (client_assertion JWT-SVID).
+                ClientSecrets = { new Secret("placeholder".Sha256()) },
                 AlwaysSendClientClaims = true,
                 ClientClaimsPrefix = "",
                 AllowedScopes = { "sample-api" },

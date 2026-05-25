@@ -121,7 +121,7 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 		{Name: "REGISTRY_URL", Value: r.RegistryURL},
 		{Name: "IS_TOKEN_URL", Value: r.ISTokenURL},
 		{Name: "SAMPLE_API_URL", Value: r.SampleAPIURL},
-		{Name: "SPIFFE_ENDPOINT_SOCKET", Value: "unix:///spiffe-workload-api/agent.sock"},
+		{Name: "SPIFFE_ENDPOINT_SOCKET", Value: "unix:///spiffe-workload-api/spire-agent.sock"},
 	}
 	for k, v := range tpl.Runtime.EnvDefaults {
 		env = append(env, corev1.EnvVar{Name: k, Value: v})

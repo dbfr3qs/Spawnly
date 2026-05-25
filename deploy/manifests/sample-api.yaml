@@ -23,7 +23,7 @@ spec:
             - name: SPICEDB_PSK
               value: "poc-secret"
             - name: IS_ISSUER
-              value: "http://identity-server"
+              value: "http://identity-server:8080"
             - name: IS_JWKS_URL
               value: "http://identity-server:8080/.well-known/openid-configuration/jwks"
           ports:

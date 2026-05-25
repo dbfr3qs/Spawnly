@@ -21,7 +21,7 @@ spec:
             - name: ASPNETCORE_URLS
               value: "http://+:8080"
             - name: SPIRE_JWKS_URL
-              value: "http://spire-spiffe-oidc-discovery-provider.spire-system/.well-known/jwks.json"
+              value: "https://spire-spiffe-oidc-discovery-provider.spire-system/keys"
             - name: REGISTRY_URL
               value: "http://registry:8080"
           ports:

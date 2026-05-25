@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spiffe/go-spiffe/v2/svid/jwtsvid"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
@@ -25,14 +26,21 @@ type SVIDFetcher interface {
 type workloadFetcher struct{ socketPath string }
 
 func (f *workloadFetcher) FetchJWT(ctx context.Context, audience string) (string, error) {
-	svid, err := workloadapi.FetchJWTSVID(ctx,
-		jwtsvid.Params{Audience: audience},
-		workloadapi.WithAddr(f.socketPath),
-	)
-	if err != nil {
-		return "", err
+	// SPIRE may not have created the registration entry yet — retry for up to 30s.
+	var svid *jwtsvid.SVID
+	var err error
+	for i := 0; i < 10; i++ {
+		svid, err = workloadapi.FetchJWTSVID(ctx,
+			jwtsvid.Params{Audience: audience},
+			workloadapi.WithAddr(f.socketPath),
+		)
+		if err == nil {
+			return svid.Marshal(), nil
+		}
+		log.Printf("waiting for SPIRE identity (attempt %d/10): %v", i+1, err)
+		time.Sleep(3 * time.Second)
 	}
-	return svid.Marshal(), nil
+	return "", err
 }
 
 type AgentConfig struct {
