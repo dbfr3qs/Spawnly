@@ -165,7 +165,7 @@ func main() {
 		agentType = "worker"
 	}
 	if socketPath == "" {
-		socketPath = "unix:///spiffe-workload-api/agent.sock"
+		socketPath = "unix:///spiffe-workload-api/spire-agent.sock"
 	}
 
 	cfg := AgentConfig{
