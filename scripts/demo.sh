@@ -2,6 +2,10 @@
 # scripts/demo.sh
 set -euo pipefail
 
+echo "==> Cleaning up any stale port-forwards..."
+pkill -f "kubectl port-forward" 2>/dev/null || true
+sleep 1
+
 echo "==> Port-forwarding orchestrator..."
 kubectl port-forward svc/orchestrator 8080:8080 &
 PF_ORCH=$!
