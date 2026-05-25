@@ -10,6 +10,7 @@ type AgentWorkloadSpec struct {
 	UserID    string `json:"userId"`
 	TenantID  string `json:"tenantId"`
 	Lifecycle string `json:"lifecycle"` // short-lived | long-lived
+	Task      string `json:"task,omitempty"`
 }
 
 type AgentWorkloadStatus struct {

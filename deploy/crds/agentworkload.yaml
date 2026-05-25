@@ -34,6 +34,8 @@ spec:
                 lifecycle:
                   type: string
                   enum: [short-lived, long-lived]
+                task:
+                  type: string
             status:
               type: object
               properties:
