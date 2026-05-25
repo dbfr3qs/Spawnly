@@ -1,0 +1,25 @@
+# Go
+/agent
+*.test
+vendor/
+
+# .NET build output
+identityserver/bin/
+identityserver/obj/
+dotnet/
+
+# IDE
+identityserver/.idea/
+.idea/
+*.suo
+*.user
+
+# devcontainer generated
+.devcontainer/devcontainer-lock.json
+
+# Claude Code worktrees
+.claude/worktrees/
+
+# Kubernetes / local dev
+kubeconfig
+*.kubeconfig
