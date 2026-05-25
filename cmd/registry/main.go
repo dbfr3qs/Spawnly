@@ -4,13 +4,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/agent-platform/poc/internal/events"
 	"github.com/agent-platform/poc/internal/registry"
 	"github.com/agent-platform/poc/internal/spicedb"
 	"github.com/agent-platform/poc/internal/spiffe"
@@ -20,12 +23,14 @@ type store struct {
 	mu        sync.RWMutex
 	templates map[string]registry.AgentTemplate
 	agents    map[string]registry.AgentRecord
+	events    map[string][]events.Event
 }
 
 func newStore() *store {
 	return &store{
 		templates: map[string]registry.AgentTemplate{},
 		agents:    map[string]registry.AgentRecord{},
+		events:    map[string][]events.Event{},
 	}
 }
 
@@ -54,6 +59,33 @@ func (s *store) getAgent(id string) registry.AgentRecord {
 	return s.agents[id]
 }
 
+func (s *store) appendEvent(agentID string, e events.Event) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e.ID = fmt.Sprintf("%d", time.Now().UnixNano())
+	e.Timestamp = time.Now()
+	s.events[agentID] = append(s.events[agentID], e)
+}
+
+func (s *store) getEvents(agentID string) []events.Event {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	src := s.events[agentID]
+	out := make([]events.Event, len(src))
+	copy(out, src)
+	return out
+}
+
+func (s *store) listAgents() []registry.AgentRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]registry.AgentRecord, 0, len(s.agents))
+	for _, r := range s.agents {
+		out = append(out, r)
+	}
+	return out
+}
+
 func (s *store) updateAgent(id, status string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -64,6 +96,11 @@ func (s *store) updateAgent(id, status string) bool {
 	r.Status = status
 	s.agents[id] = r
 	return true
+}
+
+func mustMarshal(v any) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return b
 }
 
 func substitute(tmpl, agentID, tenantID string) string {
@@ -133,7 +170,17 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 			Status:    "active",
 		}
 		s.registerAgent(rec)
+		s.appendEvent(agentID, events.Event{
+			Source:  events.SourceRegistry,
+			Type:    "registry_record_created",
+			Payload: mustMarshal(rec),
+		})
 
+		type relTuple struct {
+			Resource string `json:"resource"`
+			Relation string `json:"relation"`
+			Subject  string `json:"subject"`
+		}
 		for _, rel := range tpl.AuthZ.SpiceDBRelations {
 			res := substitute(rel.Resource, agentID, req.TenantID)
 			sub := substitute(rel.Subject, agentID, req.TenantID)
@@ -141,10 +188,54 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 				log.Printf("spicedb write error: %v", err)
 			}
 		}
+		tuples := make([]relTuple, len(tpl.AuthZ.SpiceDBRelations))
+		for i, rel := range tpl.AuthZ.SpiceDBRelations {
+			tuples[i] = relTuple{
+				Resource: substitute(rel.Resource, agentID, req.TenantID),
+				Relation: rel.Relation,
+				Subject:  substitute(rel.Subject, agentID, req.TenantID),
+			}
+		}
+		s.appendEvent(agentID, events.Event{
+			Source:  events.SourceRegistry,
+			Type:    "spicedb_relations_written",
+			Payload: mustMarshal(tuples),
+		})
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(rec)
+	})
+
+	mux.HandleFunc("GET /v1/agents", func(w http.ResponseWriter, r *http.Request) {
+		agents := s.listAgents()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(agents)
+	})
+
+	mux.HandleFunc("POST /v1/agents/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+		agentID := r.PathValue("id")
+		var e events.Event
+		if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		s.appendEvent(agentID, e)
+		evts := s.getEvents(agentID)
+		stored := evts[len(evts)-1]
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(stored)
+	})
+
+	mux.HandleFunc("GET /v1/agents/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+		agentID := r.PathValue("id")
+		evts := s.getEvents(agentID)
+		if evts == nil {
+			evts = []events.Event{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(evts)
 	})
 
 	mux.HandleFunc("GET /v1/agents/", func(w http.ResponseWriter, r *http.Request) {
