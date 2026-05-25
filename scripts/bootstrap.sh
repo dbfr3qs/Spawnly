@@ -8,6 +8,14 @@ IMAGE_TAG="latest"
 echo "==> Creating Kind cluster..."
 kind create cluster --name "$KIND_CLUSTER" --config deploy/kind/cluster.yaml
 
+echo "==> Connecting devcontainer to Kind network..."
+CONTAINER_ID=$(cat /etc/hostname)
+docker network connect kind "$CONTAINER_ID" 2>/dev/null || true
+# Point kubectl at the control plane container IP (127.0.0.1 is unreachable from inside a devcontainer)
+CONTROL_PLANE_IP=$(docker inspect "${KIND_CLUSTER}-control-plane" \
+  --format '{{(index .NetworkSettings.Networks "kind").IPAddress}}')
+kubectl config set-cluster "kind-${KIND_CLUSTER}" --server="https://${CONTROL_PLANE_IP}:6443"
+
 echo "==> Building Docker images..."
 for svc in operator orchestrator registry sample-api agent; do
   docker build --target "$svc" -t "agent-$svc:$IMAGE_TAG" .
