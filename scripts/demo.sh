@@ -13,7 +13,7 @@ RESPONSE=$(curl -sf -X POST http://localhost:8080/spawn \
   -d '{"userId":"user-1","tenantId":"tenant-1","agentType":"worker"}')
 
 echo "Spawn response: $RESPONSE"
-AGENT_ID=$(echo "$RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin)['workloadName'])")
+AGENT_ID=$(echo "$RESPONSE" | jq -r '.workloadName')
 echo "Workload name: $AGENT_ID"
 
 echo ""
@@ -44,7 +44,7 @@ kubectl port-forward svc/registry 8081:8080 &
 PF_REG=$!
 sleep 2
 
-curl -sf http://localhost:8081/v1/agents/$AGENT_ID | python3 -m json.tool 2>/dev/null || echo "(agent record not found)"
+curl -sf http://localhost:8081/v1/agents/$AGENT_ID | jq . 2>/dev/null || echo "(agent record not found)"
 
 kill $PF_ORCH $PF_REG 2>/dev/null || true
 
