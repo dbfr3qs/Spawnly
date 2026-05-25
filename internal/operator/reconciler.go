@@ -3,6 +3,7 @@ package operator
 
 import (
 	"context"
+	"encoding/json"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -16,6 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentv1alpha1 "github.com/agent-platform/poc/api/v1alpha1"
+	"github.com/agent-platform/poc/internal/events"
 	"github.com/agent-platform/poc/internal/registry"
 )
 
@@ -28,6 +30,12 @@ type AgentWorkloadReconciler struct {
 	RegistryURL  string
 	ISTokenURL   string
 	SampleAPIURL string
+	EventsClient events.Client // may be nil
+}
+
+func mustMarshal(v any) json.RawMessage {
+	b, _ := json.Marshal(v)
+	return b
 }
 
 func (r *AgentWorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -71,6 +79,18 @@ func (r *AgentWorkloadReconciler) handleNew(ctx context.Context, aw *agentv1alph
 	}
 	if err := r.Create(ctx, pod); err != nil && !apierrors.IsAlreadyExists(err) {
 		return ctrl.Result{}, err
+	}
+	if r.EventsClient != nil {
+		_ = r.EventsClient.PostEvent(ctx, aw.Name, events.Event{
+			Source: events.SourceOperator,
+			Type:   "pod_created",
+			Payload: mustMarshal(map[string]string{
+				"podName":   pod.Name,
+				"agentType": aw.Spec.AgentType,
+				"tenantId":  aw.Spec.TenantID,
+				"task":      aw.Spec.Task,
+			}),
+		})
 	}
 
 	aw.Status.Phase = "Running"
@@ -125,6 +145,9 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 	}
 	for k, v := range tpl.Runtime.EnvDefaults {
 		env = append(env, corev1.EnvVar{Name: k, Value: v})
+	}
+	if aw.Spec.Task != "" {
+		env = append(env, corev1.EnvVar{Name: "TASK", Value: aw.Spec.Task})
 	}
 
 	resources := corev1.ResourceRequirements{}

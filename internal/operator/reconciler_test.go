@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentv1alpha1 "github.com/agent-platform/poc/api/v1alpha1"
+	"github.com/agent-platform/poc/internal/events"
 	"github.com/agent-platform/poc/internal/operator"
 	"github.com/agent-platform/poc/internal/registry"
 )
@@ -67,6 +68,7 @@ func TestReconcileNew_PullsTemplateAndCreatesPod(t *testing.T) {
 		RegistryURL:  "http://registry:8080",
 		ISTokenURL:   "http://identity-server:8080/connect/token",
 		SampleAPIURL: "http://sample-api:8080",
+		EventsClient: events.NewMock(),
 	}
 
 	req := ctrl.Request{
@@ -133,6 +135,7 @@ func TestReconcileRunning_PodSucceeded_NotifiesRegistry(t *testing.T) {
 
 	r := &operator.AgentWorkloadReconciler{
 		Client: fakeClient, Scheme: s, Registry: reg,
+		EventsClient: events.NewMock(),
 	}
 
 	// First call adds finalizer and requeues
@@ -156,5 +159,145 @@ func TestReconcileRunning_PodSucceeded_NotifiesRegistry(t *testing.T) {
 	fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-agent", Namespace: "default"}, &updated)
 	if updated.Status.Phase != "Completed" {
 		t.Fatalf("expected Completed, got %q", updated.Status.Phase)
+	}
+}
+
+func TestReconcileNew_EmitsPodCreatedEvent(t *testing.T) {
+	aw := &agentv1alpha1.AgentWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-agent", Namespace: "default"},
+		Spec: agentv1alpha1.AgentWorkloadSpec{
+			AgentType: "worker", UserID: "user-1", TenantID: "tenant-1", Lifecycle: "short-lived",
+		},
+	}
+
+	s := buildScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(s).WithObjects(aw).WithStatusSubresource(aw).Build()
+
+	reg := registry.NewMock(map[string]registry.AgentTemplate{"worker": workerTemplate()})
+	mockEvents := events.NewMock()
+
+	r := &operator.AgentWorkloadReconciler{
+		Client:       fakeClient,
+		Scheme:       s,
+		Registry:     reg,
+		RegistryURL:  "http://registry:8080",
+		ISTokenURL:   "http://identity-server:8080/connect/token",
+		SampleAPIURL: "http://sample-api:8080",
+		EventsClient: mockEvents,
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-agent", Namespace: "default"},
+	}
+
+	// First call adds finalizer
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile (1st): %v", err)
+	}
+	// Second call creates pod and emits event
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile (2nd): %v", err)
+	}
+
+	evts := mockEvents.Events["test-agent"]
+	if len(evts) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evts))
+	}
+	if evts[0].Type != "pod_created" {
+		t.Errorf("expected event type 'pod_created', got %q", evts[0].Type)
+	}
+	if evts[0].Source != events.SourceOperator {
+		t.Errorf("expected source %q, got %q", events.SourceOperator, evts[0].Source)
+	}
+}
+
+func TestReconcileNew_WithTask_SetsEnvVar(t *testing.T) {
+	aw := &agentv1alpha1.AgentWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "task-agent", Namespace: "default"},
+		Spec: agentv1alpha1.AgentWorkloadSpec{
+			AgentType: "worker", UserID: "user-1", TenantID: "tenant-1", Lifecycle: "short-lived",
+			Task: "hello world",
+		},
+	}
+
+	s := buildScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(s).WithObjects(aw).WithStatusSubresource(aw).Build()
+
+	reg := registry.NewMock(map[string]registry.AgentTemplate{"worker": workerTemplate()})
+
+	r := &operator.AgentWorkloadReconciler{
+		Client:       fakeClient,
+		Scheme:       s,
+		Registry:     reg,
+		RegistryURL:  "http://registry:8080",
+		ISTokenURL:   "http://identity-server:8080/connect/token",
+		SampleAPIURL: "http://sample-api:8080",
+		EventsClient: events.NewMock(),
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "task-agent", Namespace: "default"},
+	}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile (1st): %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile (2nd): %v", err)
+	}
+
+	var pod corev1.Pod
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "task-agent-pod", Namespace: "default"}, &pod); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+
+	envMap := map[string]string{}
+	for _, e := range pod.Spec.Containers[0].Env {
+		envMap[e.Name] = e.Value
+	}
+	if envMap["TASK"] != "hello world" {
+		t.Errorf("expected TASK='hello world', got %q", envMap["TASK"])
+	}
+}
+
+func TestReconcileNew_NilEventsClient_NoPanic(t *testing.T) {
+	aw := &agentv1alpha1.AgentWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "nil-events-agent", Namespace: "default"},
+		Spec: agentv1alpha1.AgentWorkloadSpec{
+			AgentType: "worker", UserID: "user-1", TenantID: "tenant-1", Lifecycle: "short-lived",
+		},
+	}
+
+	s := buildScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(s).WithObjects(aw).WithStatusSubresource(aw).Build()
+
+	reg := registry.NewMock(map[string]registry.AgentTemplate{"worker": workerTemplate()})
+
+	r := &operator.AgentWorkloadReconciler{
+		Client:       fakeClient,
+		Scheme:       s,
+		Registry:     reg,
+		RegistryURL:  "http://registry:8080",
+		ISTokenURL:   "http://identity-server:8080/connect/token",
+		SampleAPIURL: "http://sample-api:8080",
+		EventsClient: nil,
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "nil-events-agent", Namespace: "default"},
+	}
+
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile (1st): %v", err)
+	}
+	result, err := r.Reconcile(context.Background(), req)
+	if err != nil {
+		t.Fatalf("reconcile (2nd): %v", err)
+	}
+	if result != (ctrl.Result{}) {
+		t.Errorf("expected empty Result, got %+v", result)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	agentv1alpha1 "github.com/agent-platform/poc/api/v1alpha1"
+	"github.com/agent-platform/poc/internal/events"
 	"github.com/agent-platform/poc/internal/operator"
 	"github.com/agent-platform/poc/internal/registry"
 )
@@ -61,6 +62,7 @@ func main() {
 		RegistryURL:  registryURL,
 		ISTokenURL:   isTokenURL,
 		SampleAPIURL: sampleAPIURL,
+		EventsClient: events.New(registryURL),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentWorkload")
 		os.Exit(1)
