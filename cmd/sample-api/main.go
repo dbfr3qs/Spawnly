@@ -58,6 +58,49 @@ func buildMux(sdb spicedb.Client, validator tokenvalidator.TokenValidator) *http
 		})
 	})
 
+	mux.HandleFunc("POST /task", func(w http.ResponseWriter, r *http.Request) {
+		tenantID := r.Header.Get("X-Tenant-ID")
+		if tenantID == "" {
+			http.Error(w, "missing X-Tenant-ID", http.StatusBadRequest)
+			return
+		}
+		rawToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if rawToken == "" {
+			http.Error(w, "missing Authorization header", http.StatusUnauthorized)
+			return
+		}
+		spiffeID, err := validator.ValidateAccessToken(r.Context(), rawToken)
+		if err != nil {
+			log.Printf("token validation failed: %v", err)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		agentName := path.Base(spiffeID)
+		allowed, err := sdb.CheckPermission(r.Context(), "tenant:"+tenantID, "work_on", "agent:"+agentName)
+		if err != nil {
+			log.Printf("spicedb error: %v", err)
+			http.Error(w, "authz error", http.StatusInternalServerError)
+			return
+		}
+		if !allowed {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		var req struct {
+			Task string `json:"task"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"task":      req.Task,
+			"result":    "echo: " + req.Task,
+			"agentName": agentName,
+		})
+	})
+
 	return mux
 }
 
