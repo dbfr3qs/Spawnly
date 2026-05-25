@@ -2,12 +2,10 @@
   "name": "Claude Code Platform Dev",
   "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
   "mounts": [
-    "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind",
-    "source=/var/run/docker.sock,target=/var/run/docker-host.sock,type=bind"
+    "source=${localEnv:HOME}/.claude,target=/home/vscode/.claude,type=bind"
   ],
   "containerEnv": {
-    "CLAUDE_CONFIG_DIR": "/home/vscode/.claude",
-    "DOCKER_HOST": "unix:///var/run/docker-host.sock"
+    "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
   },
   "features": {
     "ghcr.io/devcontainers/features/node:2": {
@@ -19,6 +17,10 @@
     "ghcr.io/devcontainers/features/dotnet:2": {
       "version": "8.0"
     },
+    "ghcr.io/devcontainers/features/docker-outside-docker:1": {
+      "version": "latest",
+      "enableNonRootDocker": "true"
+    },
     "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
       "version": "latest",
       "helm": "latest",
@@ -26,6 +28,6 @@
     },
     "ghcr.io/anthropics/devcontainer-features/claude-code:1": {}
   },
-  "postCreateCommand": "curl -Lo /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64 && chmod +x /usr/local/bin/kind && docker version >/dev/null 2>&1 && echo 'Docker socket available' || echo 'No Docker socket — run bootstrap from host'",
+  "postCreateCommand": "curl -sSLo /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64 && chmod +x /usr/local/bin/kind && echo 'kind installed: '$(kind version)",
   "remoteUser": "vscode"
 }
