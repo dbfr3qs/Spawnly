@@ -168,6 +168,7 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 			TenantID:  req.TenantID,
 			UserID:    req.UserID,
 			Status:    "active",
+			Lifecycle: tpl.Runtime.Lifecycle,
 		}
 		s.registerAgent(rec)
 		s.appendEvent(agentID, events.Event{

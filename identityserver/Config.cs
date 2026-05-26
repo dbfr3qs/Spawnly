@@ -21,6 +21,16 @@ public static class Config
                 AlwaysSendClientClaims = true,
                 ClientClaimsPrefix = "",
                 AllowedScopes = { "sample-api" },
+            },
+            new Client
+            {
+                ClientId = "weather-monitor",
+                AllowedGrantTypes = GrantTypes.ClientCredentials,
+                RequireClientSecret = true,
+                ClientSecrets = { new Secret("placeholder".Sha256()) },
+                AlwaysSendClientClaims = true,
+                ClientClaimsPrefix = "",
+                AllowedScopes = { "sample-api" },
             }
         };
 }

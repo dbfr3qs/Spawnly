@@ -1,0 +1,10 @@
+{
+  "agents": [
+    {
+      "name": "chat",
+      "triggers": {
+        "webhook": true
+      }
+    }
+  ]
+}

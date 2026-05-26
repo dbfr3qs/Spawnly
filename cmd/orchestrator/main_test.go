@@ -38,8 +38,9 @@ func newScheme() *runtime.Scheme {
 }
 
 // defaultMockRegistry returns an httptest.Server that responds to:
-//   - POST /v1/agents/*/events  → 201
-//   - GET  /v1/agents           → []
+//   - POST /v1/agents/*/events   → 201
+//   - GET  /v1/agents            → []
+//   - GET  /v1/templates/{type}  → stub template with lifecycle ""
 func defaultMockRegistry(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -49,6 +50,9 @@ func defaultMockRegistry(t *testing.T) *httptest.Server {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents":
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte("[]"))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/templates/"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"agentType":"worker","version":"1.0.0","status":"active","meta":{"displayName":"Worker","description":"Test"},"runtimeSpec":{"image":"agent-agent:latest","lifecycle":"","resources":{"cpuLimits":"","memoryLimits":""},"envDefaults":{}},"authzTemplate":{"spiceDbRelations":[]}}`))
 		default:
 			http.NotFound(w, r)
 		}

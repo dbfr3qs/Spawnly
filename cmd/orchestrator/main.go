@@ -2,10 +2,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -76,6 +78,17 @@ func buildMux(k8s client.Client, sdb spicedb.Client, registryURL string) *http.S
 			req.AgentType = "worker"
 		}
 
+		tpl, err := regClient.GetTemplate(r.Context(), req.AgentType)
+		if err != nil {
+			log.Printf("get template %s: %v", req.AgentType, err)
+			http.Error(w, "unknown agent type", http.StatusBadRequest)
+			return
+		}
+		lifecycle := tpl.Runtime.Lifecycle
+		if lifecycle == "" {
+			lifecycle = "short-lived"
+		}
+
 		// The workload name becomes the pod name and the agent-id label, which SPIRE
 		// uses to issue the SVID. The agent's identity is the SVID, not this name.
 		workloadName := "agent-" + shortID()
@@ -88,7 +101,7 @@ func buildMux(k8s client.Client, sdb spicedb.Client, registryURL string) *http.S
 				AgentType: req.AgentType,
 				UserID:    req.UserID,
 				TenantID:  req.TenantID,
-				Lifecycle: "short-lived",
+				Lifecycle: lifecycle,
 				Task:      req.Task,
 			},
 		}
@@ -154,6 +167,46 @@ func buildMux(k8s client.Client, sdb spicedb.Client, registryURL string) *http.S
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("POST /v1/agents/{id}/message", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+
+		sessionID, _ := body["sessionId"].(string)
+		if sessionID == "" {
+			sessionID = "default"
+		}
+
+		target := fmt.Sprintf("http://%s-svc:8080/agents/chat/%s", id, sessionID)
+		payload, _ := json.Marshal(body)
+		req2, err := http.NewRequestWithContext(r.Context(), "POST", target, bytes.NewReader(payload))
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		req2.Header.Set("Content-Type", "application/json")
+
+		resp, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			log.Printf("message forward to %s: %v", target, err)
+			http.Error(w, "agent unreachable", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
 	})
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {

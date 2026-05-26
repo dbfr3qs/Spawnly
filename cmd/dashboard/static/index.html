@@ -92,6 +92,9 @@
     .btn-events   { background: var(--accent-hi); color: var(--text); }
     .btn-events.active { background: #1a5276; outline: 1px solid #2980b9; }
 
+    .btn-chat     { background: rgba(39,174,96,.2); color: #2ecc71; border: 1px solid rgba(39,174,96,.3); }
+    .btn-chat.active { background: rgba(39,174,96,.3); outline: 1px solid #27ae60; }
+
     /* ── Main content ── */
     main {
       max-width: 1100px;
@@ -276,6 +279,66 @@
       padding: 16px 0;
     }
 
+    /* ── Chat panel ── */
+    .chat-panel {
+      border-top: 1px solid var(--border);
+      padding: 14px 18px;
+      background: rgba(0,0,0,.2);
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .chat-panel-header {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-dim);
+    }
+    .chat-log {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    .chat-msg {
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.5;
+      max-width: 80%;
+    }
+    .chat-msg.user {
+      background: rgba(41,128,185,.2);
+      border: 1px solid rgba(41,128,185,.3);
+      color: #a8d8ff;
+      align-self: flex-end;
+    }
+    .chat-msg.agent {
+      background: rgba(39,174,96,.1);
+      border: 1px solid rgba(39,174,96,.2);
+      color: var(--text);
+      align-self: flex-start;
+    }
+    .chat-input-row {
+      display: flex;
+      gap: 8px;
+    }
+    .chat-input-row input {
+      flex: 1;
+      background: rgba(255,255,255,.06);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 13px;
+      padding: 8px 12px;
+      outline: none;
+      transition: border-color .15s;
+    }
+    .chat-input-row input:focus { border-color: #27ae60; }
+
     /* ── Empty state ── */
     .empty-state {
       text-align: center;
@@ -451,6 +514,9 @@
   let expandedAgents     = new Set();
   let renderedEventCount = {};   // agentId -> number of events already in the DOM
 
+  let expandedChats = new Set();
+  let chatHistory   = {};
+
   // ── API helpers ──────────────────────────────────────────────────────────
 
   async function fetchAgents() {
@@ -475,6 +541,16 @@
   async function killAgent(id) {
     const r = await fetch(`/api/agents/${id}`, { method: 'DELETE' });
     if (!r.ok) throw new Error(await r.text());
+  }
+
+  async function sendMessage(agentId, message) {
+    const r = await fetch(`/api/agents/${agentId}/message`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, sessionId: agentId }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json();
   }
 
   // ── Badge helpers ────────────────────────────────────────────────────────
@@ -516,6 +592,7 @@
         <div class="agent-actions">
           <button class="btn btn-events" id="evtbtn-${a.agentId}"
                   onclick="toggleEvents('${a.agentId}')">▼ Events</button>
+          ${a.lifecycle === 'long-lived' ? `<button class="btn btn-chat" id="chatbtn-${a.agentId}" onclick="toggleChat('${a.agentId}')">💬 Chat</button>` : ''}
           <span id="killwrap-${a.agentId}">
             ${isActive ? `<button class="btn btn-danger" onclick="handleKill('${a.agentId}')">Kill</button>` : ''}
           </span>
@@ -635,6 +712,80 @@
     }
   }
 
+  function toggleChat(agentId) {
+    const card = document.getElementById(`card-${agentId}`);
+    const btn  = document.getElementById(`chatbtn-${agentId}`);
+    if (!card || !btn) return;
+
+    if (expandedChats.has(agentId)) {
+      expandedChats.delete(agentId);
+      const panel = document.getElementById(`chat-${agentId}`);
+      if (panel) panel.remove();
+      btn.textContent = '💬 Chat';
+      btn.classList.remove('active');
+    } else {
+      expandedChats.add(agentId);
+      btn.textContent = '💬 Close Chat';
+      btn.classList.add('active');
+
+      const panel = document.createElement('div');
+      panel.className = 'chat-panel';
+      panel.id = `chat-${agentId}`;
+      panel.innerHTML = `
+        <div class="chat-panel-header">Chat</div>
+        <div class="chat-log" id="chatlog-${agentId}"></div>
+        <div class="chat-input-row">
+          <input id="chatinput-${agentId}" type="text" placeholder="Type a message…"
+                 onkeydown="if(event.key==='Enter') handleChatSend('${agentId}')" />
+          <button class="btn btn-chat" onclick="handleChatSend('${agentId}')">Send</button>
+        </div>`;
+      card.appendChild(panel);
+
+      renderChatHistory(agentId);
+      document.getElementById(`chatinput-${agentId}`)?.focus();
+    }
+  }
+
+  function renderChatHistory(agentId) {
+    const log = document.getElementById(`chatlog-${agentId}`);
+    if (!log) return;
+    log.innerHTML = '';
+    for (const msg of (chatHistory[agentId] || [])) {
+      const div = document.createElement('div');
+      div.className = `chat-msg ${msg.role}`;
+      div.textContent = msg.text;
+      log.appendChild(div);
+    }
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function appendChatMsg(agentId, role, text) {
+    if (!chatHistory[agentId]) chatHistory[agentId] = [];
+    chatHistory[agentId].push({ role, text });
+    const log = document.getElementById(`chatlog-${agentId}`);
+    if (!log) return;
+    const div = document.createElement('div');
+    div.className = `chat-msg ${role}`;
+    div.textContent = text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  async function handleChatSend(agentId) {
+    const input = document.getElementById(`chatinput-${agentId}`);
+    if (!input) return;
+    const msg = input.value.trim();
+    if (!msg) return;
+    input.value = '';
+    appendChatMsg(agentId, 'user', msg);
+    try {
+      const result = await sendMessage(agentId, msg);
+      appendChatMsg(agentId, 'agent', result.response ?? JSON.stringify(result));
+    } catch (e) {
+      appendChatMsg(agentId, 'agent', `[Error: ${e.message}]`);
+    }
+  }
+
   // ── Kill handler ─────────────────────────────────────────────────────────
 
   async function handleKill(agentId) {
@@ -647,6 +798,10 @@
       delete renderedEventCount[agentId];
       const panel = document.getElementById(`events-${agentId}`);
       if (panel) panel.remove();
+      expandedChats.delete(agentId);
+      delete chatHistory[agentId];
+      const chatPanel = document.getElementById(`chat-${agentId}`);
+      if (chatPanel) chatPanel.remove();
     } catch (e) {
       showToast(`Error: ${e.message}`, true);
     }
@@ -672,12 +827,11 @@
     const userId    = document.getElementById('f-user').value.trim() || 'user-1';
     const tenantId  = document.getElementById('f-tenant').value.trim() || 'tenant-1';
     const task      = document.getElementById('f-task').value.trim();
-    if (!task) { document.getElementById('f-task').focus(); return; }
 
     const btn = document.getElementById('spawn-btn');
     btn.disabled = true; btn.textContent = 'Spawning…';
     try {
-      const result = await spawnAgent({ agentType, userId, tenantId, task });
+      const result = await spawnAgent({ agentType, userId, tenantId, ...(task && { task }) });
       showToast(`Spawned: ${result.workloadName || 'agent'}`);
       closeModal();
       document.getElementById('f-task').value = '';

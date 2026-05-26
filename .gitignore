@@ -5,6 +5,7 @@
 /registry
 /sample-api
 /dashboard
+/weather-bootstrap
 /bin/
 *.test
 vendor/

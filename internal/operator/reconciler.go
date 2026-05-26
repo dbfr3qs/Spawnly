@@ -11,6 +11,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -93,6 +94,16 @@ func (r *AgentWorkloadReconciler) handleNew(ctx context.Context, aw *agentv1alph
 		})
 	}
 
+	if aw.Spec.Lifecycle == "long-lived" {
+		svc := r.buildService(aw)
+		if err := controllerutil.SetControllerReference(aw, svc, r.Scheme); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.Create(ctx, svc); err != nil && !apierrors.IsAlreadyExists(err) {
+			return ctrl.Result{}, err
+		}
+	}
+
 	aw.Status.Phase = "Running"
 	aw.Status.PodName = pod.Name
 	return ctrl.Result{}, r.Status().Update(ctx, aw)
@@ -104,13 +115,30 @@ func (r *AgentWorkloadReconciler) handleRunning(ctx context.Context, aw *agentv1
 	if err := r.Get(ctx, key, &pod); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if pod.Status.Phase == corev1.PodSucceeded {
-		return r.handleCompletion(ctx, aw, false)
-	}
 	if pod.Status.Phase == corev1.PodFailed {
 		return r.handleCompletion(ctx, aw, true)
 	}
+	if pod.Status.Phase == corev1.PodSucceeded && aw.Spec.Lifecycle != "long-lived" {
+		return r.handleCompletion(ctx, aw, false)
+	}
 	return ctrl.Result{}, nil
+}
+
+func (r *AgentWorkloadReconciler) buildService(aw *agentv1alpha1.AgentWorkload) *corev1.Service {
+	port := intstr.FromInt32(8080)
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      aw.Name + "-svc",
+			Namespace: aw.Namespace,
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"agent-id": aw.Name},
+			Ports: []corev1.ServicePort{{
+				Port:       8080,
+				TargetPort: port,
+			}},
+		},
+	}
 }
 
 func (r *AgentWorkloadReconciler) handleCompletion(ctx context.Context, aw *agentv1alpha1.AgentWorkload, failed bool) (ctrl.Result, error) {
@@ -199,5 +227,6 @@ func (r *AgentWorkloadReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentv1alpha1.AgentWorkload{}).
 		Owns(&corev1.Pod{}).
+		Owns(&corev1.Service{}).
 		Complete(r)
 }

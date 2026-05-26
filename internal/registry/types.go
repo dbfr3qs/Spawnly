@@ -19,6 +19,7 @@ type RuntimeSpec struct {
 	Image       string            `json:"image"`
 	Resources   ResourceLimits    `json:"resources"`
 	EnvDefaults map[string]string `json:"envDefaults"`
+	Lifecycle   string            `json:"lifecycle"`
 }
 
 type ResourceLimits struct {
@@ -42,4 +43,5 @@ type AgentRecord struct {
 	TenantID  string `json:"tenantId"`
 	UserID    string `json:"userId"`
 	Status    string `json:"status"` // active | completed | failed
+	Lifecycle string `json:"lifecycle"`
 }

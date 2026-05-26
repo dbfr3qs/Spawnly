@@ -21,11 +21,13 @@ for svc in operator orchestrator registry sample-api agent dashboard; do
   docker build --target "$svc" -t "agent-$svc:$IMAGE_TAG" .
 done
 docker build --target identity-server -t agent-identity-server:$IMAGE_TAG .
+docker build --target weather-monitor -t "agent-weather-monitor:$IMAGE_TAG" .
 
 echo "==> Loading images into Kind..."
 for svc in operator orchestrator registry sample-api agent dashboard identity-server; do
   kind load docker-image "agent-$svc:$IMAGE_TAG" --name "$KIND_CLUSTER"
 done
+kind load docker-image "agent-weather-monitor:$IMAGE_TAG" --name "$KIND_CLUSTER"
 
 echo "==> Installing SPIRE via Helm..."
 helm repo add spiffe https://spiffe.github.io/helm-charts-hardened/ 2>/dev/null || true
@@ -91,6 +93,27 @@ curl -sf -X POST http://localhost:18080/v1/templates \
     }
   }'
 echo "  worker template seeded"
+
+curl -sf -X POST http://localhost:18080/v1/templates \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "agentType": "weather-monitor",
+    "version": "1.0.0",
+    "status": "active",
+    "meta": {"displayName": "Weather Monitor", "description": "Long-lived agent that monitors weather on a loop"},
+    "runtimeSpec": {
+      "image": "agent-weather-monitor:latest",
+      "lifecycle": "long-lived",
+      "resources": {"cpuLimits": "500m", "memoryLimits": "256Mi"},
+      "envDefaults": {"LOG_LEVEL": "info"}
+    },
+    "authzTemplate": {
+      "spiceDbRelations": [
+        {"resource": "tenant:{{tenant_id}}", "relation": "agent", "subject": "agent:{{agent_id}}"}
+      ]
+    }
+  }'
+echo "  weather-monitor template seeded"
 
 kill $PF_REG_SEED 2>/dev/null || true
 

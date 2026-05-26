@@ -21,6 +21,7 @@ docker-build:
 		docker build --target $$svc -t agent-$$svc:$(IMAGE_TAG) .; \
 	done
 	docker build --target identity-server -t agent-identity-server:$(IMAGE_TAG) .
+	docker build --target weather-monitor -t agent-weather-monitor:$(IMAGE_TAG) .
 
 kind-up:
 	kind create cluster --name $(KIND_CLUSTER) --config deploy/kind/cluster.yaml

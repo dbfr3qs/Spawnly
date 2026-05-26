@@ -1,0 +1,14 @@
+{
+  "name": "weather-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "flue build --target node",
+    "dev": "flue dev --target node"
+  },
+  "dependencies": {
+    "@flue/runtime": "^0.7.0",
+    "@flue/cli": "^0.7.0"
+  }
+}

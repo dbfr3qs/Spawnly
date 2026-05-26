@@ -46,6 +46,32 @@ FROM gcr.io/distroless/static-debian12 AS dashboard
 COPY --from=build-dashboard /bin/dashboard /
 ENTRYPOINT ["/dashboard"]
 
+# Weather-monitor bootstrap binary (Go)
+FROM builder AS build-weather-bootstrap
+RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/weather-bootstrap ./cmd/weather-bootstrap
+
+# Weather-monitor Node.js/Flue build
+FROM node:22-alpine AS build-weather-monitor-node
+WORKDIR /app
+COPY agents/weather-monitor/package*.json ./
+RUN npm ci
+COPY agents/weather-monitor/.flue ./.flue
+COPY agents/weather-monitor/tsconfig.json ./tsconfig.json
+RUN npm run build
+
+# Final weather-monitor image
+FROM node:22-slim AS weather-monitor
+WORKDIR /app
+COPY --from=build-weather-bootstrap /bin/weather-bootstrap /usr/local/bin/weather-bootstrap
+COPY --from=build-weather-monitor-node /app/dist ./dist
+COPY --from=build-weather-monitor-node /app/node_modules ./node_modules
+COPY agents/weather-monitor/heartbeat.mjs ./heartbeat.mjs
+COPY agents/weather-monitor/start.sh /start.sh
+RUN chmod +x /start.sh
+ENV PORT=8080
+EXPOSE 8080
+ENTRYPOINT ["/start.sh"]
+
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build-identity-server
 WORKDIR /src
 COPY identityserver/ .
