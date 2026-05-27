@@ -17,14 +17,14 @@ CONTROL_PLANE_IP=$(docker inspect "${KIND_CLUSTER}-control-plane" \
 kubectl config set-cluster "kind-${KIND_CLUSTER}" --server="https://${CONTROL_PLANE_IP}:6443"
 
 echo "==> Building Docker images..."
-for svc in operator orchestrator registry sample-api agent dashboard; do
+for svc in operator orchestrator registry sample-api agent dashboard agent-sidecar; do
   docker build --target "$svc" -t "agent-$svc:$IMAGE_TAG" .
 done
 docker build --target identity-server -t agent-identity-server:$IMAGE_TAG .
 docker build --target weather-monitor -t "agent-weather-monitor:$IMAGE_TAG" .
 
 echo "==> Loading images into Kind..."
-for svc in operator orchestrator registry sample-api agent dashboard identity-server; do
+for svc in operator orchestrator registry sample-api agent dashboard agent-sidecar identity-server; do
   kind load docker-image "agent-$svc:$IMAGE_TAG" --name "$KIND_CLUSTER"
 done
 kind load docker-image "agent-weather-monitor:$IMAGE_TAG" --name "$KIND_CLUSTER"

@@ -2,7 +2,7 @@
 MODULE        := github.com/agent-platform/poc
 KIND_CLUSTER  := agent-platform
 IMAGE_TAG     := latest
-SERVICES      := operator orchestrator registry sample-api agent dashboard
+SERVICES      := operator orchestrator registry sample-api agent agent-sidecar dashboard
 
 .PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo
 
@@ -34,6 +34,7 @@ kind-load: docker-build
 		kind load docker-image agent-$$svc:$(IMAGE_TAG) --name $(KIND_CLUSTER); \
 	done
 	kind load docker-image agent-identity-server:$(IMAGE_TAG) --name $(KIND_CLUSTER)
+	kind load docker-image agent-weather-monitor:$(IMAGE_TAG) --name $(KIND_CLUSTER)
 
 spire:
 	helm repo add spiffe https://spiffe.github.io/helm-charts-hardened/ 2>/dev/null || true

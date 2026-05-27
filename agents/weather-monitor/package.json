@@ -8,6 +8,7 @@
     "dev": "flue dev --target node"
   },
   "dependencies": {
+    "@agent-platform/sdk": "file:../sdk",
     "@flue/runtime": "^0.7.0",
     "@flue/cli": "^0.7.0"
   }

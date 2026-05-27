@@ -1,14 +1,20 @@
 # Go binaries (root-level and bin/)
 /agent
+/agent-sidecar
 /operator
 /orchestrator
 /registry
 /sample-api
 /dashboard
-/weather-bootstrap
 /bin/
 *.test
 vendor/
+
+# Node
+agents/weather-monitor/node_modules/
+agents/sdk/node_modules/
+agents/weather-monitor/dist/
+agents/sdk/dist/
 
 # .NET build output
 identityserver/bin/

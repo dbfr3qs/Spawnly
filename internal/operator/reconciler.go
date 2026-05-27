@@ -162,20 +162,24 @@ func (r *AgentWorkloadReconciler) handleDeletion(ctx context.Context, aw *agentv
 }
 
 func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl registry.AgentTemplate) *corev1.Pod {
-	env := []corev1.EnvVar{
+	sharedEnv := []corev1.EnvVar{
 		{Name: "TENANT_ID", Value: aw.Spec.TenantID},
 		{Name: "USER_ID", Value: aw.Spec.UserID},
 		{Name: "AGENT_TYPE", Value: aw.Spec.AgentType},
+		{Name: "AGENT_ID", Value: aw.Name},
 		{Name: "REGISTRY_URL", Value: r.RegistryURL},
 		{Name: "IS_TOKEN_URL", Value: r.ISTokenURL},
+	}
+
+	agentEnv := append([]corev1.EnvVar{
 		{Name: "SAMPLE_API_URL", Value: r.SampleAPIURL},
 		{Name: "SPIFFE_ENDPOINT_SOCKET", Value: "unix:///spiffe-workload-api/spire-agent.sock"},
-	}
+	}, sharedEnv...)
 	for k, v := range tpl.Runtime.EnvDefaults {
-		env = append(env, corev1.EnvVar{Name: k, Value: v})
+		agentEnv = append(agentEnv, corev1.EnvVar{Name: k, Value: v})
 	}
 	if aw.Spec.Task != "" {
-		env = append(env, corev1.EnvVar{Name: "TASK", Value: aw.Spec.Task})
+		agentEnv = append(agentEnv, corev1.EnvVar{Name: "TASK", Value: aw.Spec.Task})
 	}
 
 	resources := corev1.ResourceRequirements{}
@@ -193,23 +197,34 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 			Namespace: aw.Namespace,
 			Labels: map[string]string{
 				"agent-id":                  aw.Name,
+				"agent-type":                aw.Spec.AgentType,
+				"tenant-id":                 aw.Spec.TenantID,
+				"user-id":                   aw.Spec.UserID,
 				"agent-platform.io/managed": "true",
 			},
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
-			Containers: []corev1.Container{{
-				Name:            "agent",
-				Image:           tpl.Runtime.Image,
-				ImagePullPolicy: corev1.PullIfNotPresent,
-				Env:             env,
-				Resources:       resources,
-				VolumeMounts: []corev1.VolumeMount{{
-					Name:      "spiffe-workload-api",
-					MountPath: "/spiffe-workload-api",
-					ReadOnly:  true,
-				}},
-			}},
+			Containers: []corev1.Container{
+				{
+					Name:            "agent",
+					Image:           tpl.Runtime.Image,
+					ImagePullPolicy: corev1.PullIfNotPresent,
+					Env:             agentEnv,
+					Resources:       resources,
+				},
+				{
+					Name:            "agent-sidecar",
+					Image:           "agent-sidecar:latest",
+					ImagePullPolicy: corev1.PullIfNotPresent,
+					Env:             sharedEnv,
+					VolumeMounts: []corev1.VolumeMount{{
+						Name:      "spiffe-workload-api",
+						MountPath: "/spiffe-workload-api",
+						ReadOnly:  true,
+					}},
+				},
+			},
 			Volumes: []corev1.Volume{{
 				Name: "spiffe-workload-api",
 				VolumeSource: corev1.VolumeSource{

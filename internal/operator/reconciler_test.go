@@ -90,22 +90,65 @@ func TestReconcileNew_PullsTemplateAndCreatesPod(t *testing.T) {
 	if len(pods.Items) != 1 {
 		t.Fatalf("expected 1 pod, got %d", len(pods.Items))
 	}
-	if pods.Items[0].Spec.Containers[0].Image != "agent-runner:latest" {
-		t.Errorf("unexpected image: %q", pods.Items[0].Spec.Containers[0].Image)
+	pod := pods.Items[0]
+	if len(pod.Spec.Containers) != 2 {
+		t.Fatalf("expected 2 containers, got %d", len(pod.Spec.Containers))
 	}
-	if pods.Items[0].Labels["agent-id"] != "test-agent" {
-		t.Errorf("expected agent-id label 'test-agent', got %q", pods.Items[0].Labels["agent-id"])
+	if pod.Spec.Containers[0].Name != "agent" {
+		t.Errorf("expected first container named 'agent', got %q", pod.Spec.Containers[0].Name)
 	}
-	if pods.Items[0].Labels["agent-platform.io/managed"] != "true" {
+	if pod.Spec.Containers[0].Image != "agent-runner:latest" {
+		t.Errorf("unexpected image: %q", pod.Spec.Containers[0].Image)
+	}
+	if pod.Spec.Containers[1].Name != "agent-sidecar" {
+		t.Errorf("expected second container named 'agent-sidecar', got %q", pod.Spec.Containers[1].Name)
+	}
+	for _, vm := range pod.Spec.Containers[0].VolumeMounts {
+		if vm.Name == "spiffe-workload-api" {
+			t.Errorf("agent container should not have spiffe-workload-api volume mount")
+		}
+	}
+	sidecarHasSpiffe := false
+	for _, vm := range pod.Spec.Containers[1].VolumeMounts {
+		if vm.Name == "spiffe-workload-api" {
+			sidecarHasSpiffe = true
+		}
+	}
+	if !sidecarHasSpiffe {
+		t.Errorf("agent-sidecar container is missing spiffe-workload-api volume mount")
+	}
+	labels := pod.Labels
+	if labels["agent-id"] != "test-agent" {
+		t.Errorf("expected agent-id label 'test-agent', got %q", labels["agent-id"])
+	}
+	if labels["agent-type"] != "worker" {
+		t.Errorf("expected agent-type label 'worker', got %q", labels["agent-type"])
+	}
+	if labels["tenant-id"] != "tenant-1" {
+		t.Errorf("expected tenant-id label 'tenant-1', got %q", labels["tenant-id"])
+	}
+	if labels["user-id"] != "user-1" {
+		t.Errorf("expected user-id label 'user-1', got %q", labels["user-id"])
+	}
+	if labels["agent-platform.io/managed"] != "true" {
 		t.Errorf("expected agent-platform.io/managed label 'true'")
 	}
-	envMap := map[string]string{}
-	for _, e := range pods.Items[0].Spec.Containers[0].Env {
-		envMap[e.Name] = e.Value
+	agentEnvMap := map[string]string{}
+	for _, e := range pod.Spec.Containers[0].Env {
+		agentEnvMap[e.Name] = e.Value
 	}
-	for _, key := range []string{"SPIFFE_ENDPOINT_SOCKET", "REGISTRY_URL", "IS_TOKEN_URL", "AGENT_TYPE"} {
-		if envMap[key] == "" {
-			t.Errorf("missing env var %s in pod", key)
+	for _, key := range []string{"REGISTRY_URL", "IS_TOKEN_URL", "AGENT_TYPE"} {
+		if agentEnvMap[key] == "" {
+			t.Errorf("missing env var %s in agent container", key)
+		}
+	}
+	sidecarEnvMap := map[string]string{}
+	for _, e := range pod.Spec.Containers[1].Env {
+		sidecarEnvMap[e.Name] = e.Value
+	}
+	for _, key := range []string{"AGENT_ID", "AGENT_TYPE", "TENANT_ID", "USER_ID", "REGISTRY_URL", "IS_TOKEN_URL"} {
+		if sidecarEnvMap[key] == "" {
+			t.Errorf("missing env var %s in agent-sidecar container", key)
 		}
 	}
 

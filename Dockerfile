@@ -46,13 +46,17 @@ FROM gcr.io/distroless/static-debian12 AS dashboard
 COPY --from=build-dashboard /bin/dashboard /
 ENTRYPOINT ["/dashboard"]
 
-# Weather-monitor bootstrap binary (Go)
-FROM builder AS build-weather-bootstrap
-RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/weather-bootstrap ./cmd/weather-bootstrap
+FROM builder AS build-agent-sidecar
+RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/agent-sidecar ./cmd/agent-sidecar
+
+FROM gcr.io/distroless/static-debian12 AS agent-sidecar
+COPY --from=build-agent-sidecar /bin/agent-sidecar /
+ENTRYPOINT ["/agent-sidecar"]
 
 # Weather-monitor Node.js/Flue build
 FROM node:22-alpine AS build-weather-monitor-node
 WORKDIR /app
+COPY agents/sdk/ /sdk/
 COPY agents/weather-monitor/package*.json ./
 RUN npm ci
 COPY agents/weather-monitor/.flue ./.flue
@@ -62,15 +66,14 @@ RUN npm run build
 # Final weather-monitor image
 FROM node:22-slim AS weather-monitor
 WORKDIR /app
-COPY --from=build-weather-bootstrap /bin/weather-bootstrap /usr/local/bin/weather-bootstrap
 COPY --from=build-weather-monitor-node /app/dist ./dist
 COPY --from=build-weather-monitor-node /app/node_modules ./node_modules
 COPY agents/weather-monitor/heartbeat.mjs ./heartbeat.mjs
-COPY agents/weather-monitor/start.sh /start.sh
-RUN chmod +x /start.sh
+COPY agents/sdk/package.json ./node_modules/@agent-platform/sdk/package.json
+COPY agents/sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
 ENV PORT=8080
 EXPOSE 8080
-ENTRYPOINT ["/start.sh"]
+CMD ["node", "dist/server.mjs"]
 
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build-identity-server
 WORKDIR /src
