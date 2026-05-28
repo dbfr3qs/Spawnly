@@ -44,4 +44,5 @@ type AgentRecord struct {
 	UserID    string `json:"userId"`
 	Status    string `json:"status"` // active | completed | failed
 	Lifecycle string `json:"lifecycle"`
+	Dismissed bool   `json:"dismissed,omitempty"`
 }

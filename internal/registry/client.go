@@ -18,6 +18,8 @@ type Client interface {
 	ListAgents(ctx context.Context) ([]AgentRecord, error)
 	ListEvents(ctx context.Context, agentID string) ([]events.Event, error)
 	PostEvent(ctx context.Context, agentID string, e events.Event) error
+	ListTemplates(ctx context.Context) ([]string, error)
+	DismissAgent(ctx context.Context, agentID string) error
 }
 
 type HTTPClient struct {
@@ -110,6 +112,33 @@ func (c *HTTPClient) PostEvent(ctx context.Context, agentID string, e events.Eve
 	return nil
 }
 
+func (c *HTTPClient) ListTemplates(ctx context.Context) ([]string, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.base+"/v1/templates", nil)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list templates: status %d", resp.StatusCode)
+	}
+	var types []string
+	return types, json.NewDecoder(resp.Body).Decode(&types)
+}
+
+func (c *HTTPClient) DismissAgent(ctx context.Context, agentID string) error {
+	req, _ := http.NewRequestWithContext(ctx, "POST", c.base+"/v1/agents/"+agentID+"/dismiss", nil)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("dismiss agent: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 type Mock struct {
 	Templates  map[string]AgentTemplate
 	Agents     []AgentRecord
@@ -153,5 +182,17 @@ func (m *Mock) ListEvents(_ context.Context, agentID string) ([]events.Event, er
 
 func (m *Mock) PostEvent(_ context.Context, agentID string, e events.Event) error {
 	m.EventStore[agentID] = append(m.EventStore[agentID], e)
+	return nil
+}
+
+func (m *Mock) ListTemplates(_ context.Context) ([]string, error) {
+	types := make([]string, 0, len(m.Templates))
+	for k := range m.Templates {
+		types = append(types, k)
+	}
+	return types, nil
+}
+
+func (m *Mock) DismissAgent(_ context.Context, agentID string) error {
 	return nil
 }

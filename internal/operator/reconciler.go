@@ -191,6 +191,7 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 	}
 
 	readOnly := true
+	restartAlways := corev1.ContainerRestartPolicyAlways
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      aw.Name + "-pod",
@@ -205,26 +206,28 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy: corev1.RestartPolicyNever,
-			Containers: []corev1.Container{
-				{
-					Name:            "agent",
-					Image:           tpl.Runtime.Image,
-					ImagePullPolicy: corev1.PullIfNotPresent,
-					Env:             agentEnv,
-					Resources:       resources,
-				},
-				{
-					Name:            "agent-sidecar",
-					Image:           "agent-sidecar:latest",
-					ImagePullPolicy: corev1.PullIfNotPresent,
-					Env:             sharedEnv,
-					VolumeMounts: []corev1.VolumeMount{{
-						Name:      "spiffe-workload-api",
-						MountPath: "/spiffe-workload-api",
-						ReadOnly:  true,
-					}},
-				},
-			},
+			// Native sidecar (Kubernetes 1.29+ stable): restartPolicy:Always in initContainers
+			// keeps the sidecar running alongside the main container but does not block pod
+			// completion when the main container exits.
+			InitContainers: []corev1.Container{{
+				Name:            "agent-sidecar",
+				Image:           "agent-sidecar:latest",
+				ImagePullPolicy: corev1.PullIfNotPresent,
+				RestartPolicy:   &restartAlways,
+				Env:             sharedEnv,
+				VolumeMounts: []corev1.VolumeMount{{
+					Name:      "spiffe-workload-api",
+					MountPath: "/spiffe-workload-api",
+					ReadOnly:  true,
+				}},
+			}},
+			Containers: []corev1.Container{{
+				Name:            "agent",
+				Image:           tpl.Runtime.Image,
+				ImagePullPolicy: corev1.PullIfNotPresent,
+				Env:             agentEnv,
+				Resources:       resources,
+			}},
 			Volumes: []corev1.Volume{{
 				Name: "spiffe-workload-api",
 				VolumeSource: corev1.VolumeSource{

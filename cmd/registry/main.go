@@ -81,9 +81,23 @@ func (s *store) listAgents() []registry.AgentRecord {
 	defer s.mu.RUnlock()
 	out := make([]registry.AgentRecord, 0, len(s.agents))
 	for _, r := range s.agents {
-		out = append(out, r)
+		if !r.Dismissed {
+			out = append(out, r)
+		}
 	}
 	return out
+}
+
+func (s *store) dismissAgent(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.agents[id]
+	if !ok {
+		return false
+	}
+	r.Dismissed = true
+	s.agents[id] = r
+	return true
 }
 
 func (s *store) updateAgent(id, status string) bool {
@@ -269,6 +283,26 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 			}
 		}
 		w.WriteHeader(http.StatusOK)
+	})
+
+	mux.HandleFunc("POST /v1/agents/{id}/dismiss", func(w http.ResponseWriter, r *http.Request) {
+		agentID := r.PathValue("id")
+		if !s.dismissAgent(agentID) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("GET /v1/templates", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.RLock()
+		types := make([]string, 0, len(s.templates))
+		for k := range s.templates {
+			types = append(types, k)
+		}
+		s.mu.RUnlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(types)
 	})
 
 	return mux

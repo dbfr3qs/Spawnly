@@ -169,6 +169,39 @@ func buildMux(k8s client.Client, sdb spicedb.Client, registryURL string) *http.S
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	mux.HandleFunc("POST /v1/agents/{id}/dismiss", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		req2, err := http.NewRequestWithContext(r.Context(), "POST", registryURL+"/v1/agents/"+id+"/dismiss", nil)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		resp, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			http.Error(w, "registry unavailable", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.WriteHeader(resp.StatusCode)
+	})
+
+	mux.HandleFunc("GET /v1/templates", func(w http.ResponseWriter, r *http.Request) {
+		req2, err := http.NewRequestWithContext(r.Context(), "GET", registryURL+"/v1/templates", nil)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		resp, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			http.Error(w, "registry unavailable", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	})
+
 	mux.HandleFunc("POST /v1/agents/{id}/message", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 

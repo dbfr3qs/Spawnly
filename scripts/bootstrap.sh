@@ -5,16 +5,24 @@ set -euo pipefail
 KIND_CLUSTER="agent-platform"
 IMAGE_TAG="latest"
 
-echo "==> Creating Kind cluster..."
-kind create cluster --name "$KIND_CLUSTER" --config deploy/kind/cluster.yaml
+# ── Cluster ──────────────────────────────────────────────────────────────────
+
+if kind get clusters 2>/dev/null | grep -q "^${KIND_CLUSTER}$"; then
+  echo "==> Kind cluster '${KIND_CLUSTER}' already exists — skipping creation"
+else
+  echo "==> Creating Kind cluster..."
+  kind create cluster --name "$KIND_CLUSTER" --config deploy/kind/cluster.yaml
+fi
 
 echo "==> Connecting devcontainer to Kind network..."
 CONTAINER_ID=$(cat /etc/hostname)
 docker network connect kind "$CONTAINER_ID" 2>/dev/null || true
-# Point kubectl at the control plane container IP (127.0.0.1 is unreachable from inside a devcontainer)
+# Point kubectl at the control plane container IP (127.0.0.1 is unreachable inside a devcontainer)
 CONTROL_PLANE_IP=$(docker inspect "${KIND_CLUSTER}-control-plane" \
   --format '{{(index .NetworkSettings.Networks "kind").IPAddress}}')
 kubectl config set-cluster "kind-${KIND_CLUSTER}" --server="https://${CONTROL_PLANE_IP}:6443"
+
+# ── Images ───────────────────────────────────────────────────────────────────
 
 echo "==> Building Docker images..."
 for svc in operator orchestrator registry sample-api agent dashboard agent-sidecar; do
@@ -29,9 +37,11 @@ for svc in operator orchestrator registry sample-api agent dashboard agent-sidec
 done
 kind load docker-image "agent-weather-monitor:$IMAGE_TAG" --name "$KIND_CLUSTER"
 
+# ── SPIRE ────────────────────────────────────────────────────────────────────
+
 echo "==> Installing SPIRE via Helm..."
 helm repo add spiffe https://spiffe.github.io/helm-charts-hardened/ 2>/dev/null || true
-helm repo update
+helm repo update spiffe 2>/dev/null || echo "  Warning: could not refresh spiffe chart index, using cached version"
 helm upgrade --install spire-crds spiffe/spire-crds \
   --namespace spire-system --create-namespace --wait
 
@@ -40,12 +50,27 @@ helm upgrade --install spire spiffe/spire \
   --values deploy/spire/values.yaml \
   --wait --timeout=5m
 
+# Force-delete any SPIRE pods stuck in Unknown state (can happen after node restart).
+# The agent pod is restarted to ensure it reads the freshly-synced trust bundle.
+echo "==> Recovering any stuck SPIRE pods..."
+UNKNOWN_PODS=$(kubectl -n spire-system get pods --field-selector=status.phase=Unknown \
+  -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+for pod in $UNKNOWN_PODS; do
+  echo "  Force-deleting stuck pod: $pod"
+  kubectl -n spire-system delete pod "$pod" --force --grace-period=0 2>/dev/null || true
+done
+# Restart the SPIRE agent so it reads the current trust bundle from the ConfigMap
+# (needed when server restarts rotate the CA before the agent can sync).
+kubectl -n spire-system rollout restart daemonset/spire-agent 2>/dev/null || true
+
 echo "==> Waiting for SPIRE OIDC discovery provider..."
 kubectl -n spire-system wait --for=condition=available \
   deployment/spire-spiffe-oidc-discovery-provider --timeout=120s
 
 echo "==> Applying ClusterSPIFFEID..."
 kubectl apply -f deploy/spire/clusterspiffeid.yaml
+
+# ── Manifests ────────────────────────────────────────────────────────────────
 
 echo "==> Applying CRD..."
 kubectl apply -f deploy/crds/agentworkload.yaml
@@ -68,6 +93,9 @@ kubectl wait --for=condition=available deployment/sample-api --timeout=120s
 kubectl wait --for=condition=available deployment/agent-operator --timeout=120s
 kubectl wait --for=condition=available deployment/orchestrator --timeout=120s
 kubectl wait --for=condition=available deployment/dashboard --timeout=120s
+
+# ── Templates ────────────────────────────────────────────────────────────────
+# Always re-seed — the registry store is in-memory and resets on every restart.
 
 echo "==> Seeding agent templates..."
 kubectl port-forward svc/registry 18080:8080 &

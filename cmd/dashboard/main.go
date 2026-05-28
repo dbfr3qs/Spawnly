@@ -65,6 +65,11 @@ func main() {
 		id := r.PathValue("id")
 		proxy("POST", orchestratorURL+"/v1/agents/"+id+"/message")(w, r)
 	})
+	mux.HandleFunc("POST /api/agents/{id}/dismiss", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		proxy("POST", orchestratorURL+"/v1/agents/"+id+"/dismiss")(w, r)
+	})
+	mux.HandleFunc("GET /api/templates", proxy("GET", orchestratorURL+"/v1/templates"))
 
 	port := os.Getenv("PORT")
 	if port == "" {

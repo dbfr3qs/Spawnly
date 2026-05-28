@@ -42,7 +42,7 @@ func getSidecarToken(ctx context.Context, scope string) (string, error) {
 	return "", fmt.Errorf("sidecar token endpoint not available after 5 attempts")
 }
 
-func callSampleAPI(ctx context.Context, sampleAPIURL, accessToken, task string) (string, error) {
+func callSampleAPI(ctx context.Context, sampleAPIURL, accessToken, tenantID, task string) (string, error) {
 	body, _ := json.Marshal(map[string]string{"task": task})
 	req, err := http.NewRequestWithContext(ctx, "POST", sampleAPIURL+"/task",
 		strings.NewReader(string(body)))
@@ -51,6 +51,7 @@ func callSampleAPI(ctx context.Context, sampleAPIURL, accessToken, task string) 
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Tenant-ID", tenantID)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -71,9 +72,13 @@ func callSampleAPI(ctx context.Context, sampleAPIURL, accessToken, task string) 
 func main() {
 	task := os.Getenv("TASK")
 	sampleAPIURL := os.Getenv("SAMPLE_API_URL")
+	tenantID := os.Getenv("TENANT_ID")
 
 	if sampleAPIURL == "" {
 		log.Fatal("SAMPLE_API_URL is required")
+	}
+	if tenantID == "" {
+		log.Fatal("TENANT_ID is required")
 	}
 
 	ctx := context.Background()
@@ -83,7 +88,7 @@ func main() {
 		log.Fatalf("get access token: %v", err)
 	}
 
-	result, err := callSampleAPI(ctx, sampleAPIURL, accessToken, task)
+	result, err := callSampleAPI(ctx, sampleAPIURL, accessToken, tenantID, task)
 	if err != nil {
 		log.Fatalf("call sample API: %v", err)
 	}

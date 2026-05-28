@@ -95,6 +95,8 @@
     .btn-chat     { background: rgba(39,174,96,.2); color: #2ecc71; border: 1px solid rgba(39,174,96,.3); }
     .btn-chat.active { background: rgba(39,174,96,.3); outline: 1px solid #27ae60; }
 
+    .btn-dismiss  { background: rgba(255,255,255,.06); color: var(--text-dim); padding: 4px 10px; font-size: 13px; }
+
     /* ── Main content ── */
     main {
       max-width: 1100px;
@@ -403,6 +405,7 @@
     }
 
     .form-group input,
+    .form-group select,
     .form-group textarea {
       width: 100%;
       background: rgba(255,255,255,.06);
@@ -416,9 +419,12 @@
       transition: border-color .15s;
     }
     .form-group input:focus,
+    .form-group select:focus,
     .form-group textarea:focus {
       border-color: #2980b9;
     }
+    .form-group select { cursor: pointer; color-scheme: dark; }
+    .form-group select option { background: #16213e; color: #e0e6f0; }
     .form-group textarea {
       min-height: 70px;
       resize: vertical;
@@ -481,7 +487,9 @@
     <h2>Spawn New Agent</h2>
     <div class="form-group">
       <label>Agent Type</label>
-      <input id="f-type" type="text" value="worker" placeholder="worker" />
+      <select id="f-type">
+        <option value="worker">worker</option>
+      </select>
     </div>
     <div class="form-group">
       <label>User ID</label>
@@ -543,6 +551,16 @@
     if (!r.ok) throw new Error(await r.text());
   }
 
+  async function dismissAgent(id) {
+    const r = await fetch(`/api/agents/${id}/dismiss`, { method: 'POST' });
+    if (!r.ok) throw new Error(await r.text());
+  }
+
+  async function fetchTemplates() {
+    try { const r = await fetch('/api/templates'); return r.ok ? r.json() : []; }
+    catch { return []; }
+  }
+
   async function sendMessage(agentId, message) {
     const r = await fetch(`/api/agents/${agentId}/message`, {
       method: 'POST',
@@ -596,6 +614,9 @@
           <span id="killwrap-${a.agentId}">
             ${isActive ? `<button class="btn btn-danger" onclick="handleKill('${a.agentId}')">Kill</button>` : ''}
           </span>
+          <span id="dismisswrap-${a.agentId}">
+            ${['completed','failed','killed'].includes((a.status||'').toLowerCase()) ? `<button class="btn btn-dismiss" onclick="handleDismiss('${a.agentId}')">✕</button>` : ''}
+          </span>
         </div>
       </div>`;
     return card;
@@ -637,6 +658,15 @@
             kw.innerHTML = `<button class="btn btn-danger" onclick="handleKill('${a.agentId}')">Kill</button>`;
           else if (!isActive && hasButton)
             kw.innerHTML = '';
+        }
+        const dw = document.getElementById(`dismisswrap-${a.agentId}`);
+        if (dw) {
+          const isTerminal = ['completed','failed','killed'].includes((a.status||'').toLowerCase());
+          const hasDismiss = !!dw.querySelector('button');
+          if (isTerminal && !hasDismiss)
+            dw.innerHTML = `<button class="btn btn-dismiss" onclick="handleDismiss('${a.agentId}')">✕</button>`;
+          else if (!isTerminal && hasDismiss)
+            dw.innerHTML = '';
         }
       }
     }
@@ -807,6 +837,23 @@
     }
   }
 
+  async function handleDismiss(agentId) {
+    try {
+      await dismissAgent(agentId);
+      clearInterval(agentEventPollers[agentId]);
+      delete agentEventPollers[agentId];
+      expandedAgents.delete(agentId);
+      delete renderedEventCount[agentId];
+      expandedChats.delete(agentId);
+      delete chatHistory[agentId];
+      const card = document.getElementById(`card-${agentId}`);
+      if (card) card.remove();
+      showToast(`Agent ${agentId.slice(0,8)}… dismissed`);
+    } catch (e) {
+      showToast(`Error: ${e.message}`, true);
+    }
+  }
+
   // ── Spawn modal ──────────────────────────────────────────────────────────
 
   document.getElementById('open-modal-btn').addEventListener('click', () => {
@@ -863,6 +910,14 @@
 
   poll();
   setInterval(poll, POLL_MS);
+  fetchTemplates().then(types => {
+    if (!Array.isArray(types) || types.length === 0) return;
+    const sel = document.getElementById('f-type');
+    if (!sel || sel.tagName !== 'SELECT') return;
+    sel.innerHTML = types.map(t =>
+      `<option value="${escHtml(t)}"${t === 'worker' ? ' selected' : ''}>${escHtml(t)}</option>`
+    ).join('');
+  });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 </script>
 </body>

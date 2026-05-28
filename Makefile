@@ -4,7 +4,7 @@ KIND_CLUSTER  := agent-platform
 IMAGE_TAG     := latest
 SERVICES      := operator orchestrator registry sample-api agent agent-sidecar dashboard
 
-.PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo
+.PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward redeploy-%
 
 build:
 	@for svc in $(SERVICES); do \
@@ -38,7 +38,7 @@ kind-load: docker-build
 
 spire:
 	helm repo add spiffe https://spiffe.github.io/helm-charts-hardened/ 2>/dev/null || true
-	helm repo update
+	helm repo update spiffe 2>/dev/null || true
 	helm upgrade --install spire-crds spiffe/spire-crds \
 		--namespace spire-system --create-namespace --wait
 	helm upgrade --install spire spiffe/spire \
@@ -52,6 +52,16 @@ spire:
 deploy: spire
 	kubectl apply -f deploy/crds/
 	kubectl apply -f deploy/manifests/
+
+redeploy-%:
+	docker build --target $* -t agent-$*:$(IMAGE_TAG) .
+	kind load docker-image agent-$*:$(IMAGE_TAG) --name $(KIND_CLUSTER)
+	kubectl rollout restart deployment/$*
+	kubectl rollout status deployment/$* --timeout=60s
+
+port-forward:
+	@echo "Dashboard → http://localhost:8090  (Ctrl+C to stop)"
+	@while true; do kubectl port-forward svc/dashboard 8090:8080; sleep 1; done
 
 bootstrap:
 	./scripts/bootstrap.sh
