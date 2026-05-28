@@ -20,13 +20,14 @@ import {
   resolveModel,
 } from '@flue/runtime/internal';
 import { local } from '@flue/runtime/node';
-import { postEvent } from '@agent-platform/sdk';
+import { postEvent, instrumentFlue, promptTimeoutSignal } from '@agent-platform/sdk';
 
 const agentId     = process.env.AGENT_ID      ?? 'unknown';
 const registryUrl  = process.env.REGISTRY_URL  ?? 'http://registry:8080';
 const aiProvider   = process.env.AI_PROVIDER   ?? 'anthropic';
 const aiApiKey     = process.env.AI_API_KEY    ?? '';
 const aiModel      = process.env.AI_MODEL      ?? 'anthropic/claude-sonnet-4-6';
+const promptTimeoutMs = Number(process.env.PROMPT_TIMEOUT_MS ?? 120000);
 
 configureProvider(aiProvider, { apiKey: aiApiKey });
 
@@ -73,11 +74,13 @@ class ChildAgentExecutor implements AgentExecutor {
         createDefaultEnv: async () => local().createSessionEnv({ id: agentId, cwd: process.cwd() }),
         defaultStore: sessionStore,
       });
+      instrumentFlue(ctx, registryUrl, agentId);
 
       const harness = await ctx.init({ model: aiModel, sandbox: local() });
       const session = await harness.session();
       const response = await session.prompt(
-        'Generate a random 8-character alphanumeric string. Reply with ONLY the string itself, no explanation.'
+        'Generate a random 8-character alphanumeric string. Reply with ONLY the string itself, no explanation.',
+        { signal: promptTimeoutSignal(promptTimeoutMs) }
       );
       const text = response.text.trim();
 

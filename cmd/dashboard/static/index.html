@@ -235,7 +235,7 @@
 
     .event-item details > summary {
       display: grid;
-      grid-template-columns: 75px 120px 1fr;
+      grid-template-columns: 16px 75px 120px 1fr;
       align-items: center;
       gap: 12px;
       padding: 7px 10px;
@@ -259,6 +259,39 @@
       font-size: 12px;
       color: var(--text);
     }
+
+    /* ── Neutral event-type accents ── */
+    .event-item.evt-tool     { border-left: 3px solid var(--indigo); }
+    .event-item.evt-model    { border-left: 3px solid var(--purple); }
+    .event-item.evt-thinking { border-left: 3px solid var(--text-dim); }
+    .event-item.evt-error    { border-left: 3px solid var(--red); }
+    .event-item.evt-run      { border-left: 3px solid var(--green); }
+    .event-item.evt-compact  { border-left: 3px solid var(--orange); }
+    .event-item.evt-log      { border-left: 3px solid var(--grey); }
+
+    .event-icon {
+      font-size: 12px;
+      width: 16px;
+      text-align: center;
+      flex: 0 0 auto;
+    }
+    .event-item.evt-tool     .event-type { color: #9aa6ee; }
+    .event-item.evt-model    .event-type { color: #bb8fce; }
+    .event-item.evt-thinking .event-type { color: var(--text-dim); }
+    .event-item.evt-error    .event-type { color: #e74c3c; }
+    .event-item.evt-run      .event-type { color: #58d68d; }
+    .event-item.evt-compact  .event-type { color: #f0a500; }
+    .event-item.evt-log      .event-type { color: var(--text-dim); }
+
+    /* ── Staleness / last-activity indicator ── */
+    .agent-stale {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-dim);
+      white-space: nowrap;
+    }
+    .agent-stale:empty { display: none; }
+    .agent-stale.warn { color: var(--orange); font-weight: 600; }
 
     .event-payload {
       margin: 0 10px 8px 10px;
@@ -653,6 +686,9 @@
   let logPollers  = {};          // agentId -> intervalId
   let logState    = {};          // agentId -> { container, lastTs, open }
 
+  let lastEventAt = {};          // agentId -> ms epoch of newest known event
+  const STALE_MS  = 30000;       // threshold after which a non-terminal agent is flagged stale
+
   const TERMINAL = ['completed', 'failed', 'killed'];
   function isTerminalStatus(s) { return TERMINAL.includes((s || '').toLowerCase()); }
 
@@ -736,6 +772,72 @@
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
+  // ── Neutral event-type taxonomy → visual treatment ───────────────────────
+  // Keyed off the neutral semantic `type` only — never framework-specific names.
+  // Unknown types fall through to the default look (empty class / no icon).
+
+  function eventTypeClass(type) {
+    switch ((type || '').toLowerCase()) {
+      case 'tool_start':
+      case 'tool_end':   return 'evt-tool';
+      case 'model_turn': return 'evt-model';
+      case 'thinking':   return 'evt-thinking';
+      case 'error':      return 'evt-error';
+      case 'run_start':
+      case 'run_end':    return 'evt-run';
+      case 'compaction': return 'evt-compact';
+      case 'log':        return 'evt-log';
+      default:           return '';
+    }
+  }
+
+  function eventTypeIcon(type) {
+    switch ((type || '').toLowerCase()) {
+      case 'tool_start':
+      case 'tool_end':   return '🔧';
+      case 'model_turn': return '🧠';
+      case 'thinking':   return '💭';
+      case 'error':      return '⚠';
+      case 'run_start':  return '▶';
+      case 'run_end':    return '■';
+      case 'compaction': return '🗜';
+      case 'log':        return '·';
+      default:           return '';
+    }
+  }
+
+  // ── Staleness ("last activity") ──────────────────────────────────────────
+
+  function fmtAgo(ts) {
+    if (!ts) return '';
+    const secs = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (secs < 60)   return `${secs}s ago`;
+    const mins = Math.floor(secs / 60);
+    if (mins < 60)   return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24)    return `${hrs}h ago`;
+    return `${Math.floor(hrs / 24)}d ago`;
+  }
+
+  // Recompute every staleness node from lastEventAt vs now, without rebuilding
+  // cards. Driven by a 1s interval so the "Xs ago" text stays live.
+  function refreshStaleness() {
+    const nodes = document.querySelectorAll('.agent-stale');
+    for (const el of nodes) {
+      const id = el.getAttribute('data-agent');
+      if (!id) continue;
+      if (isTerminalStatus(agentStatus[id])) {
+        el.textContent = '';
+        el.classList.remove('warn');
+        continue;
+      }
+      const ts = lastEventAt[id];
+      if (!ts) { el.textContent = ''; el.classList.remove('warn'); continue; }
+      el.textContent = `last activity ${fmtAgo(ts)}`;
+      el.classList.toggle('warn', (Date.now() - ts) > STALE_MS);
+    }
+  }
+
   // ── Build a child agent card (no kill button, no chat) ──────────────────
 
   function buildChildCard(a) {
@@ -749,6 +851,7 @@
         <span class="agent-meta">${escHtml(a.agentType || '—')}</span>
         <span class="status-wrap">${statusBadge(a.status)}</span>
         <div class="agent-actions">
+          <span class="agent-stale" data-agent="${a.agentId}" id="stale-${a.agentId}"></span>
           <button class="btn btn-events" id="evtbtn-${a.agentId}"
                   onclick="toggleEvents('${a.agentId}')">▼ Events</button>
           <span id="dismisswrap-${a.agentId}">
@@ -809,6 +912,7 @@
         <span class="status-wrap">${statusBadge(a.status)}</span>
         <span class="agent-meta">${escHtml(a.tenantId || '—')}</span>
         <div class="agent-actions">
+          <span class="agent-stale" data-agent="${a.agentId}" id="stale-${a.agentId}"></span>
           <button class="btn btn-events" id="evtbtn-${a.agentId}"
                   onclick="toggleEvents('${a.agentId}')">▼ Events</button>
           ${a.lifecycle === 'long-lived' ? `<button class="btn btn-chat" id="chatbtn-${a.agentId}" onclick="toggleChat('${a.agentId}')">💬 Chat</button>` : ''}
@@ -906,13 +1010,27 @@
 
     renderLogsEntry(agentId);
 
+    // Track newest event timestamp for the staleness indicator.
+    if (Array.isArray(evts) && evts.length) {
+      let newest = 0;
+      for (const e of evts) {
+        const t = e && e.timestamp ? Date.parse(e.timestamp) : NaN;
+        if (!isNaN(t) && t > newest) newest = t;
+      }
+      if (newest > 0 && newest > (lastEventAt[agentId] || 0)) lastEventAt[agentId] = newest;
+    }
+    refreshStaleness();
+
     const already = renderedEventCount[agentId] || 0;
     for (const e of evts.slice(already)) {
       const payload = JSON.stringify(e.payload ?? {}, null, 2);
+      const typeCls = eventTypeClass(e.type);
+      const icon    = eventTypeIcon(e.type);
       const item = document.createElement('div');
-      item.className = 'event-item';
+      item.className = 'event-item' + (typeCls ? ' ' + typeCls : '');
       item.innerHTML = `<details>
         <summary>
+          <span class="event-icon">${escHtml(icon)}</span>
           <span class="event-ts">${fmtTime(e.timestamp)}</span>
           ${sourceBadge(e.source)}
           <span class="event-type">${escHtml(e.type || '')}</span>
@@ -1243,6 +1361,7 @@
       delete renderedEventCount[agentId];
       stopLogPoller(agentId);
       delete agentStatus[agentId];
+      delete lastEventAt[agentId];
       expandedChats.delete(agentId);
       delete chatHistory[agentId];
       const card = document.getElementById(`card-${agentId}`);
@@ -1305,10 +1424,13 @@
 
   async function poll() {
     try { updateAgentList(await fetchAgents()); } catch (_) {}
+    try { refreshStaleness(); } catch (_) {}
   }
 
   poll();
   setInterval(poll, POLL_MS);
+  // Keep the "Xs ago" labels live between polls; relabels DOM, never rebuilds.
+  setInterval(() => { try { refreshStaleness(); } catch (_) {} }, 1000);
   fetchTemplates().then(types => {
     if (!Array.isArray(types) || types.length === 0) return;
     const sel = document.getElementById('f-type');

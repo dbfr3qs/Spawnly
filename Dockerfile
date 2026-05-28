@@ -53,6 +53,14 @@ FROM gcr.io/distroless/static-debian12 AS agent-sidecar
 COPY --from=build-agent-sidecar /bin/agent-sidecar /
 ENTRYPOINT ["/agent-sidecar"]
 
+# Shared SDK build — compiles @agent-platform/sdk from source so the dist is
+# reproducible (agents/*/dist is gitignored). Consumed by every node agent image.
+FROM node:22-alpine AS build-sdk
+WORKDIR /sdk
+COPY agents/sdk/package.json agents/sdk/tsconfig.json ./
+COPY agents/sdk/src ./src
+RUN npm install --no-audit --no-fund && npm run build
+
 # Weather-monitor Node.js/Flue build
 FROM node:22-alpine AS build-weather-monitor-node
 WORKDIR /app
@@ -70,7 +78,7 @@ COPY --from=build-weather-monitor-node /app/dist ./dist
 COPY --from=build-weather-monitor-node /app/node_modules ./node_modules
 COPY agents/weather-monitor/heartbeat.mjs ./heartbeat.mjs
 COPY agents/sdk/package.json ./node_modules/@agent-platform/sdk/package.json
-COPY agents/sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
+COPY --from=build-sdk /sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
 ENV PORT=8080
 EXPOSE 8080
 CMD ["node", "dist/server.mjs"]
@@ -91,7 +99,7 @@ WORKDIR /app
 COPY --from=build-child-agent-node /app/dist ./dist
 COPY --from=build-child-agent-node /app/node_modules ./node_modules
 COPY agents/sdk/package.json ./node_modules/@agent-platform/sdk/package.json
-COPY agents/sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
+COPY --from=build-sdk /sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
 EXPOSE 8080
 CMD ["node", "dist/index.js"]
 
@@ -111,7 +119,7 @@ WORKDIR /app
 COPY --from=build-parent-agent-node /app/dist ./dist
 COPY --from=build-parent-agent-node /app/node_modules ./node_modules
 COPY agents/sdk/package.json ./node_modules/@agent-platform/sdk/package.json
-COPY agents/sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
+COPY --from=build-sdk /sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
 CMD ["node", "dist/index.js"]
 
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build-identity-server

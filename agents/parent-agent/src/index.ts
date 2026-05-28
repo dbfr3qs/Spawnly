@@ -8,7 +8,7 @@ import {
   resolveModel,
 } from '@flue/runtime/internal';
 import { local } from '@flue/runtime/node';
-import { postEvent } from '@agent-platform/sdk';
+import { postEvent, instrumentFlue, promptTimeoutSignal } from '@agent-platform/sdk';
 
 const agentId       = process.env.AGENT_ID        ?? 'unknown';
 const registryUrl    = process.env.REGISTRY_URL    ?? 'http://registry:8080';
@@ -18,6 +18,7 @@ const userId         = process.env.USER_ID         ?? 'unknown';
 const aiProvider     = process.env.AI_PROVIDER     ?? 'anthropic';
 const aiApiKey       = process.env.AI_API_KEY      ?? '';
 const aiModel        = process.env.AI_MODEL        ?? 'anthropic/claude-sonnet-4-6';
+const promptTimeoutMs = Number(process.env.PROMPT_TIMEOUT_MS ?? 120000);
 
 configureProvider(aiProvider, { apiKey: aiApiKey });
 
@@ -170,6 +171,7 @@ async function main() {
     createDefaultEnv: async () => local().createSessionEnv({ id: agentId, cwd: process.cwd() }),
     defaultStore: sessionStore,
   });
+  instrumentFlue(ctx, registryUrl, agentId);
 
   const harness = await ctx.init({
     model: aiModel,
@@ -183,7 +185,8 @@ async function main() {
     'then use wait_for_child_ready to wait until it is reachable, ' +
     'then use call_child_agent to send it a message and receive its random string result, ' +
     'then use kill_child_agent to terminate it. ' +
-    'Finally, report back the random string that the child agent produced.'
+    'Finally, report back the random string that the child agent produced.',
+    { signal: promptTimeoutSignal(promptTimeoutMs) }
   );
 
   await postEvent(registryUrl, agentId, 'parent_completed', { result: response.text });
