@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -45,8 +46,11 @@ func main() {
 	registryURL := getenv("REGISTRY_URL", "http://registry:8080")
 	isTokenURL := getenv("IS_TOKEN_URL", "http://identity-server:8080/connect/token")
 	sampleAPIURL := getenv("SAMPLE_API_URL", "http://sample-api:8080")
+	orchestratorURL := getenv("ORCHESTRATOR_URL", "http://orchestrator:8080")
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	cfg := ctrl.GetConfigOrDie()
+
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:                 scheme,
 		HealthProbeBindAddress: probeAddr,
 	})
@@ -55,14 +59,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		setupLog.Error(err, "unable to create clientset")
+		os.Exit(1)
+	}
+
 	if err = (&operator.AgentWorkloadReconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		Registry:     registry.New(registryURL),
-		RegistryURL:  registryURL,
-		ISTokenURL:   isTokenURL,
-		SampleAPIURL: sampleAPIURL,
-		EventsClient: events.New(registryURL),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		Registry:        registry.New(registryURL),
+		RegistryURL:     registryURL,
+		ISTokenURL:      isTokenURL,
+		SampleAPIURL:    sampleAPIURL,
+		OrchestratorURL: orchestratorURL,
+		EventsClient:    events.New(registryURL),
+		Clientset:       clientset,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentWorkload")
 		os.Exit(1)

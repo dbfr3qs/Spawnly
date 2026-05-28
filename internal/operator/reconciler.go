@@ -4,6 +4,8 @@ package operator
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -12,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -26,12 +29,14 @@ const finalizer = "agent-platform.io/cleanup"
 
 type AgentWorkloadReconciler struct {
 	client.Client
-	Scheme       *runtime.Scheme
-	Registry     registry.Client
-	RegistryURL  string
-	ISTokenURL   string
-	SampleAPIURL string
-	EventsClient events.Client // may be nil
+	Scheme          *runtime.Scheme
+	Registry        registry.Client
+	RegistryURL     string
+	ISTokenURL      string
+	SampleAPIURL    string
+	OrchestratorURL string
+	EventsClient    events.Client // may be nil
+	Clientset       kubernetes.Interface
 }
 
 func mustMarshal(v any) json.RawMessage {
@@ -143,6 +148,14 @@ func (r *AgentWorkloadReconciler) buildService(aw *agentv1alpha1.AgentWorkload) 
 
 func (r *AgentWorkloadReconciler) handleCompletion(ctx context.Context, aw *agentv1alpha1.AgentWorkload, failed bool) (ctrl.Result, error) {
 	if failed {
+		if r.EventsClient != nil && aw.Status.PodName != "" {
+			logs := r.fetchPodLogs(ctx, aw.Namespace, aw.Status.PodName)
+			_ = r.EventsClient.PostEvent(ctx, aw.Name, events.Event{
+				Source:  events.SourceOperator,
+				Type:    "pod_failed",
+				Payload: mustMarshal(map[string]string{"logs": logs}),
+			})
+		}
 		_ = r.Registry.Fail(ctx, aw.Name)
 		aw.Status.Phase = "Failed"
 	} else {
@@ -152,9 +165,40 @@ func (r *AgentWorkloadReconciler) handleCompletion(ctx context.Context, aw *agen
 	return ctrl.Result{}, r.Status().Update(ctx, aw)
 }
 
+func (r *AgentWorkloadReconciler) fetchPodLogs(ctx context.Context, namespace, podName string) string {
+	if r.Clientset == nil {
+		return "clientset not available"
+	}
+	tail := int64(100)
+	req := r.Clientset.CoreV1().Pods(namespace).GetLogs(podName, &corev1.PodLogOptions{
+		Container: "agent",
+		TailLines: &tail,
+	})
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return fmt.Sprintf("could not stream logs: %v", err)
+	}
+	defer stream.Close()
+	b, err := io.ReadAll(stream)
+	if err != nil {
+		return fmt.Sprintf("could not read logs: %v", err)
+	}
+	return string(b)
+}
+
 func (r *AgentWorkloadReconciler) handleDeletion(ctx context.Context, aw *agentv1alpha1.AgentWorkload) (ctrl.Result, error) {
 	if controllerutil.ContainsFinalizer(aw, finalizer) {
-		_ = r.Registry.Fail(ctx, aw.Name)
+		if aw.Status.PodName != "" {
+			var pod corev1.Pod
+			key := types.NamespacedName{Name: aw.Status.PodName, Namespace: aw.Namespace}
+			if err := r.Get(ctx, key, &pod); err == nil && pod.Status.Phase == corev1.PodSucceeded {
+				_ = r.Registry.Complete(ctx, aw.Name)
+			} else {
+				_ = r.Registry.Fail(ctx, aw.Name)
+			}
+		} else {
+			_ = r.Registry.Fail(ctx, aw.Name)
+		}
 		controllerutil.RemoveFinalizer(aw, finalizer)
 		return ctrl.Result{}, r.Update(ctx, aw)
 	}
@@ -169,12 +213,31 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 		{Name: "AGENT_ID", Value: aw.Name},
 		{Name: "REGISTRY_URL", Value: r.RegistryURL},
 		{Name: "IS_TOKEN_URL", Value: r.ISTokenURL},
+		{Name: "PARENT_ID", Value: aw.Spec.ParentID},
+		{Name: "ORCHESTRATOR_URL", Value: r.OrchestratorURL},
 	}
 
 	agentEnv := append([]corev1.EnvVar{
 		{Name: "SAMPLE_API_URL", Value: r.SampleAPIURL},
 		{Name: "SPIFFE_ENDPOINT_SOCKET", Value: "unix:///spiffe-workload-api/spire-agent.sock"},
 	}, sharedEnv...)
+	optional := func() *bool { b := true; return &b }()
+	for _, kv := range []struct{ env, key string }{
+		{"AI_PROVIDER", "provider"},
+		{"AI_API_KEY", "api-key"},
+		{"AI_MODEL", "model"},
+	} {
+		agentEnv = append(agentEnv, corev1.EnvVar{
+			Name: kv.env,
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "ai-provider"},
+					Key:                  kv.key,
+					Optional:             optional,
+				},
+			},
+		})
+	}
 	for k, v := range tpl.Runtime.EnvDefaults {
 		agentEnv = append(agentEnv, corev1.EnvVar{Name: k, Value: v})
 	}

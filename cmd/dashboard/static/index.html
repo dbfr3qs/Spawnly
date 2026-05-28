@@ -460,6 +460,34 @@
       transform: translateY(0);
     }
 
+    /* ── Children section ── */
+    .children-section {
+      margin: 0 18px 14px;
+      padding-left: 20px;
+      border-left: 2px solid var(--border);
+    }
+    .children-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: var(--text-dim);
+      margin-bottom: 8px;
+      padding-top: 4px;
+    }
+    .child-card {
+      background: rgba(255,255,255,.03);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 6px;
+      overflow: hidden;
+    }
+    .child-card:last-child { margin-bottom: 0; }
+    .child-card .agent-row {
+      padding: 10px 14px;
+      grid-template-columns: minmax(160px,1fr) 100px 90px auto;
+    }
+
     /* ── Scrollbar ── */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -594,6 +622,65 @@
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
+  // ── Build a child agent card (no kill button, no chat) ──────────────────
+
+  function buildChildCard(a) {
+    const card = document.createElement('div');
+    card.className = 'child-card';
+    card.id = `card-${a.agentId}`;
+    const isTerminal = ['completed','failed','killed'].includes((a.status||'').toLowerCase());
+    card.innerHTML = `
+      <div class="agent-row">
+        <span class="agent-id">${escHtml(a.agentId)}</span>
+        <span class="agent-meta">${escHtml(a.agentType || '—')}</span>
+        <span class="status-wrap">${statusBadge(a.status)}</span>
+        <div class="agent-actions">
+          <button class="btn btn-events" id="evtbtn-${a.agentId}"
+                  onclick="toggleEvents('${a.agentId}')">▼ Events</button>
+          <span id="dismisswrap-${a.agentId}">
+            ${isTerminal ? `<button class="btn btn-dismiss" onclick="handleDismiss('${a.agentId}')">✕</button>` : ''}
+          </span>
+        </div>
+      </div>`;
+    return card;
+  }
+
+  // ── Insert/update children inside a parent card ──────────────────────────
+
+  function updateChildrenSection(parentId, childAgents) {
+    if (childAgents.length === 0) return;
+    const parentCard = document.getElementById(`card-${parentId}`);
+    if (!parentCard) return;
+
+    let section = document.getElementById(`children-${parentId}`);
+    if (!section) {
+      section = document.createElement('div');
+      section.className = 'children-section';
+      section.id = `children-${parentId}`;
+      section.innerHTML = '<div class="children-label">Child Agents</div>';
+      parentCard.appendChild(section);
+    }
+
+    for (const child of childAgents) {
+      const existing = document.getElementById(`card-${child.agentId}`);
+      if (!existing) {
+        section.appendChild(buildChildCard(child));
+      } else {
+        const sw = existing.querySelector('.status-wrap');
+        if (sw) sw.innerHTML = statusBadge(child.status);
+        const dw = document.getElementById(`dismisswrap-${child.agentId}`);
+        if (dw) {
+          const isTerminal = ['completed','failed','killed'].includes((child.status||'').toLowerCase());
+          const hasDismiss = !!dw.querySelector('button');
+          if (isTerminal && !hasDismiss)
+            dw.innerHTML = `<button class="btn btn-dismiss" onclick="handleDismiss('${child.agentId}')">✕</button>`;
+          else if (!isTerminal && hasDismiss)
+            dw.innerHTML = '';
+        }
+      }
+    }
+  }
+
   // ── Build a fresh agent card element (first appearance only) ─────────────
 
   function buildCard(a) {
@@ -622,14 +709,24 @@
     return card;
   }
 
-  // ── Surgical agent list update — never rebuilds existing cards ───────────
+  // ── Surgical agent list update — top-level agents only, children nested ──
 
   function updateAgentList(agents) {
     const list    = document.getElementById('agent-list');
     const countEl = document.getElementById('agent-count');
-    countEl.textContent = `${agents.length} agent${agents.length !== 1 ? 's' : ''}`;
 
-    if (agents.length === 0) {
+    const topLevel = agents.filter(a => !a.parentId);
+    const childMap = new Map();
+    for (const a of agents) {
+      if (a.parentId) {
+        if (!childMap.has(a.parentId)) childMap.set(a.parentId, []);
+        childMap.get(a.parentId).push(a);
+      }
+    }
+
+    countEl.textContent = `${topLevel.length} agent${topLevel.length !== 1 ? 's' : ''}`;
+
+    if (topLevel.length === 0) {
       if (!list.querySelector('.empty-state')) {
         list.innerHTML = `<div class="empty-state">
           <div class="icon">🤖</div><p>No agents running</p>
@@ -641,12 +738,11 @@
     const empty = list.querySelector('.empty-state');
     if (empty) list.innerHTML = '';
 
-    for (const a of agents) {
+    for (const a of topLevel) {
       const existing = document.getElementById(`card-${a.agentId}`);
       if (!existing) {
         list.appendChild(buildCard(a));
       } else {
-        // Only patch the parts that can change: status badge + kill button
         const sw = existing.querySelector('.status-wrap');
         if (sw && sw.innerHTML !== statusBadge(a.status)) sw.innerHTML = statusBadge(a.status);
 
@@ -669,6 +765,7 @@
             dw.innerHTML = '';
         }
       }
+      updateChildrenSection(a.agentId, childMap.get(a.agentId) || []);
     }
   }
 

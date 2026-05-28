@@ -60,3 +60,20 @@ export function createAuthenticatedFetch(
     return fetch(url, { ...init, headers });
   };
 }
+
+export async function postEvent(
+  registryUrl: string,
+  agentId: string,
+  type: string,
+  payload: unknown
+): Promise<void> {
+  try {
+    await fetch(`${registryUrl}/v1/agents/${agentId}/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source: 'agent', type, payload }),
+    });
+  } catch (e: unknown) {
+    console.warn(`[sdk] postEvent failed: ${e}`);
+  }
+}

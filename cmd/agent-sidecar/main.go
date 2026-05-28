@@ -27,6 +27,7 @@ type config struct {
 	agentType   string
 	tenantID    string
 	userID      string
+	parentID    string
 	registryURL string
 	isTokenURL  string
 	socketPath  string
@@ -54,6 +55,7 @@ func selfRegister(ctx context.Context, cfg config, svid string) (string, error) 
 		"agentType": cfg.agentType,
 		"tenantId":  cfg.tenantID,
 		"userId":    cfg.userID,
+		"parentId":  cfg.parentID,
 	})
 	req, err := http.NewRequestWithContext(ctx, "POST", cfg.registryURL+"/v1/agents",
 		strings.NewReader(string(body)))
@@ -261,6 +263,7 @@ func main() {
 		agentType:   os.Getenv("AGENT_TYPE"),
 		tenantID:    os.Getenv("TENANT_ID"),
 		userID:      os.Getenv("USER_ID"),
+		parentID:    os.Getenv("PARENT_ID"),
 		registryURL: os.Getenv("REGISTRY_URL"),
 		isTokenURL:  os.Getenv("IS_TOKEN_URL"),
 		socketPath:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),

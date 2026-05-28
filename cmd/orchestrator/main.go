@@ -32,6 +32,7 @@ type SpawnRequest struct {
 	UserID    string `json:"userId"`
 	TenantID  string `json:"tenantId"`
 	Task      string `json:"task,omitempty"`
+	ParentID  string `json:"parentId,omitempty"`
 }
 
 type SpawnResponse struct {
@@ -103,6 +104,7 @@ func buildMux(k8s client.Client, sdb spicedb.Client, registryURL string) *http.S
 				TenantID:  req.TenantID,
 				Lifecycle: lifecycle,
 				Task:      req.Task,
+				ParentID:  req.ParentID,
 			},
 		}
 
@@ -111,6 +113,17 @@ func buildMux(k8s client.Client, sdb spicedb.Client, registryURL string) *http.S
 			http.Error(w, "failed to spawn agent", http.StatusInternalServerError)
 			return
 		}
+
+		// Pre-register immediately so the agent appears in the UI with "pending"
+		// status before the pod starts. The sidecar will overwrite this to "active".
+		_ = regClient.PreRegisterAgent(r.Context(), registry.AgentRecord{
+			AgentID:   workloadName,
+			AgentType: req.AgentType,
+			TenantID:  req.TenantID,
+			UserID:    req.UserID,
+			Lifecycle: lifecycle,
+			ParentID:  req.ParentID,
+		})
 
 		go func() {
 			_ = evtClient.PostEvent(context.Background(), workloadName, events.Event{

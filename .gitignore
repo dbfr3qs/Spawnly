@@ -11,10 +11,8 @@
 vendor/
 
 # Node
-agents/weather-monitor/node_modules/
-agents/sdk/node_modules/
-agents/weather-monitor/dist/
-agents/sdk/dist/
+agents/*/node_modules/
+agents/*/dist/
 
 # .NET build output
 identityserver/bin/

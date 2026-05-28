@@ -146,6 +146,29 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 		json.NewEncoder(w).Encode(t)
 	})
 
+	// Internal pre-registration endpoint — no SVID required.
+	// Called by the orchestrator at spawn time so the agent appears in the UI
+	// immediately with "pending" status rather than waiting for the sidecar to start.
+	mux.HandleFunc("POST /v1/agents/preregister", func(w http.ResponseWriter, r *http.Request) {
+		var rec registry.AgentRecord
+		if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if rec.AgentID == "" {
+			http.Error(w, "agentId required", http.StatusBadRequest)
+			return
+		}
+		rec.Status = "pending"
+		s.registerAgent(rec)
+		s.appendEvent(rec.AgentID, events.Event{
+			Source:  events.SourceOrchestrator,
+			Type:    "workload_spawning",
+			Payload: mustMarshal(map[string]string{"agentId": rec.AgentID, "agentType": rec.AgentType}),
+		})
+		w.WriteHeader(http.StatusCreated)
+	})
+
 	mux.HandleFunc("POST /v1/agents", func(w http.ResponseWriter, r *http.Request) {
 		rawToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if rawToken == "" {
@@ -164,6 +187,7 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 			AgentType string `json:"agentType"`
 			TenantID  string `json:"tenantId"`
 			UserID    string `json:"userId"`
+			ParentID  string `json:"parentId"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -183,6 +207,7 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 			UserID:    req.UserID,
 			Status:    "active",
 			Lifecycle: tpl.Runtime.Lifecycle,
+			ParentID:  req.ParentID,
 		}
 		s.registerAgent(rec)
 		s.appendEvent(agentID, events.Event{

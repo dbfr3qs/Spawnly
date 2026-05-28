@@ -75,6 +75,45 @@ ENV PORT=8080
 EXPOSE 8080
 CMD ["node", "dist/server.mjs"]
 
+# Child-agent Node.js/Flue build
+FROM node:22-alpine AS build-child-agent-node
+WORKDIR /app
+COPY agents/sdk/ /sdk/
+COPY agents/child-agent/package*.json ./
+RUN npm ci
+COPY agents/child-agent/src ./src
+COPY agents/child-agent/tsconfig.json ./tsconfig.json
+RUN npm run build
+
+# Final child-agent image
+FROM node:22-slim AS child-agent
+WORKDIR /app
+COPY --from=build-child-agent-node /app/dist ./dist
+COPY --from=build-child-agent-node /app/node_modules ./node_modules
+COPY agents/sdk/package.json ./node_modules/@agent-platform/sdk/package.json
+COPY agents/sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
+EXPOSE 8080
+CMD ["node", "dist/index.js"]
+
+# Parent-agent Node.js/Flue build
+FROM node:22-alpine AS build-parent-agent-node
+WORKDIR /app
+COPY agents/sdk/ /sdk/
+COPY agents/parent-agent/package*.json ./
+RUN npm ci
+COPY agents/parent-agent/src ./src
+COPY agents/parent-agent/tsconfig.json ./tsconfig.json
+RUN npm run build
+
+# Final parent-agent image
+FROM node:22-slim AS parent-agent
+WORKDIR /app
+COPY --from=build-parent-agent-node /app/dist ./dist
+COPY --from=build-parent-agent-node /app/node_modules ./node_modules
+COPY agents/sdk/package.json ./node_modules/@agent-platform/sdk/package.json
+COPY agents/sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
+CMD ["node", "dist/index.js"]
+
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build-identity-server
 WORKDIR /src
 COPY identityserver/ .

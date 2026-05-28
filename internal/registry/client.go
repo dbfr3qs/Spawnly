@@ -20,6 +20,7 @@ type Client interface {
 	PostEvent(ctx context.Context, agentID string, e events.Event) error
 	ListTemplates(ctx context.Context) ([]string, error)
 	DismissAgent(ctx context.Context, agentID string) error
+	PreRegisterAgent(ctx context.Context, r AgentRecord) error
 }
 
 type HTTPClient struct {
@@ -126,6 +127,21 @@ func (c *HTTPClient) ListTemplates(ctx context.Context) ([]string, error) {
 	return types, json.NewDecoder(resp.Body).Decode(&types)
 }
 
+func (c *HTTPClient) PreRegisterAgent(ctx context.Context, r AgentRecord) error {
+	body, _ := json.Marshal(r)
+	req, _ := http.NewRequestWithContext(ctx, "POST", c.base+"/v1/agents/preregister", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("preregister agent: status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func (c *HTTPClient) DismissAgent(ctx context.Context, agentID string) error {
 	req, _ := http.NewRequestWithContext(ctx, "POST", c.base+"/v1/agents/"+agentID+"/dismiss", nil)
 	resp, err := c.http.Do(req)
@@ -194,5 +210,11 @@ func (m *Mock) ListTemplates(_ context.Context) ([]string, error) {
 }
 
 func (m *Mock) DismissAgent(_ context.Context, agentID string) error {
+	return nil
+}
+
+func (m *Mock) PreRegisterAgent(_ context.Context, r AgentRecord) error {
+	r.Status = "pending"
+	m.Agents = append(m.Agents, r)
 	return nil
 }

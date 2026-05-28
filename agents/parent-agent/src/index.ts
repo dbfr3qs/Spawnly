@@ -1,0 +1,200 @@
+import { v4 as uuidv4 } from 'uuid';
+import { ClientFactory } from '@a2a-js/sdk/client';
+import type { ToolDef } from '@flue/runtime';
+import { configureProvider } from '@flue/runtime/app';
+import {
+  createFlueContext,
+  InMemorySessionStore,
+  resolveModel,
+} from '@flue/runtime/internal';
+import { local } from '@flue/runtime/node';
+import { postEvent } from '@agent-platform/sdk';
+
+const agentId       = process.env.AGENT_ID        ?? 'unknown';
+const registryUrl    = process.env.REGISTRY_URL    ?? 'http://registry:8080';
+const orchestratorUrl = process.env.ORCHESTRATOR_URL ?? 'http://orchestrator:8080';
+const tenantId       = process.env.TENANT_ID       ?? 'default';
+const userId         = process.env.USER_ID         ?? 'unknown';
+const aiProvider     = process.env.AI_PROVIDER     ?? 'anthropic';
+const aiApiKey       = process.env.AI_API_KEY      ?? '';
+const aiModel        = process.env.AI_MODEL        ?? 'anthropic/claude-sonnet-4-6';
+
+configureProvider(aiProvider, { apiKey: aiApiKey });
+
+// Tool: spawn a child agent
+const spawnChildAgent: ToolDef = {
+  name: 'spawn_child_agent',
+  description: 'Spawn a new child-agent instance. Returns the child agent ID.',
+  parameters: {
+    type: 'object',
+    properties: {},
+    required: [],
+  },
+  execute: async (_args: Record<string, unknown>) => {
+    const res = await fetch(`${orchestratorUrl}/spawn`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        agentType: 'child-agent',
+        tenantId,
+        userId,
+        parentId: agentId,
+      }),
+    });
+    if (!res.ok) {
+      throw new Error(`spawn failed: ${res.status} ${await res.text()}`);
+    }
+    const data = (await res.json()) as { workloadName?: string; id?: string; [k: string]: unknown };
+    const childId = data.workloadName ?? data.id ?? String(data);
+    return JSON.stringify({ childId });
+  },
+};
+
+// Tool: wait for child agent to be ready (polls /.well-known/agent.json)
+const waitForChildReady: ToolDef = {
+  name: 'wait_for_child_ready',
+  description: 'Poll until the child agent service is reachable. Pass childId from spawn_child_agent.',
+  parameters: {
+    type: 'object',
+    properties: {
+      childId: { type: 'string', description: 'The child agent ID returned by spawn_child_agent' },
+    },
+    required: ['childId'],
+  },
+  execute: async (args: Record<string, unknown>) => {
+    const childId = String(args.childId);
+    const url = `http://${childId}-svc:8080/.well-known/agent.json`;
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      try {
+        const res = await fetch(url);
+        if (res.ok) {
+          return JSON.stringify({ ready: true });
+        }
+      } catch {
+        // not ready yet
+      }
+      await new Promise((r) => setTimeout(r, 2_000));
+    }
+    throw new Error(`Timed out waiting for child agent ${childId} to be ready`);
+  },
+};
+
+// Tool: call the child agent via A2A
+const callChildAgent: ToolDef = {
+  name: 'call_child_agent',
+  description: 'Send a message to the child agent via A2A and return its text response.',
+  parameters: {
+    type: 'object',
+    properties: {
+      childId: { type: 'string', description: 'The child agent ID' },
+    },
+    required: ['childId'],
+  },
+  execute: async (args: Record<string, unknown>) => {
+    const childId = String(args.childId);
+    const factory = new ClientFactory();
+    const client = await factory.createFromUrl(`http://${childId}-svc:8080`);
+    const result = await client.sendMessage({
+      message: {
+        kind: 'message',
+        messageId: uuidv4(),
+        role: 'user',
+        parts: [{ kind: 'text', text: 'Generate a random string.' }],
+      },
+    });
+    // Extract text from response (Message or Task)
+    let text = '';
+    if ('kind' in result && result.kind === 'message') {
+      for (const part of result.parts) {
+        if (part.kind === 'text') {
+          text += part.text;
+        }
+      }
+    } else if ('kind' in result && result.kind === 'task') {
+      const task = result as { kind: 'task'; history?: Array<{ role: string; parts: Array<{ kind: string; text?: string }> }> };
+      const history = task.history ?? [];
+      for (const msg of history) {
+        if (msg.role === 'agent') {
+          for (const part of msg.parts) {
+            if (part.kind === 'text' && part.text) {
+              text += part.text;
+            }
+          }
+        }
+      }
+    }
+    return JSON.stringify({ result: text });
+  },
+};
+
+// Tool: kill the child agent
+const killChildAgent: ToolDef = {
+  name: 'kill_child_agent',
+  description: 'Terminate the child agent by calling the orchestrator DELETE endpoint.',
+  parameters: {
+    type: 'object',
+    properties: {
+      childId: { type: 'string', description: 'The child agent ID to terminate' },
+    },
+    required: ['childId'],
+  },
+  execute: async (args: Record<string, unknown>) => {
+    const childId = String(args.childId);
+    const res = await fetch(`${orchestratorUrl}/v1/agents/${childId}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok && res.status !== 404) {
+      throw new Error(`delete failed: ${res.status} ${await res.text()}`);
+    }
+    return JSON.stringify({ done: true });
+  },
+};
+
+async function main() {
+  await postEvent(registryUrl, agentId, 'parent_started', { agentId });
+
+  const sessionStore = new InMemorySessionStore();
+  const ctx = createFlueContext({
+    id: agentId,
+    runId: uuidv4(),
+    payload: {},
+    env: process.env as Record<string, string>,
+    agentConfig: {
+      systemPrompt: '',
+      skills: {},
+      roles: {},
+      model: undefined,
+      resolveModel,
+    },
+    createDefaultEnv: async () => local().createSessionEnv({ id: agentId, cwd: process.cwd() }),
+    defaultStore: sessionStore,
+  });
+
+  const harness = await ctx.init({
+    model: aiModel,
+    tools: [spawnChildAgent, waitForChildReady, callChildAgent, killChildAgent],
+    sandbox: local(),
+  });
+
+  const session = await harness.session();
+  const response = await session.prompt(
+    'Run your task: use spawn_child_agent to start a child agent, ' +
+    'then use wait_for_child_ready to wait until it is reachable, ' +
+    'then use call_child_agent to send it a message and receive its random string result, ' +
+    'then use kill_child_agent to terminate it. ' +
+    'Finally, report back the random string that the child agent produced.'
+  );
+
+  await postEvent(registryUrl, agentId, 'parent_completed', { result: response.text });
+  console.log('[parent-agent] completed. result:', response.text);
+}
+
+main().catch(async (err) => {
+  console.error('[parent-agent] fatal error:', err);
+  await postEvent(registryUrl, agentId, 'agent_error', {
+    error: err instanceof Error ? err.message : String(err),
+    stack: err instanceof Error ? err.stack : undefined,
+  });
+  process.exit(1);
+});

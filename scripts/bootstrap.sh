@@ -25,14 +25,14 @@ kubectl config set-cluster "kind-${KIND_CLUSTER}" --server="https://${CONTROL_PL
 # ── Images ───────────────────────────────────────────────────────────────────
 
 echo "==> Building Docker images..."
-for svc in operator orchestrator registry sample-api agent dashboard agent-sidecar; do
+for svc in operator orchestrator registry sample-api agent dashboard agent-sidecar child-agent parent-agent; do
   docker build --target "$svc" -t "agent-$svc:$IMAGE_TAG" .
 done
 docker build --target identity-server -t agent-identity-server:$IMAGE_TAG .
 docker build --target weather-monitor -t "agent-weather-monitor:$IMAGE_TAG" .
 
 echo "==> Loading images into Kind..."
-for svc in operator orchestrator registry sample-api agent dashboard agent-sidecar identity-server; do
+for svc in operator orchestrator registry sample-api agent dashboard agent-sidecar identity-server child-agent parent-agent; do
   kind load docker-image "agent-$svc:$IMAGE_TAG" --name "$KIND_CLUSTER"
 done
 kind load docker-image "agent-weather-monitor:$IMAGE_TAG" --name "$KIND_CLUSTER"
@@ -94,6 +94,25 @@ kubectl wait --for=condition=available deployment/agent-operator --timeout=120s
 kubectl wait --for=condition=available deployment/orchestrator --timeout=120s
 kubectl wait --for=condition=available deployment/dashboard --timeout=120s
 
+# ── Secrets ──────────────────────────────────────────────────────────────────
+
+echo "==> Creating AI provider secret..."
+# Resolve provider, key, and model from env — supports Anthropic and OpenAI out of the box.
+_AI_PROVIDER="${AI_PROVIDER:-anthropic}"
+if [ "$_AI_PROVIDER" = "openai" ]; then
+  _AI_API_KEY="${AI_API_KEY:-${OPENAI_API_KEY:-}}"
+  _AI_MODEL="${AI_MODEL:-openai/gpt-4o}"
+else
+  _AI_API_KEY="${AI_API_KEY:-${ANTHROPIC_API_KEY:-}}"
+  _AI_MODEL="${AI_MODEL:-anthropic/claude-sonnet-4-6}"
+fi
+kubectl create secret generic ai-provider \
+  --from-literal=provider="${_AI_PROVIDER}" \
+  --from-literal=api-key="${_AI_API_KEY}" \
+  --from-literal=model="${_AI_MODEL}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+echo "  ai-provider secret applied (provider=${_AI_PROVIDER}, model=${_AI_MODEL})"
+
 # ── Templates ────────────────────────────────────────────────────────────────
 # Always re-seed — the registry store is in-memory and resets on every restart.
 
@@ -142,6 +161,47 @@ curl -sf -X POST http://localhost:18080/v1/templates \
     }
   }'
 echo "  weather-monitor template seeded"
+
+curl -sf -X POST http://localhost:18080/v1/templates \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "agentType": "parent-agent",
+    "version": "1.0.0",
+    "status": "active",
+    "meta": {"displayName": "Parent Agent", "description": "Spawns a child agent, retrieves a random string via A2A, then exits"},
+    "runtimeSpec": {
+      "image": "agent-parent-agent:latest",
+      "resources": {"cpuLimits": "500m", "memoryLimits": "256Mi"},
+      "envDefaults": {}
+    },
+    "authzTemplate": {
+      "spiceDbRelations": [
+        {"resource": "tenant:{{tenant_id}}", "relation": "agent", "subject": "agent:{{agent_id}}"}
+      ]
+    }
+  }'
+echo "  parent-agent template seeded"
+
+curl -sf -X POST http://localhost:18080/v1/templates \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "agentType": "child-agent",
+    "version": "1.0.0",
+    "status": "active",
+    "meta": {"displayName": "Child Agent", "description": "Long-lived A2A server that generates a random string on request"},
+    "runtimeSpec": {
+      "image": "agent-child-agent:latest",
+      "lifecycle": "long-lived",
+      "resources": {"cpuLimits": "500m", "memoryLimits": "256Mi"},
+      "envDefaults": {}
+    },
+    "authzTemplate": {
+      "spiceDbRelations": [
+        {"resource": "tenant:{{tenant_id}}", "relation": "agent", "subject": "agent:{{agent_id}}"}
+      ]
+    }
+  }'
+echo "  child-agent template seeded"
 
 kill $PF_REG_SEED 2>/dev/null || true
 
