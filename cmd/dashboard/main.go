@@ -57,6 +57,34 @@ func main() {
 		id := r.PathValue("id")
 		proxy("GET", orchestratorURL+"/v1/agents/"+id+"/events")(w, r)
 	})
+	// Logs route — unlike the generic proxy, this MUST forward the inbound
+	// query string (container, sinceTime, tailLines) to the orchestrator.
+	mux.HandleFunc("GET /api/agents/{id}/logs", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		target := orchestratorURL + "/v1/agents/" + id + "/logs"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		req, err := http.NewRequestWithContext(r.Context(), "GET", target, nil)
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		req.Header = r.Header.Clone()
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		for k, vs := range resp.Header {
+			for _, v := range vs {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	})
 	mux.HandleFunc("DELETE /api/agents/{id}", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		proxy("DELETE", orchestratorURL+"/v1/agents/"+id)(w, r)

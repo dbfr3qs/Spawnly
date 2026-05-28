@@ -281,6 +281,102 @@
       padding: 16px 0;
     }
 
+    /* ── Live logs ── */
+    .logs-entry {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      margin-bottom: 8px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: rgba(39,174,96,.06);
+      cursor: pointer;
+      font-size: 12px;
+      color: var(--text);
+      transition: background .15s, border-color .15s;
+      user-select: none;
+    }
+    .logs-entry:hover { background: rgba(39,174,96,.12); border-color: var(--accent-hi); }
+    .logs-entry .logs-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--green);
+      flex: 0 0 auto;
+    }
+    .logs-entry.live .logs-dot {
+      box-shadow: 0 0 6px var(--green);
+      animation: logs-pulse 1.4s ease-in-out infinite;
+    }
+    .logs-entry:not(.live) .logs-dot { background: var(--grey); }
+    .logs-entry .logs-label {
+      font-family: var(--mono);
+      letter-spacing: .3px;
+    }
+    .logs-entry .logs-chevron { margin-left: auto; color: var(--text-dim); font-size: 11px; }
+
+    @keyframes logs-pulse {
+      0%   { opacity: 1;   transform: scale(1); }
+      50%  { opacity: .35; transform: scale(.75); }
+      100% { opacity: 1;   transform: scale(1); }
+    }
+
+    .logs-subpanel {
+      margin-bottom: 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(0,0,0,.25);
+      overflow: hidden;
+    }
+    .logs-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    .logs-seg {
+      display: inline-flex;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .logs-seg button {
+      background: rgba(255,255,255,.04);
+      color: var(--text-dim);
+      border: none;
+      padding: 4px 12px;
+      font-family: var(--mono);
+      font-size: 11px;
+      cursor: pointer;
+      transition: background .15s, color .15s;
+    }
+    .logs-seg button + button { border-left: 1px solid var(--border); }
+    .logs-seg button.active { background: var(--accent-hi); color: var(--text); }
+    .logs-status {
+      margin-left: auto;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text-dim);
+      white-space: nowrap;
+    }
+    .logs-status.streaming { color: #2ecc71; }
+    .logs-status.ended { color: var(--text-dim); }
+    .logs-pre {
+      margin: 0;
+      padding: 10px 14px;
+      max-height: 280px;
+      overflow: auto;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: #8bc4e8;
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.6;
+    }
+    .logs-pre .logs-waiting { color: var(--text-dim); font-style: italic; }
+
     /* ── Chat panel ── */
     .chat-panel {
       border-top: 1px solid var(--border);
@@ -553,6 +649,13 @@
   let expandedChats = new Set();
   let chatHistory   = {};
 
+  let agentStatus = {};          // agentId -> latest known status string
+  let logPollers  = {};          // agentId -> intervalId
+  let logState    = {};          // agentId -> { container, lastTs, open }
+
+  const TERMINAL = ['completed', 'failed', 'killed'];
+  function isTerminalStatus(s) { return TERMINAL.includes((s || '').toLowerCase()); }
+
   // ── API helpers ──────────────────────────────────────────────────────────
 
   async function fetchAgents() {
@@ -563,6 +666,17 @@
   async function fetchEvents(id) {
     try { const r = await fetch(`/api/agents/${id}/events`); return r.ok ? r.json() : []; }
     catch { return []; }
+  }
+
+  async function fetchLogs(id, container, sinceTime) {
+    const params = new URLSearchParams();
+    if (container) params.set('container', container);
+    if (sinceTime) params.set('sinceTime', sinceTime);
+    else params.set('tailLines', '500');
+    try {
+      const r = await fetch(`/api/agents/${id}/logs?${params.toString()}`);
+      return r.ok ? r.json() : null;
+    } catch { return null; }
   }
 
   async function spawnAgent(data) {
@@ -715,6 +829,8 @@
     const list    = document.getElementById('agent-list');
     const countEl = document.getElementById('agent-count');
 
+    for (const a of agents) agentStatus[a.agentId] = a.status;
+
     const topLevel = agents.filter(a => !a.parentId);
     const childMap = new Map();
     for (const a of agents) {
@@ -775,16 +891,20 @@
     const panel = document.getElementById(`events-${agentId}`);
     if (!panel) return;
 
-    const hdr = panel.querySelector('.event-panel-header');
-    if (hdr) hdr.textContent = `Event Timeline — ${evts.length} event${evts.length !== 1 ? 's' : ''}`;
-
     let listEl = panel.querySelector('.event-list');
     if (!listEl) {
-      // First events arriving — replace placeholder
+      // First events arriving — replace placeholder. Keep a stable structure:
+      // header, logs mount point, then the append-only event list.
       panel.innerHTML = `<div class="event-panel-header">Event Timeline — ${evts.length} event${evts.length !== 1 ? 's' : ''}</div>
+        <div class="logs-mount" id="logsmount-${agentId}"></div>
         <div class="event-list"></div>`;
       listEl = panel.querySelector('.event-list');
     }
+
+    const hdr = panel.querySelector('.event-panel-header');
+    if (hdr) hdr.textContent = `Event Timeline — ${evts.length} event${evts.length !== 1 ? 's' : ''}`;
+
+    renderLogsEntry(agentId);
 
     const already = renderedEventCount[agentId] || 0;
     for (const e of evts.slice(already)) {
@@ -804,6 +924,184 @@
     renderedEventCount[agentId] = evts.length;
   }
 
+  // ── Live container logs ──────────────────────────────────────────────────
+
+  // Render (or refresh) the pinned "container logs" entry at the top of an
+  // agent's event panel. Pulses green when the agent is non-terminal.
+  function renderLogsEntry(agentId) {
+    const panel = document.getElementById(`events-${agentId}`);
+    if (!panel) return;
+    let mount = document.getElementById(`logsmount-${agentId}`);
+    if (!mount) {
+      mount = document.createElement('div');
+      mount.className = 'logs-mount';
+      mount.id = `logsmount-${agentId}`;
+      const hdr = panel.querySelector('.event-panel-header');
+      if (hdr && hdr.nextSibling) panel.insertBefore(mount, hdr.nextSibling);
+      else panel.appendChild(mount);
+    }
+
+    const live = !isTerminalStatus(agentStatus[agentId]);
+    let entry = document.getElementById(`logsentry-${agentId}`);
+    if (!entry) {
+      entry = document.createElement('div');
+      entry.id = `logsentry-${agentId}`;
+      entry.onclick = () => toggleLogs(agentId);
+      mount.insertBefore(entry, mount.firstChild);
+    }
+    entry.className = 'logs-entry' + (live ? ' live' : '');
+    const open = logState[agentId] && logState[agentId].open;
+    const label = live ? 'live · container logs' : 'container logs';
+    entry.innerHTML = `<span class="logs-dot"></span>
+      <span class="logs-label">${label}</span>
+      <span class="logs-chevron">${open ? '▲' : '▼'}</span>`;
+  }
+
+  function toggleLogs(agentId) {
+    const st = logState[agentId];
+    if (st && st.open) {
+      closeLogs(agentId);
+      return;
+    }
+    const mount = document.getElementById(`logsmount-${agentId}`);
+    if (!mount) return;
+
+    logState[agentId] = { container: 'agent', lastTs: null, open: true };
+
+    const sub = document.createElement('div');
+    sub.className = 'logs-subpanel';
+    sub.id = `logsub-${agentId}`;
+    sub.innerHTML = `
+      <div class="logs-toolbar">
+        <span class="logs-seg">
+          <button data-c="agent" class="active" onclick="switchLogContainer('${agentId}','agent')">agent</button>
+          <button data-c="agent-sidecar" onclick="switchLogContainer('${agentId}','agent-sidecar')">sidecar</button>
+        </span>
+        <span class="logs-status streaming" id="logstatus-${agentId}">● streaming</span>
+      </div>
+      <pre class="logs-pre" id="logpre-${agentId}"><span class="logs-waiting">waiting for container…</span></pre>`;
+    mount.appendChild(sub);
+
+    renderLogsEntry(agentId);
+    startLogStream(agentId, true);
+  }
+
+  function closeLogs(agentId) {
+    if (logPollers[agentId]) {
+      clearInterval(logPollers[agentId]);
+      delete logPollers[agentId];
+    }
+    const sub = document.getElementById(`logsub-${agentId}`);
+    if (sub) sub.remove();
+    if (logState[agentId]) logState[agentId].open = false;
+    renderLogsEntry(agentId);
+  }
+
+  function stopLogPoller(agentId) {
+    if (logPollers[agentId]) {
+      clearInterval(logPollers[agentId]);
+      delete logPollers[agentId];
+    }
+    const sub = document.getElementById(`logsub-${agentId}`);
+    if (sub) sub.remove();
+    delete logState[agentId];
+  }
+
+  function switchLogContainer(agentId, container) {
+    const st = logState[agentId];
+    if (!st || st.container === container) return;
+    st.container = container;
+    st.lastTs = null;
+    const sub = document.getElementById(`logsub-${agentId}`);
+    if (sub) {
+      sub.querySelectorAll('.logs-seg button').forEach(b => {
+        b.classList.toggle('active', b.getAttribute('data-c') === container);
+      });
+    }
+    const pre = document.getElementById(`logpre-${agentId}`);
+    if (pre) pre.innerHTML = '<span class="logs-waiting">waiting for container…</span>';
+    const status = document.getElementById(`logstatus-${agentId}`);
+    if (status) { status.className = 'logs-status streaming'; status.textContent = '● streaming'; }
+    if (logPollers[agentId]) { clearInterval(logPollers[agentId]); delete logPollers[agentId]; }
+    startLogStream(agentId, true);
+  }
+
+  function appendLogLines(agentId, lines) {
+    const pre = document.getElementById(`logpre-${agentId}`);
+    if (!pre || !lines || lines.length === 0) return;
+    const wait = pre.querySelector('.logs-waiting');
+    if (wait) pre.innerHTML = '';
+    const nearBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+    let text = '';
+    for (const ln of lines) text += escHtml(ln.text || '') + '\n';
+    pre.insertAdjacentHTML('beforeend', text);
+    if (nearBottom) pre.scrollTop = pre.scrollHeight;
+  }
+
+  function setLogStatus(agentId, kind, text) {
+    const status = document.getElementById(`logstatus-${agentId}`);
+    if (!status) return;
+    status.className = `logs-status ${kind}`;
+    status.textContent = text;
+  }
+
+  async function fetchAndRenderLogBatch(agentId, initial) {
+    const st = logState[agentId];
+    if (!st) return;
+    const container = st.container;
+    const data = await fetchLogs(agentId, container, initial ? null : st.lastTs);
+    // Bail if container was switched / panel closed mid-request.
+    if (!logState[agentId] || logState[agentId].container !== container || !logState[agentId].open) return;
+    if (!data) return;
+
+    const lines = Array.isArray(data.lines) ? data.lines : [];
+    // Guard against duplicates by tracking lastTs strictly.
+    const fresh = st.lastTs ? lines.filter(l => l.ts > st.lastTs) : lines;
+    appendLogLines(agentId, fresh);
+    if (fresh.length > 0) st.lastTs = fresh[fresh.length - 1].ts;
+
+    if (lines.length === 0 && data.podPhase && data.podPhase !== 'Running') {
+      const pre = document.getElementById(`logpre-${agentId}`);
+      if (pre && !pre.textContent.trim()) {
+        pre.innerHTML = `<span class="logs-waiting">waiting for container… (${escHtml(data.podPhase)})</span>`;
+      }
+    }
+
+    return data;
+  }
+
+  async function startLogStream(agentId, initial) {
+    const data = await fetchAndRenderLogBatch(agentId, initial);
+    if (!logState[agentId] || !logState[agentId].open) return;
+
+    const terminal = (data && data.complete) || isTerminalStatus(agentStatus[agentId]);
+    if (terminal) {
+      // One final fetch to flush any remaining lines, then stop.
+      await fetchAndRenderLogBatch(agentId, false);
+      const st = (agentStatus[agentId] || 'completed').toLowerCase();
+      setLogStatus(agentId, 'ended', `stream ended (${st})`);
+      if (logPollers[agentId]) { clearInterval(logPollers[agentId]); delete logPollers[agentId]; }
+      return;
+    }
+
+    if (!logPollers[agentId]) {
+      logPollers[agentId] = setInterval(() => pollLogStream(agentId), POLL_MS);
+    }
+  }
+
+  async function pollLogStream(agentId) {
+    if (!logState[agentId] || !logState[agentId].open) return;
+    const data = await fetchAndRenderLogBatch(agentId, false);
+    if (!logState[agentId] || !logState[agentId].open) return;
+    const terminal = (data && data.complete) || isTerminalStatus(agentStatus[agentId]);
+    if (terminal) {
+      await fetchAndRenderLogBatch(agentId, false);
+      const st = (agentStatus[agentId] || 'completed').toLowerCase();
+      setLogStatus(agentId, 'ended', `stream ended (${st})`);
+      if (logPollers[agentId]) { clearInterval(logPollers[agentId]); delete logPollers[agentId]; }
+    }
+  }
+
   // ── Toggle events panel — direct DOM, no full re-render ──────────────────
 
   function toggleEvents(agentId) {
@@ -816,6 +1114,7 @@
       clearInterval(agentEventPollers[agentId]);
       delete agentEventPollers[agentId];
       delete renderedEventCount[agentId];
+      stopLogPoller(agentId);
       const panel = document.getElementById(`events-${agentId}`);
       if (panel) panel.remove();
       btn.textContent = '▼ Events';
@@ -923,6 +1222,7 @@
       delete agentEventPollers[agentId];
       expandedAgents.delete(agentId);
       delete renderedEventCount[agentId];
+      stopLogPoller(agentId);
       const panel = document.getElementById(`events-${agentId}`);
       if (panel) panel.remove();
       expandedChats.delete(agentId);
@@ -941,6 +1241,8 @@
       delete agentEventPollers[agentId];
       expandedAgents.delete(agentId);
       delete renderedEventCount[agentId];
+      stopLogPoller(agentId);
+      delete agentStatus[agentId];
       expandedChats.delete(agentId);
       delete chatHistory[agentId];
       const card = document.getElementById(`card-${agentId}`);

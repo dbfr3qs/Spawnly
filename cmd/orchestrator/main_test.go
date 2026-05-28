@@ -5,30 +5,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	fakeclient "k8s.io/client-go/kubernetes/fake"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentv1alpha1 "github.com/agent-platform/poc/api/v1alpha1"
 	"github.com/agent-platform/poc/internal/spicedb"
 )
-
-// newTestMux creates a mux wired to a mock registry httptest.Server that handles
-// the endpoints used by the event emission goroutine and the proxy handlers.
-func newTestMux(t *testing.T, regHandler http.Handler) (*http.ServeMux, *fake.ClientBuilder) {
-	t.Helper()
-	s := runtime.NewScheme()
-	clientgoscheme.AddToScheme(s)
-	agentv1alpha1.AddToScheme(s)
-
-	cb := fake.NewClientBuilder().WithScheme(s)
-	return nil, cb // placeholder; callers build mux themselves
-}
 
 func newScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
@@ -65,7 +57,7 @@ func TestSpawnCreatesAgentWorkload(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
 
 	body, _ := json.Marshal(SpawnRequest{
 		AgentType: "worker",
@@ -118,7 +110,7 @@ func TestSpawnMissingRequiredFields(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
 
 	// Missing userId
 	body, _ := json.Marshal(map[string]string{"agentType": "worker", "tenantId": "t1"})
@@ -138,7 +130,7 @@ func TestSpawnDefaultAgentType(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
 
 	body, _ := json.Marshal(map[string]string{"userId": "u1", "tenantId": "t1"})
 	req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
@@ -163,7 +155,7 @@ func TestSpawnWithTask(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
 
 	body, _ := json.Marshal(SpawnRequest{
 		AgentType: "worker",
@@ -206,7 +198,7 @@ func TestListAgentsProxiesToRegistry(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
 
 	req := httptest.NewRequest("GET", "/v1/agents", nil)
 	rec := httptest.NewRecorder()
@@ -231,7 +223,7 @@ func TestDeleteAgent_NotFound(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
 
 	req := httptest.NewRequest("DELETE", "/v1/agents/missing", nil)
 	rec := httptest.NewRecorder()
@@ -239,5 +231,179 @@ func TestDeleteAgent_NotFound(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("got %d, want 404", rec.Code)
+	}
+}
+
+func TestParseLogLines(t *testing.T) {
+	tests := []struct {
+		name      string
+		raw       string
+		sinceTime string
+		want      []logLine
+	}{
+		{
+			name: "splits timestamp and text on first space",
+			raw:  "2026-05-28T21:00:01.000000000Z hello world\n",
+			want: []logLine{{TS: "2026-05-28T21:00:01.000000000Z", Text: "hello world"}},
+		},
+		{
+			name: "skips empty lines",
+			raw:  "2026-05-28T21:00:01.000000000Z a\n\n2026-05-28T21:00:02.000000000Z b\n",
+			want: []logLine{
+				{TS: "2026-05-28T21:00:01.000000000Z", Text: "a"},
+				{TS: "2026-05-28T21:00:02.000000000Z", Text: "b"},
+			},
+		},
+		{
+			name: "line with no text yields empty text",
+			raw:  "2026-05-28T21:00:01.000000000Z\n",
+			want: []logLine{{TS: "2026-05-28T21:00:01.000000000Z", Text: ""}},
+		},
+		{
+			name:      "sinceTime filters strictly after",
+			raw:       "2026-05-28T21:00:01.000000000Z a\n2026-05-28T21:00:02.000000000Z b\n2026-05-28T21:00:03.000000000Z c\n",
+			sinceTime: "2026-05-28T21:00:02.000000000Z",
+			want:      []logLine{{TS: "2026-05-28T21:00:03.000000000Z", Text: "c"}},
+		},
+		{
+			name:      "sinceTime excludes exact match",
+			raw:       "2026-05-28T21:00:02.000000000Z b\n",
+			sinceTime: "2026-05-28T21:00:02.000000000Z",
+			want:      []logLine{},
+		},
+		{
+			name: "empty input yields empty slice",
+			raw:  "",
+			want: []logLine{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseLogLines(tc.raw, tc.sinceTime)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d lines, want %d: %#v", len(got), len(tc.want), got)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("line %d: got %#v, want %#v", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestLogsInvalidContainerRejected(t *testing.T) {
+	mockReg := defaultMockRegistry(t)
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	sdb := spicedb.NewMock()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+
+	req := httptest.NewRequest("GET", "/v1/agents/agent-1a2b/logs?container=bogus", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", rec.Code)
+	}
+}
+
+func TestLogsDefaultContainerAndWaitingState(t *testing.T) {
+	mockReg := defaultMockRegistry(t)
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	sdb := spicedb.NewMock()
+	// No AgentWorkload and no pod exist. The handler must default the container
+	// to "agent", fall back to "{id}-pod" for the pod name, report phase
+	// "Pending" (no pod found), and return 200 (never 5xx).
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+
+	req := httptest.NewRequest("GET", "/v1/agents/agent-1a2b/logs", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+	var resp logsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Container != "agent" {
+		t.Fatalf("default container: got %q, want agent", resp.Container)
+	}
+	if resp.PodName != "agent-1a2b-pod" {
+		t.Fatalf("pod name fallback: got %q, want agent-1a2b-pod", resp.PodName)
+	}
+	if resp.PodPhase != "Pending" {
+		t.Fatalf("pod phase: got %q, want Pending", resp.PodPhase)
+	}
+	if resp.Complete {
+		t.Fatalf("expected complete=false")
+	}
+}
+
+func TestIsContainerNotReadyErr(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"waiting to start", errors.New("container \"agent\" in pod \"x\" is waiting to start: ContainerCreating"), true},
+		{"ContainerCreating", errors.New("ContainerCreating"), true},
+		{"not found", errors.New("pods \"x\" not found"), true},
+		{"PodInitializing", errors.New("container \"agent\" is waiting: PodInitializing"), true},
+		{"genuine error", errors.New("connection refused"), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isContainerNotReadyErr(tc.err); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLogsResolvesPodNameFromStatusAndPhase(t *testing.T) {
+	mockReg := defaultMockRegistry(t)
+	defer mockReg.Close()
+
+	aw := &agentv1alpha1.AgentWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-zzzz", Namespace: "default"},
+	}
+	aw.Status.PodName = "agent-zzzz-pod"
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).WithObjects(aw).Build()
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "agent-zzzz-pod", Namespace: "default"},
+		Status:     corev1.PodStatus{Phase: corev1.PodSucceeded},
+	}
+	cs := fakeclient.NewSimpleClientset(pod)
+
+	sdb := spicedb.NewMock()
+	mux := buildMux(fakeClient, cs, sdb, mockReg.URL)
+
+	req := httptest.NewRequest("GET", "/v1/agents/agent-zzzz/logs", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+	var resp logsResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.PodName != "agent-zzzz-pod" {
+		t.Fatalf("pod name: got %q", resp.PodName)
+	}
+	if resp.PodPhase != string(corev1.PodSucceeded) {
+		t.Fatalf("pod phase: got %q, want Succeeded", resp.PodPhase)
+	}
+	if !resp.Complete {
+		t.Fatalf("expected complete=true for Succeeded phase")
 	}
 }

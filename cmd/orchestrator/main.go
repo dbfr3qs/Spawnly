@@ -11,12 +11,17 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -59,7 +64,78 @@ func mustMarshal(v any) json.RawMessage {
 	return b
 }
 
-func buildMux(k8s client.Client, sdb spicedb.Client, registryURL string) *http.ServeMux {
+// logLine is a single parsed log entry.
+type logLine struct {
+	TS   string `json:"ts"`
+	Text string `json:"text"`
+}
+
+// logsResponse is the JSON shape returned by GET /v1/agents/{id}/logs.
+type logsResponse struct {
+	PodName   string    `json:"podName"`
+	Container string    `json:"container"`
+	PodPhase  string    `json:"podPhase"`
+	Lines     []logLine `json:"lines"`
+	Complete  bool      `json:"complete"`
+}
+
+// parseLogLines parses raw log output produced with Timestamps:true. Each
+// non-empty line has the form "<RFC3339Nano> <text>". When sinceTime is
+// non-empty, only lines whose timestamp is strictly after it are returned.
+// This filtering supplements the SinceTime PodLogOption, which only has
+// second granularity and can re-deliver lines.
+func parseLogLines(raw string, sinceTime string) []logLine {
+	var since time.Time
+	haveSince := false
+	if sinceTime != "" {
+		if t, err := time.Parse(time.RFC3339Nano, sinceTime); err == nil {
+			since = t
+			haveSince = true
+		}
+	}
+
+	lines := []logLine{}
+	for _, l := range strings.Split(raw, "\n") {
+		if l == "" {
+			continue
+		}
+		ts := l
+		text := ""
+		if idx := strings.IndexByte(l, ' '); idx >= 0 {
+			ts = l[:idx]
+			text = l[idx+1:]
+		}
+		if haveSince {
+			t, err := time.Parse(time.RFC3339Nano, ts)
+			if err != nil || !t.After(since) {
+				continue
+			}
+		}
+		lines = append(lines, logLine{TS: ts, Text: text})
+	}
+	return lines
+}
+
+// isContainerNotReadyErr reports whether err indicates the container has not
+// started yet (so logs are not available). These are expected transient
+// conditions, not server errors.
+func isContainerNotReadyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if apierrors.IsNotFound(err) {
+		return true
+	}
+	msg := err.Error()
+	for _, s := range []string{"waiting to start", "ContainerCreating", "not found", "PodInitializing"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
+func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Client, registryURL string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	regClient := registry.New(registryURL)
@@ -164,6 +240,102 @@ func buildMux(k8s client.Client, sdb spicedb.Client, registryURL string) *http.S
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(evts)
+	})
+
+	mux.HandleFunc("GET /v1/agents/{id}/logs", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+
+		container := r.URL.Query().Get("container")
+		if container == "" {
+			container = "agent"
+		}
+		if container != "agent" && container != "agent-sidecar" {
+			http.Error(w, "invalid container", http.StatusBadRequest)
+			return
+		}
+
+		sinceTime := r.URL.Query().Get("sinceTime")
+		var sinceTimePtr *metav1.Time
+		if sinceTime != "" {
+			t, err := time.Parse(time.RFC3339Nano, sinceTime)
+			if err != nil {
+				http.Error(w, "invalid sinceTime", http.StatusBadRequest)
+				return
+			}
+			mt := metav1.NewTime(t)
+			sinceTimePtr = &mt
+		}
+
+		tailLines := int64(500)
+		if v := r.URL.Query().Get("tailLines"); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n < 0 {
+				http.Error(w, "invalid tailLines", http.StatusBadRequest)
+				return
+			}
+			tailLines = n
+		}
+
+		// Resolve the pod name: prefer the workload's recorded Status.PodName,
+		// falling back to the conventional "{id}-pod".
+		podName := id + "-pod"
+		aw := &agentv1alpha1.AgentWorkload{}
+		if err := k8s.Get(r.Context(), types.NamespacedName{Name: id, Namespace: "default"}, aw); err == nil {
+			if aw.Status.PodName != "" {
+				podName = aw.Status.PodName
+			}
+		}
+
+		// Determine pod phase (best-effort). A missing pod means "Pending".
+		podPhase := "Pending"
+		pod, perr := clientset.CoreV1().Pods("default").Get(r.Context(), podName, metav1.GetOptions{})
+		if perr == nil {
+			podPhase = string(pod.Status.Phase)
+		}
+
+		resp := logsResponse{
+			PodName:   podName,
+			Container: container,
+			PodPhase:  podPhase,
+			Lines:     []logLine{},
+			Complete:  podPhase == string(corev1.PodSucceeded) || podPhase == string(corev1.PodFailed),
+		}
+
+		opts := &corev1.PodLogOptions{
+			Container:  container,
+			Timestamps: true,
+		}
+		if sinceTimePtr != nil {
+			opts.SinceTime = sinceTimePtr
+		} else {
+			opts.TailLines = &tailLines
+		}
+
+		stream, err := clientset.CoreV1().Pods("default").GetLogs(podName, opts).Stream(r.Context())
+		if err != nil {
+			// Container not started yet / pod missing: surface a waiting state
+			// rather than a 5xx so the UI can poll.
+			if isContainerNotReadyErr(err) {
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(resp)
+				return
+			}
+			log.Printf("get logs for %s/%s: %v", podName, container, err)
+			http.Error(w, "failed to fetch logs", http.StatusInternalServerError)
+			return
+		}
+		defer stream.Close()
+
+		raw, err := io.ReadAll(stream)
+		if err != nil {
+			log.Printf("read logs for %s/%s: %v", podName, container, err)
+			http.Error(w, "failed to read logs", http.StatusInternalServerError)
+			return
+		}
+
+		resp.Lines = parseLogLines(string(raw), sinceTime)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
 	})
 
 	mux.HandleFunc("DELETE /v1/agents/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -296,9 +468,17 @@ func main() {
 		}
 	}
 
-	k8s, err := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme})
+	cfg := ctrl.GetConfigOrDie()
+	k8s, err := client.New(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		log.Fatalf("k8s client: %v", err)
+	}
+
+	// The controller-runtime client cannot stream pod logs, so we also build a
+	// client-go clientset for log access.
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		log.Fatalf("k8s clientset: %v", err)
 	}
 
 	registryURL := os.Getenv("REGISTRY_URL")
@@ -306,7 +486,7 @@ func main() {
 		registryURL = "http://registry:8080"
 	}
 
-	mux := buildMux(k8s, sdb, registryURL)
+	mux := buildMux(k8s, clientset, sdb, registryURL)
 	log.Println("orchestrator listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))
 }
