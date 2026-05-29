@@ -133,9 +133,12 @@ const requestHandler = new DefaultRequestHandler(agentCard, taskStore, executor)
 const app = express();
 app.use(express.json());
 
-// Serve agent card at /.well-known/agent.json (also serve at standard path)
-app.get('/.well-known/agent.json', agentCardHandler({ agentCardProvider: requestHandler }));
-app.get('/.well-known/agent-card.json', agentCardHandler({ agentCardProvider: requestHandler }));
+// Serve agent card at /.well-known/agent.json (also serve at standard path).
+// agentCardHandler() returns a Router whose route is `GET /`, so it must be
+// MOUNTED with app.use — app.get(exactPath, router) never matches the router's
+// internal `/` and 404s, which silently breaks agent-card discovery.
+app.use('/.well-known/agent.json', agentCardHandler({ agentCardProvider: requestHandler }));
+app.use('/.well-known/agent-card.json', agentCardHandler({ agentCardProvider: requestHandler }));
 
 // JSON-RPC handler at root
 app.post('/', jsonRpcHandler({ requestHandler, userBuilder: UserBuilder.noAuthentication }));
