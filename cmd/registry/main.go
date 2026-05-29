@@ -319,6 +319,84 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	// Delegation policy decision for parentType delegating to childType.
+	// Always returns HTTP 200 — a missing/unconfigured parent template yields allowed:false.
+	mux.HandleFunc("GET /v1/delegation-policy", func(w http.ResponseWriter, r *http.Request) {
+		parentType := r.URL.Query().Get("parentType")
+		childType := r.URL.Query().Get("childType")
+
+		resp := struct {
+			Allowed         bool     `json:"allowed"`
+			GrantableScopes []string `json:"grantableScopes"`
+			MaxDepth        int      `json:"maxDepth"`
+		}{Allowed: false, GrantableScopes: []string{}, MaxDepth: 0}
+
+		tpl, ok := s.getTemplate(parentType)
+		if ok {
+			pol := tpl.Delegation
+			for _, ct := range pol.AllowedChildTypes {
+				if ct == childType {
+					resp.Allowed = true
+					break
+				}
+			}
+			if resp.Allowed {
+				resp.GrantableScopes = pol.GrantableScopes
+				if resp.GrantableScopes == nil {
+					resp.GrantableScopes = []string{}
+				}
+				resp.MaxDepth = pol.MaxDepth
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	// Delegation lineage for an agent: the agent itself up to the root via ParentID.
+	mux.HandleFunc("GET /v1/agents/{id}/chain", func(w http.ResponseWriter, r *http.Request) {
+		agentID := r.PathValue("id")
+		rec := s.getAgent(agentID)
+		if rec.AgentID == "" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+
+		type chainNode struct {
+			AgentID   string `json:"agentId"`
+			AgentType string `json:"agentType"`
+			Status    string `json:"status"`
+			ParentID  string `json:"parentId"`
+		}
+
+		chain := []chainNode{}
+		seen := map[string]bool{}
+		cur := rec
+		for i := 0; i < 32; i++ {
+			if seen[cur.AgentID] {
+				break // cycle guard
+			}
+			seen[cur.AgentID] = true
+			chain = append(chain, chainNode{
+				AgentID:   cur.AgentID,
+				AgentType: cur.AgentType,
+				Status:    cur.Status,
+				ParentID:  cur.ParentID,
+			})
+			if cur.ParentID == "" {
+				break
+			}
+			parent := s.getAgent(cur.ParentID)
+			if parent.AgentID == "" {
+				break // missing parent — include what's resolvable
+			}
+			cur = parent
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"chain": chain})
+	})
+
 	mux.HandleFunc("GET /v1/templates", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.RLock()
 		types := make([]string, 0, len(s.templates))

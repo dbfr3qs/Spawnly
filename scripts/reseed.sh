@@ -68,7 +68,8 @@ curl -sf -X POST http://localhost:18080/v1/templates \
       "spiceDbRelations": [
         {"resource": "tenant:{{tenant_id}}", "relation": "agent", "subject": "agent:{{agent_id}}"}
       ]
-    }
+    },
+    "delegation": {"allowedChildTypes": ["child-agent"], "grantableScopes": ["sample-api-b:read"], "maxDepth": 3}
   }'
 echo "  parent-agent"
 

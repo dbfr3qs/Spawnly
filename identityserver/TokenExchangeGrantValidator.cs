@@ -41,13 +41,16 @@ public class TokenExchangeGrantValidator : IExtensionGrantValidator
     private readonly SpireSvidValidator _svid;
     private readonly IKeyMaterialService _keys;
     private readonly IIssuerNameService _issuer;
+    private readonly AgentRegistryClient _registry;
 
     public TokenExchangeGrantValidator(
-        SpireSvidValidator svid, IKeyMaterialService keys, IIssuerNameService issuer)
+        SpireSvidValidator svid, IKeyMaterialService keys, IIssuerNameService issuer,
+        AgentRegistryClient registry)
     {
         _svid = svid;
         _keys = keys;
         _issuer = issuer;
+        _registry = registry;
     }
 
     public async Task ValidateAsync(ExtensionGrantValidationContext context)
@@ -131,6 +134,70 @@ public class TokenExchangeGrantValidator : IExtensionGrantValidator
         {
             context.Result = Error(
                 $"invalid_scope: requested scope(s) not present in subject_token: {string.Join(' ', disallowed)}");
+            return;
+        }
+
+        // 3b. Delegation-policy enforcement (Milestone 2).
+        //
+        //     The exchange creates a NEW delegation edge: the immediate delegator (parent) is
+        //     the OUTERMOST actor already named in the subject_token's act chain; the delegate
+        //     (child) is the actor performing this exchange (actor_token's SPIFFE id). The
+        //     registry policy for that (parentType -> childType) edge gates whether the edge is
+        //     allowed, caps the scopes that may be carried across it, and bounds chain depth.
+
+        // Resolve the child (the actor doing the exchange): last path segment of its SPIFFE URI.
+        var childAgentId = LastPathSegment(actorSpiffe);
+        // Resolve the parent (the immediate delegator): outermost act.sub of the subject_token.
+        var parentSpiffe = OutermostActSub(subject);
+        if (string.IsNullOrEmpty(parentSpiffe))
+        {
+            context.Result = PolicyError("cannot resolve delegation parties");
+            return;
+        }
+        var parentAgentId = LastPathSegment(parentSpiffe);
+
+        if (string.IsNullOrEmpty(childAgentId) || string.IsNullOrEmpty(parentAgentId))
+        {
+            context.Result = PolicyError("cannot resolve delegation parties");
+            return;
+        }
+
+        var childAgent = await _registry.GetAgent(childAgentId);
+        var parentAgent = await _registry.GetAgent(parentAgentId);
+        var childType = childAgent?.AgentType;
+        var parentType = parentAgent?.AgentType;
+        if (string.IsNullOrEmpty(childType) || string.IsNullOrEmpty(parentType))
+        {
+            context.Result = PolicyError("cannot resolve delegation parties");
+            return;
+        }
+
+        var policy = await _registry.GetDelegationPolicy(parentType, childType);
+        if (policy is null || !policy.Allowed)
+        {
+            context.Result = PolicyError($"delegation not permitted: {parentType} -> {childType}");
+            return;
+        }
+
+        // Scope ceiling: every requested scope must be grantable across this edge. This is in
+        // addition to the requested ⊆ subject_token.scope check above.
+        var grantableScopes = (policy.GrantableScopes ?? new List<string>()).ToHashSet();
+        foreach (var s in requestedScopes)
+        {
+            if (!grantableScopes.Contains(s))
+            {
+                context.Result = PolicyError(
+                    $"scope '{s}' exceeds delegation ceiling for {parentType} -> {childType}");
+                return;
+            }
+        }
+
+        // Chain depth: the new chain is the subject_token's existing act chain plus this actor.
+        var newDepth = CountActChainDepth(subject) + 1;
+        if (policy.MaxDepth > 0 && newDepth > policy.MaxDepth)
+        {
+            context.Result = PolicyError(
+                $"delegation chain depth {newDepth} exceeds max {policy.MaxDepth}");
             return;
         }
 
@@ -236,4 +303,72 @@ public class TokenExchangeGrantValidator : IExtensionGrantValidator
 
     private static GrantValidationResult Error(string description) =>
         new GrantValidationResult(TokenRequestErrors.InvalidRequest, description);
+
+    /// <summary>Rejects a delegation-policy violation with an invalid_grant error.</summary>
+    private static GrantValidationResult PolicyError(string description) =>
+        new GrantValidationResult(TokenRequestErrors.InvalidGrant, description);
+
+    /// <summary>
+    /// The agentId is the last path segment of a SPIFFE URI
+    /// (spiffe://cluster.local/agent/&lt;tenant&gt;/&lt;user&gt;/&lt;agentType&gt;/&lt;agentId&gt;).
+    /// </summary>
+    private static string? LastPathSegment(string? spiffe)
+    {
+        if (string.IsNullOrEmpty(spiffe)) return null;
+        var seg = spiffe.Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+        return string.IsNullOrEmpty(seg) ? null : seg;
+    }
+
+    /// <summary>
+    /// Returns the outermost actor's "sub" from the subject_token's act claim — i.e. the
+    /// immediate delegator. The act claim is a nested object { "sub": "...", "act": { ... } };
+    /// the top-level "sub" is the most recent actor. Returns null if there is no act claim,
+    /// it is not parseable, or it has no top-level "sub".
+    /// </summary>
+    private static string? OutermostActSub(JsonWebToken subject)
+    {
+        if (!subject.TryGetClaim("act", out var actClaim) || string.IsNullOrEmpty(actClaim.Value))
+            return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(actClaim.Value);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                doc.RootElement.TryGetProperty("sub", out var subProp) &&
+                subProp.ValueKind == JsonValueKind.String)
+            {
+                return subProp.GetString();
+            }
+        }
+        catch { /* malformed act → treated as unresolvable below */ }
+        return null;
+    }
+
+    /// <summary>
+    /// Counts the number of actors already present in the subject_token's act chain by walking
+    /// the nested act objects: the outermost act counts as 1, plus 1 for each nested "act".
+    /// A subject_token with no act claim has a chain depth of 0.
+    ///
+    /// Assumed shape: act = { "sub": "...", "act": { "sub": "...", "act": { ... } } } — a
+    /// single linearly-nested chain. Each level is counted once regardless of whether it has a
+    /// "sub" (depth tracks the structural chain length built by <see cref="BuildActClaim"/>).
+    /// </summary>
+    private static int CountActChainDepth(JsonWebToken subject)
+    {
+        if (!subject.TryGetClaim("act", out var actClaim) || string.IsNullOrEmpty(actClaim.Value))
+            return 0;
+        try
+        {
+            using var doc = JsonDocument.Parse(actClaim.Value);
+            var node = doc.RootElement;
+            var depth = 0;
+            while (node.ValueKind == JsonValueKind.Object)
+            {
+                depth++;
+                if (!node.TryGetProperty("act", out var nested)) break;
+                node = nested;
+            }
+            return depth;
+        }
+        catch { return 0; }
+    }
 }

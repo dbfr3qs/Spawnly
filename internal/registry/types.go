@@ -2,12 +2,21 @@
 package registry
 
 type AgentTemplate struct {
-	AgentType string       `json:"agentType"`
-	Version   string       `json:"version"`
-	Status    string       `json:"status"` // active | deprecated
-	Meta      TemplateMeta `json:"meta"`
-	Runtime   RuntimeSpec  `json:"runtimeSpec"`
-	AuthZ     AuthZSpec    `json:"authzTemplate"`
+	AgentType  string           `json:"agentType"`
+	Version    string           `json:"version"`
+	Status     string           `json:"status"` // active | deprecated
+	Meta       TemplateMeta     `json:"meta"`
+	Runtime    RuntimeSpec      `json:"runtimeSpec"`
+	AuthZ      AuthZSpec        `json:"authzTemplate"`
+	Delegation DelegationPolicy `json:"delegation"`
+}
+
+// DelegationPolicy describes which child agent-types a given agent-type may
+// delegate to, which scopes it may grant them, and the maximum delegation depth.
+type DelegationPolicy struct {
+	AllowedChildTypes []string `json:"allowedChildTypes"`
+	GrantableScopes   []string `json:"grantableScopes"`
+	MaxDepth          int      `json:"maxDepth"`
 }
 
 type TemplateMeta struct {

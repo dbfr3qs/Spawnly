@@ -235,6 +235,187 @@ func TestListAgents(t *testing.T) {
 	}
 }
 
+func parentTemplate() registry.AgentTemplate {
+	return registry.AgentTemplate{
+		AgentType: "parent-agent", Version: "1.0.0", Status: "active",
+		Delegation: registry.DelegationPolicy{
+			AllowedChildTypes: []string{"child-agent"},
+			GrantableScopes:   []string{"sample-api-b:read"},
+			MaxDepth:          3,
+		},
+	}
+}
+
+func decodeDelegation(t *testing.T, mux *http.ServeMux, query string) struct {
+	Allowed         bool     `json:"allowed"`
+	GrantableScopes []string `json:"grantableScopes"`
+	MaxDepth        int      `json:"maxDepth"`
+} {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/delegation-policy"+query, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delegation-policy: got %d, want 200", rec.Code)
+	}
+	var resp struct {
+		Allowed         bool     `json:"allowed"`
+		GrantableScopes []string `json:"grantableScopes"`
+		MaxDepth        int      `json:"maxDepth"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return resp
+}
+
+func TestDelegationPolicy_AllowedChild(t *testing.T) {
+	s := newStore()
+	s.putTemplate(parentTemplate())
+	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+
+	resp := decodeDelegation(t, mux, "?parentType=parent-agent&childType=child-agent")
+	if !resp.Allowed {
+		t.Fatal("expected allowed:true for child-agent")
+	}
+	if len(resp.GrantableScopes) != 1 || resp.GrantableScopes[0] != "sample-api-b:read" {
+		t.Fatalf("unexpected grantableScopes: %v", resp.GrantableScopes)
+	}
+	if resp.MaxDepth != 3 {
+		t.Fatalf("expected maxDepth 3, got %d", resp.MaxDepth)
+	}
+}
+
+func TestDelegationPolicy_DisallowedChild(t *testing.T) {
+	s := newStore()
+	s.putTemplate(parentTemplate())
+	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+
+	resp := decodeDelegation(t, mux, "?parentType=parent-agent&childType=worker")
+	if resp.Allowed {
+		t.Fatal("expected allowed:false for disallowed child type")
+	}
+	if resp.GrantableScopes == nil {
+		t.Fatal("expected empty array, got nil")
+	}
+	if len(resp.GrantableScopes) != 0 || resp.MaxDepth != 0 {
+		t.Fatalf("expected empty scopes and maxDepth 0, got %v / %d", resp.GrantableScopes, resp.MaxDepth)
+	}
+}
+
+func TestDelegationPolicy_MissingParentTemplate(t *testing.T) {
+	s := newStore()
+	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+
+	resp := decodeDelegation(t, mux, "?parentType=does-not-exist&childType=child-agent")
+	if resp.Allowed {
+		t.Fatal("expected allowed:false for missing parent template")
+	}
+	if resp.GrantableScopes == nil || len(resp.GrantableScopes) != 0 {
+		t.Fatalf("expected empty array, got %v", resp.GrantableScopes)
+	}
+	if resp.MaxDepth != 0 {
+		t.Fatalf("expected maxDepth 0, got %d", resp.MaxDepth)
+	}
+}
+
+func TestDelegationPolicy_NoDelegationConfig(t *testing.T) {
+	s := newStore()
+	s.putTemplate(workerTemplate()) // no delegation block
+	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+
+	resp := decodeDelegation(t, mux, "?parentType=worker&childType=child-agent")
+	if resp.Allowed {
+		t.Fatal("expected allowed:false when template has no delegation config")
+	}
+}
+
+type chainResp struct {
+	Chain []struct {
+		AgentID   string `json:"agentId"`
+		AgentType string `json:"agentType"`
+		Status    string `json:"status"`
+		ParentID  string `json:"parentId"`
+	} `json:"chain"`
+}
+
+func TestAgentChain_MultiLevel(t *testing.T) {
+	s := newStore()
+	s.registerAgent(registry.AgentRecord{AgentID: "agent-root", AgentType: "parent-agent", Status: "active"})
+	s.registerAgent(registry.AgentRecord{AgentID: "agent-mid", AgentType: "parent-agent", Status: "active", ParentID: "agent-root"})
+	s.registerAgent(registry.AgentRecord{AgentID: "agent-leaf", AgentType: "child-agent", Status: "active", ParentID: "agent-mid"})
+	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/agent-leaf/chain", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("chain: got %d, want 200", rec.Code)
+	}
+	var resp chainResp
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Chain) != 3 {
+		t.Fatalf("expected chain of 3, got %d", len(resp.Chain))
+	}
+	wantIDs := []string{"agent-leaf", "agent-mid", "agent-root"}
+	for i, id := range wantIDs {
+		if resp.Chain[i].AgentID != id {
+			t.Fatalf("chain[%d]: got %q, want %q", i, resp.Chain[i].AgentID, id)
+		}
+	}
+	if resp.Chain[2].ParentID != "" {
+		t.Fatalf("expected root parentId empty, got %q", resp.Chain[2].ParentID)
+	}
+}
+
+func TestAgentChain_MissingParentStops(t *testing.T) {
+	s := newStore()
+	// parent record absent — chain should include only the resolvable node.
+	s.registerAgent(registry.AgentRecord{AgentID: "agent-orphan", AgentType: "child-agent", Status: "active", ParentID: "agent-gone"})
+	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/agent-orphan/chain", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("chain: got %d, want 200", rec.Code)
+	}
+	var resp chainResp
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if len(resp.Chain) != 1 {
+		t.Fatalf("expected chain of 1, got %d", len(resp.Chain))
+	}
+}
+
+func TestAgentChain_CycleGuard(t *testing.T) {
+	s := newStore()
+	s.registerAgent(registry.AgentRecord{AgentID: "agent-a", AgentType: "x", Status: "active", ParentID: "agent-b"})
+	s.registerAgent(registry.AgentRecord{AgentID: "agent-b", AgentType: "x", Status: "active", ParentID: "agent-a"})
+	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/agent-a/chain", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("chain: got %d, want 200", rec.Code)
+	}
+	var resp chainResp
+	json.NewDecoder(rec.Body).Decode(&resp)
+	// Cycle guard must terminate; each agent appears at most once.
+	if len(resp.Chain) != 2 {
+		t.Fatalf("expected chain of 2 with cycle guard, got %d", len(resp.Chain))
+	}
+}
+
+func TestAgentChain_UnknownAgent404(t *testing.T) {
+	s := newStore()
+	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/nope/chain", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("chain unknown: got %d, want 404", rec.Code)
+	}
+}
+
 func TestSelfRegistrationEmitsEvents(t *testing.T) {
 	s := newStore()
 	s.putTemplate(workerTemplate())
