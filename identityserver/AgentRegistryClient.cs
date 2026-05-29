@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace IdentityServer;
 
 public class AgentRegistryClient
@@ -9,15 +11,30 @@ public class AgentRegistryClient
 
     public async Task<bool> IsActive(string agentId)
     {
+        var agent = await GetAgent(agentId);
+        return agent?.Status == "active";
+    }
+
+    /// <summary>
+    /// Fetches the full agent record from the registry.
+    /// Returns null if the agent does not exist or the registry is unreachable.
+    /// </summary>
+    public async Task<AgentRecord?> GetAgent(string agentId)
+    {
         try
         {
             var resp = await _http.GetAsync($"{_baseUrl}/v1/agents/{agentId}");
-            if (!resp.IsSuccessStatusCode) return false;
-            var body = await resp.Content.ReadFromJsonAsync<AgentRecord>();
-            return body?.Status == "active";
+            if (!resp.IsSuccessStatusCode) return null;
+            return await resp.Content.ReadFromJsonAsync<AgentRecord>();
         }
-        catch { return false; }
+        catch { return null; }
     }
 
-    private record AgentRecord(string AgentId, string Status);
+    // Registry JSON uses camelCase fields: agentId, status, userId, agentType, parentId.
+    public record AgentRecord(
+        [property: JsonPropertyName("agentId")] string AgentId,
+        [property: JsonPropertyName("status")] string Status,
+        [property: JsonPropertyName("userId")] string? UserId,
+        [property: JsonPropertyName("agentType")] string? AgentType,
+        [property: JsonPropertyName("parentId")] string? ParentId);
 }

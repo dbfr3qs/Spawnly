@@ -34,6 +34,8 @@ type AgentWorkloadReconciler struct {
 	RegistryURL     string
 	ISTokenURL      string
 	SampleAPIURL    string
+	APIAUrl         string
+	APIBUrl         string
 	OrchestratorURL string
 	EventsClient    events.Client // may be nil
 	Clientset       kubernetes.Interface
@@ -233,6 +235,8 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 
 	agentEnv := append([]corev1.EnvVar{
 		{Name: "SAMPLE_API_URL", Value: r.SampleAPIURL},
+		{Name: "API_A_URL", Value: r.APIAUrl},
+		{Name: "API_B_URL", Value: r.APIBUrl},
 		{Name: "SPIFFE_ENDPOINT_SOCKET", Value: "unix:///spiffe-workload-api/spire-agent.sock"},
 	}, sharedEnv...)
 	optional := func() *bool { b := true; return &b }()

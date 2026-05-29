@@ -1,23 +1,17 @@
-using Duende.IdentityServer.Models;
-using Duende.IdentityServer.Stores;
 using Duende.IdentityServer.Validation;
-using Microsoft.IdentityModel.JsonWebTokens;
-using Microsoft.IdentityModel.Tokens;
+using Duende.IdentityServer.Stores;
 
 namespace IdentityServer;
 
 public class SpireClientSecretValidator : IClientSecretValidator
 {
     private readonly IClientStore _clients;
-    private readonly IHttpClientFactory _httpFactory;
-    private readonly string _spireJwksUrl;
+    private readonly SpireSvidValidator _svid;
 
-    public SpireClientSecretValidator(
-        IClientStore clients, IHttpClientFactory httpFactory, string spireJwksUrl)
+    public SpireClientSecretValidator(IClientStore clients, SpireSvidValidator svid)
     {
         _clients = clients;
-        _httpFactory = httpFactory;
-        _spireJwksUrl = spireJwksUrl;
+        _svid = svid;
     }
 
     public async Task<ClientSecretValidationResult> ValidateAsync(HttpContext context)
@@ -34,20 +28,8 @@ public class SpireClientSecretValidator : IClientSecretValidator
         var client = await _clients.FindClientByIdAsync(clientId);
         if (client is null) return Fail();
 
-        // SPIRE OIDC provider uses a self-signed cert — use named client with TLS bypass.
-        var http = _httpFactory.CreateClient("spire");
-        var jwksJson = await http.GetStringAsync(_spireJwksUrl);
-        var jwks = new JsonWebKeySet(jwksJson);
-
-        var handler = new JsonWebTokenHandler();
-        var result = await handler.ValidateTokenAsync(assertion, new TokenValidationParameters
-        {
-            ValidateAudience = false,
-            ValidateIssuer = false,
-            IssuerSigningKeys = jwks.GetSigningKeys(),
-        });
-
-        if (!result.IsValid) return Fail();
+        var spiffeId = await _svid.ValidateAndGetSpiffeId(assertion);
+        if (spiffeId is null) return Fail();
 
         return new ClientSecretValidationResult { IsError = false, Client = client };
     }

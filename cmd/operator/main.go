@@ -46,6 +46,8 @@ func main() {
 	registryURL := getenv("REGISTRY_URL", "http://registry:8080")
 	isTokenURL := getenv("IS_TOKEN_URL", "http://identity-server:8080/connect/token")
 	sampleAPIURL := getenv("SAMPLE_API_URL", "http://sample-api:8080")
+	apiAURL := getenv("API_A_URL", "http://sample-api-a:8080")
+	apiBURL := getenv("API_B_URL", "http://sample-api-b:8080")
 	orchestratorURL := getenv("ORCHESTRATOR_URL", "http://orchestrator:8080")
 
 	cfg := ctrl.GetConfigOrDie()
@@ -72,6 +74,8 @@ func main() {
 		RegistryURL:     registryURL,
 		ISTokenURL:      isTokenURL,
 		SampleAPIURL:    sampleAPIURL,
+		APIAUrl:         apiAURL,
+		APIBUrl:         apiBURL,
 		OrchestratorURL: orchestratorURL,
 		EventsClient:    events.New(registryURL),
 		Clientset:       clientset,

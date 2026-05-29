@@ -20,7 +20,52 @@ const aiApiKey       = process.env.AI_API_KEY      ?? '';
 const aiModel        = process.env.AI_MODEL        ?? 'anthropic/claude-sonnet-4-6';
 const promptTimeoutMs = Number(process.env.PROMPT_TIMEOUT_MS ?? 120000);
 
+const sidecarUrl = process.env.SIDECAR_URL ?? 'http://localhost:8089';
+const apiAUrl    = process.env.API_A_URL   ?? 'http://sample-api-a:8080';
+
+// Metadata key used to carry the delegation token to the child over A2A.
+const DELEGATION_METADATA_KEY = 'delegationToken';
+
 configureProvider(aiProvider, { apiKey: aiApiKey });
+
+interface TokenResponse {
+  access_token: string;
+  expires_in: number;
+}
+
+// Fetch a token from the local sidecar. `params` is appended to /token as-is.
+// Never throws on a non-2xx in a way that crashes callers — but a missing token
+// is a hard error for the steps that need one, so we surface it.
+async function getSidecarToken(params: Record<string, string>): Promise<string> {
+  const qs = new URLSearchParams(params).toString();
+  const url = `${sidecarUrl}/token?${qs}`;
+  // The sidecar (native init container) fetches its SVID and self-registers
+  // before it starts listening on :8089, so at agent startup the first calls
+  // can hit ECONNREFUSED. Retry with backoff until it's ready.
+  const deadline = Date.now() + 30_000;
+  let lastErr: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`sidecar /token failed: ${res.status} ${await res.text()}`);
+      }
+      const data = (await res.json()) as TokenResponse;
+      return data.access_token;
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  throw new Error(`sidecar /token unreachable after 30s: ${lastErr}`);
+}
+
+// The delegation token minted in main() and passed to the child via A2A.
+// Module-level so the call_child_agent tool can read it deterministically
+// without depending on the LLM to thread it through.
+let delegationToken: string | undefined;
+// The child's API-B result text, captured so main() can summarize it.
+let childResultText = '';
 
 // Tool: spawn a child agent
 const spawnChildAgent: ToolDef = {
@@ -102,6 +147,11 @@ const callChildAgent: ToolDef = {
         messageId: uuidv4(),
         role: 'user',
         parts: [{ kind: 'text', text: 'Generate a random string.' }],
+        // Pass the delegation token to the child via message metadata so it can
+        // exchange it for a sample-api-b token (RFC 8693 act-chain extension).
+        metadata: delegationToken
+          ? { [DELEGATION_METADATA_KEY]: delegationToken }
+          : undefined,
       },
     });
     // Extract text from response (Message or Task)
@@ -125,6 +175,7 @@ const callChildAgent: ToolDef = {
         }
       }
     }
+    childResultText = text;
     return JSON.stringify({ result: text });
   },
 };
@@ -152,8 +203,72 @@ const killChildAgent: ToolDef = {
   },
 };
 
+// Deterministic step (a): get a working token for API-A and call it directly.
+async function callApiADirect(): Promise<void> {
+  try {
+    const token = await getSidecarToken({ scope: 'sample-api-a:read sample-api-a:write' });
+    const res = await fetch(`${apiAUrl}/work`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'X-Tenant-ID': tenantId,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    });
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      body = await res.text().catch(() => '');
+    }
+    console.log(`[parent-agent] API-A POST /work -> ${res.status}`);
+    await postEvent(registryUrl, agentId, 'api_a_call', {
+      method: 'POST',
+      status: res.status,
+      ok: res.ok,
+      response: body,
+    });
+  } catch (err) {
+    console.error('[parent-agent] API-A call failed:', err);
+    await postEvent(registryUrl, agentId, 'api_a_call', {
+      method: 'POST',
+      status: 0,
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+// Deterministic step (b): mint a delegation token scoped to sample-api-b:read.
+async function mintDelegationToken(): Promise<void> {
+  try {
+    delegationToken = await getSidecarToken({
+      audience: 'delegation',
+      scope: 'sample-api-b:read',
+    });
+    console.log('[parent-agent] minted delegation token for sample-api-b:read');
+    await postEvent(registryUrl, agentId, 'delegation_token_minted', {
+      audience: 'delegation',
+      scope: 'sample-api-b:read',
+      ok: true,
+    });
+  } catch (err) {
+    console.error('[parent-agent] delegation token mint failed:', err);
+    await postEvent(registryUrl, agentId, 'delegation_token_minted', {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 async function main() {
   await postEvent(registryUrl, agentId, 'parent_started', { agentId });
+
+  // Deterministic delegation setup, performed BEFORE the LLM orchestration so
+  // the delegation token is available when call_child_agent runs.
+  await callApiADirect();
+  await mintDelegationToken();
 
   const sessionStore = new InMemorySessionStore();
   const ctx = createFlueContext({
@@ -189,8 +304,15 @@ async function main() {
     { signal: promptTimeoutSignal(promptTimeoutMs) }
   );
 
+  // Deterministic step (d): summarize the child's returned API-B result.
+  await postEvent(registryUrl, agentId, 'child_delegation_summary', {
+    childResult: childResultText,
+    delegationDelivered: Boolean(delegationToken),
+  });
+
   await postEvent(registryUrl, agentId, 'parent_completed', { result: response.text });
   console.log('[parent-agent] completed. result:', response.text);
+  console.log('[parent-agent] child delegation result:', childResultText);
 }
 
 main().catch(async (err) => {

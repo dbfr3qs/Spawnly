@@ -14,12 +14,40 @@ import (
 	"github.com/agent-platform/poc/internal/tokenvalidator"
 )
 
+const testAudience = "sample-api-a"
+
+func testConfig() apiConfig {
+	return apiConfig{audience: testAudience, scopePrefix: testAudience}
+}
+
+// claimsFor builds Claims for an acting agent with the given audience/scopes.
+func claimsFor(agentSpiffe string, scopes []string) tokenvalidator.Claims {
+	return tokenvalidator.Claims{
+		User:            "user:user-1",
+		ActingAgent:     agentSpiffe,
+		ActingAgentName: lastSegment(agentSpiffe),
+		Chain:           []string{agentSpiffe},
+		Scopes:          scopes,
+		Audience:        []string{testAudience},
+	}
+}
+
+func lastSegment(s string) string {
+	i := strings.LastIndex(s, "/")
+	if i < 0 {
+		return s
+	}
+	return s[i+1:]
+}
+
 func TestWorkHandlerAllowed(t *testing.T) {
 	sdb := spicedb.NewMock()
 	sdb.WriteRelationship(context.Background(), "tenant:tenant-1", "agent", "agent:agent-1")
 
-	validator := &tokenvalidator.MockValidator{SpiffeID: "spiffe://cluster.local/agent/agent-1"}
-	mux := buildMux(sdb, validator)
+	validator := &tokenvalidator.MockValidator{
+		Claims: claimsFor("spiffe://cluster.local/agent/agent-1", []string{"sample-api-a:read"}),
+	}
+	mux := buildMux(sdb, validator, testConfig())
 
 	req := httptest.NewRequest("GET", "/work", nil)
 	req.Header.Set("Authorization", "Bearer fake-access-token")
@@ -41,7 +69,7 @@ func TestWorkHandlerAllowed(t *testing.T) {
 func TestWorkHandlerInvalidToken(t *testing.T) {
 	sdb := spicedb.NewMock()
 	validator := &tokenvalidator.MockValidator{Err: fmt.Errorf("invalid token")}
-	mux := buildMux(sdb, validator)
+	mux := buildMux(sdb, validator, testConfig())
 
 	req := httptest.NewRequest("GET", "/work", nil)
 	req.Header.Set("Authorization", "Bearer bad-token")
@@ -57,8 +85,78 @@ func TestWorkHandlerInvalidToken(t *testing.T) {
 
 func TestWorkHandlerSpiceDBDenied(t *testing.T) {
 	sdb := spicedb.NewMock() // no grants
-	validator := &tokenvalidator.MockValidator{SpiffeID: "spiffe://cluster.local/agent/agent-99"}
-	mux := buildMux(sdb, validator)
+	validator := &tokenvalidator.MockValidator{
+		Claims: claimsFor("spiffe://cluster.local/agent/agent-99", []string{"sample-api-a:read"}),
+	}
+	mux := buildMux(sdb, validator, testConfig())
+
+	req := httptest.NewRequest("GET", "/work", nil)
+	req.Header.Set("Authorization", "Bearer fake-access-token")
+	req.Header.Set("X-Tenant-ID", "tenant-1")
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403", rec.Code)
+	}
+}
+
+// A token minted for the other API (wrong aud) must be rejected with 401.
+func TestWorkHandlerWrongAudience(t *testing.T) {
+	sdb := spicedb.NewMock()
+	sdb.WriteRelationship(context.Background(), "tenant:tenant-1", "agent", "agent:agent-1")
+
+	c := claimsFor("spiffe://cluster.local/agent/agent-1", []string{"sample-api-a:read"})
+	c.Audience = []string{"sample-api-b"}
+	validator := &tokenvalidator.MockValidator{Claims: c}
+	mux := buildMux(sdb, validator, testConfig())
+
+	req := httptest.NewRequest("GET", "/work", nil)
+	req.Header.Set("Authorization", "Bearer fake-access-token")
+	req.Header.Set("X-Tenant-ID", "tenant-1")
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", rec.Code)
+	}
+}
+
+// A delegation-only token (token_use=delegation) must be rejected with 401.
+func TestWorkHandlerDelegationTokenRejected(t *testing.T) {
+	sdb := spicedb.NewMock()
+	sdb.WriteRelationship(context.Background(), "tenant:tenant-1", "agent", "agent:agent-1")
+
+	c := claimsFor("spiffe://cluster.local/agent/agent-1", []string{"sample-api-a:read"})
+	c.Audience = []string{"delegation"}
+	c.TokenUse = "delegation"
+	validator := &tokenvalidator.MockValidator{Claims: c}
+	mux := buildMux(sdb, validator, testConfig())
+
+	req := httptest.NewRequest("GET", "/work", nil)
+	req.Header.Set("Authorization", "Bearer fake-access-token")
+	req.Header.Set("X-Tenant-ID", "tenant-1")
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", rec.Code)
+	}
+}
+
+// Missing the required read scope must be 403.
+func TestWorkHandlerMissingScope(t *testing.T) {
+	sdb := spicedb.NewMock()
+	sdb.WriteRelationship(context.Background(), "tenant:tenant-1", "agent", "agent:agent-1")
+
+	// Only a write scope present, but GET requires read.
+	validator := &tokenvalidator.MockValidator{
+		Claims: claimsFor("spiffe://cluster.local/agent/agent-1", []string{"sample-api-a:write"}),
+	}
+	mux := buildMux(sdb, validator, testConfig())
 
 	req := httptest.NewRequest("GET", "/work", nil)
 	req.Header.Set("Authorization", "Bearer fake-access-token")
@@ -76,8 +174,10 @@ func TestTaskHandlerAllowed(t *testing.T) {
 	sdb := spicedb.NewMock()
 	sdb.WriteRelationship(context.Background(), "tenant:tenant-1", "agent", "agent:agent-abc")
 
-	validator := &tokenvalidator.MockValidator{SpiffeID: "spiffe://cluster.local/agent/agent-abc"}
-	mux := buildMux(sdb, validator)
+	validator := &tokenvalidator.MockValidator{
+		Claims: claimsFor("spiffe://cluster.local/agent/agent-abc", []string{"sample-api-a:write"}),
+	}
+	mux := buildMux(sdb, validator, testConfig())
 
 	body := strings.NewReader(`{"task":"hello"}`)
 	req := httptest.NewRequest("POST", "/task", body)
@@ -101,10 +201,36 @@ func TestTaskHandlerAllowed(t *testing.T) {
 	}
 }
 
+// POST /work behaves like POST /task and requires the write scope.
+func TestPostWorkHandlerAllowed(t *testing.T) {
+	sdb := spicedb.NewMock()
+	sdb.WriteRelationship(context.Background(), "tenant:tenant-1", "agent", "agent:agent-abc")
+
+	validator := &tokenvalidator.MockValidator{
+		Claims: claimsFor("spiffe://cluster.local/agent/agent-abc", []string{"sample-api-a:write"}),
+	}
+	mux := buildMux(sdb, validator, testConfig())
+
+	body := strings.NewReader(`{"task":"hello"}`)
+	req := httptest.NewRequest("POST", "/work", body)
+	req.Header.Set("Authorization", "Bearer fake-access-token")
+	req.Header.Set("X-Tenant-ID", "tenant-1")
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+}
+
 func TestTaskHandlerMissingTenantID(t *testing.T) {
 	sdb := spicedb.NewMock()
-	validator := &tokenvalidator.MockValidator{SpiffeID: "spiffe://cluster.local/agent/agent-abc"}
-	mux := buildMux(sdb, validator)
+	validator := &tokenvalidator.MockValidator{
+		Claims: claimsFor("spiffe://cluster.local/agent/agent-abc", []string{"sample-api-a:write"}),
+	}
+	mux := buildMux(sdb, validator, testConfig())
 
 	body := strings.NewReader(`{"task":"hello"}`)
 	req := httptest.NewRequest("POST", "/task", body)
@@ -121,8 +247,10 @@ func TestTaskHandlerMissingTenantID(t *testing.T) {
 
 func TestTaskHandlerMissingAuth(t *testing.T) {
 	sdb := spicedb.NewMock()
-	validator := &tokenvalidator.MockValidator{SpiffeID: "spiffe://cluster.local/agent/agent-abc"}
-	mux := buildMux(sdb, validator)
+	validator := &tokenvalidator.MockValidator{
+		Claims: claimsFor("spiffe://cluster.local/agent/agent-abc", []string{"sample-api-a:write"}),
+	}
+	mux := buildMux(sdb, validator, testConfig())
 
 	body := strings.NewReader(`{"task":"hello"}`)
 	req := httptest.NewRequest("POST", "/task", body)
@@ -140,7 +268,7 @@ func TestTaskHandlerMissingAuth(t *testing.T) {
 func TestTaskHandlerInvalidToken(t *testing.T) {
 	sdb := spicedb.NewMock()
 	validator := &tokenvalidator.MockValidator{Err: fmt.Errorf("invalid token")}
-	mux := buildMux(sdb, validator)
+	mux := buildMux(sdb, validator, testConfig())
 
 	body := strings.NewReader(`{"task":"hello"}`)
 	req := httptest.NewRequest("POST", "/task", body)
@@ -157,8 +285,10 @@ func TestTaskHandlerInvalidToken(t *testing.T) {
 
 func TestTaskHandlerSpiceDBDenied(t *testing.T) {
 	sdb := spicedb.NewMock() // no grants
-	validator := &tokenvalidator.MockValidator{SpiffeID: "spiffe://cluster.local/agent/agent-abc"}
-	mux := buildMux(sdb, validator)
+	validator := &tokenvalidator.MockValidator{
+		Claims: claimsFor("spiffe://cluster.local/agent/agent-abc", []string{"sample-api-a:write"}),
+	}
+	mux := buildMux(sdb, validator, testConfig())
 
 	body := strings.NewReader(`{"task":"hello"}`)
 	req := httptest.NewRequest("POST", "/task", body)

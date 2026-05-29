@@ -29,7 +29,166 @@ const aiApiKey     = process.env.AI_API_KEY    ?? '';
 const aiModel      = process.env.AI_MODEL      ?? 'anthropic/claude-sonnet-4-6';
 const promptTimeoutMs = Number(process.env.PROMPT_TIMEOUT_MS ?? 120000);
 
+const sidecarUrl = process.env.SIDECAR_URL ?? 'http://localhost:8089';
+const apiBUrl    = process.env.API_B_URL   ?? 'http://sample-api-b:8080';
+const tenantId   = process.env.TENANT_ID   ?? 'default';
+
+// Metadata key the parent uses to carry the delegation token over A2A.
+const DELEGATION_METADATA_KEY = 'delegationToken';
+
 configureProvider(aiProvider, { apiKey: aiApiKey });
+
+interface TokenResponse {
+  access_token: string;
+  expires_in: number;
+}
+
+// Exchange a delegation token at the local sidecar for a token usable against
+// the target API (RFC 8693 act-chain extension). Throws on non-2xx.
+async function exchangeDelegationToken(
+  subjectToken: string,
+  audience: string,
+  scope: string,
+): Promise<string> {
+  const qs = new URLSearchParams({ subject_token: subjectToken, audience, scope }).toString();
+  const url = `${sidecarUrl}/token?${qs}`;
+  // The sidecar may not be listening on :8089 yet when the child is first
+  // invoked (its A2A server on :8080 comes up before the sidecar finishes
+  // SVID fetch + registration). Retry with backoff until it's ready.
+  const deadline = Date.now() + 30_000;
+  let lastErr: unknown;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`sidecar exchange /token failed: ${res.status} ${await res.text()}`);
+      }
+      const data = (await res.json()) as TokenResponse;
+      return data.access_token;
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  throw new Error(`sidecar exchange /token unreachable after 30s: ${lastErr}`);
+}
+
+// Extract the delegation token from an incoming A2A message: prefer message
+// metadata, fall back to any text part shaped as "delegationToken=<...>".
+function extractDelegationToken(message: Message | undefined): string | undefined {
+  if (!message) return undefined;
+  const metaVal = message.metadata?.[DELEGATION_METADATA_KEY];
+  if (typeof metaVal === 'string' && metaVal.length > 0) {
+    return metaVal;
+  }
+  for (const part of message.parts ?? []) {
+    if (part.kind === 'text' && typeof part.text === 'string') {
+      const prefix = `${DELEGATION_METADATA_KEY}=`;
+      if (part.text.startsWith(prefix)) {
+        return part.text.slice(prefix.length).trim();
+      }
+    }
+  }
+  return undefined;
+}
+
+// Run the full delegation flow: exchange the delegation token, GET API-B
+// (expected 200), then POST API-B with the same read-scoped token (expected
+// 403, demonstrating attenuation). Never throws; returns a summary string.
+async function runDelegationFlow(delegationToken: string): Promise<string> {
+  let exchanged: string;
+  try {
+    exchanged = await exchangeDelegationToken(delegationToken, 'sample-api-b', 'sample-api-b:read');
+  } catch (err) {
+    console.error('[child-agent] token exchange failed:', err);
+    await postEvent(registryUrl, agentId, 'delegation_exchange', {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return `delegation exchange failed: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  await postEvent(registryUrl, agentId, 'delegation_exchange', {
+    ok: true,
+    audience: 'sample-api-b',
+    scope: 'sample-api-b:read',
+  });
+
+  // (b) GET API-B /work — expected 200 with the exchanged token.
+  let readActingAgent: unknown;
+  let readStatus = 0;
+  try {
+    const res = await fetch(`${apiBUrl}/work`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${exchanged}`, 'X-Tenant-ID': tenantId },
+    });
+    readStatus = res.status;
+    let body: any;
+    try {
+      body = await res.json();
+    } catch {
+      body = await res.text().catch(() => '');
+    }
+    readActingAgent = body?.agentName;
+    console.log(`[child-agent] API-B GET /work -> ${res.status}`);
+    await postEvent(registryUrl, agentId, 'api_b_call', {
+      method: 'GET',
+      status: res.status,
+      ok: res.ok,
+      actingAgent: body?.agentName,
+      response: body,
+    });
+  } catch (err) {
+    console.error('[child-agent] API-B GET failed:', err);
+    await postEvent(registryUrl, agentId, 'api_b_call', {
+      method: 'GET',
+      status: 0,
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // (c) POST API-B /work with the SAME read-scoped token — expected 403,
+  // demonstrating scope attenuation (write denied).
+  let writeStatus = 0;
+  try {
+    const res = await fetch(`${apiBUrl}/work`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${exchanged}`,
+        'X-Tenant-ID': tenantId,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    });
+    writeStatus = res.status;
+    let body: unknown;
+    try {
+      body = await res.json();
+    } catch {
+      body = await res.text().catch(() => '');
+    }
+    console.log(`[child-agent] API-B POST /work -> ${res.status} (expected 403)`);
+    await postEvent(registryUrl, agentId, 'api_b_write_denied', {
+      method: 'POST',
+      status: res.status,
+      expected: 403,
+      denied: res.status === 403,
+      response: body,
+    });
+  } catch (err) {
+    console.error('[child-agent] API-B POST failed:', err);
+    await postEvent(registryUrl, agentId, 'api_b_write_denied', {
+      method: 'POST',
+      status: 0,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  return (
+    `API-B read status=${readStatus} actingAgent=${String(readActingAgent)}; ` +
+    `API-B write status=${writeStatus} (expected 403, attenuated read-only token)`
+  );
+}
 
 const agentCard: AgentCard = {
   name: 'child-agent',
@@ -57,6 +216,18 @@ const agentCard: AgentCard = {
 class ChildAgentExecutor implements AgentExecutor {
   async execute(requestContext: RequestContext, eventBus: ExecutionEventBus): Promise<void> {
     try {
+      // Deterministic delegation flow: if the parent passed a delegation token,
+      // exchange it and call API-B (read ok, write denied). Done before the LLM
+      // step so the acceptance test does not depend on model behavior.
+      const delegationToken = extractDelegationToken(requestContext.userMessage);
+      let delegationSummary = '';
+      if (delegationToken) {
+        console.log('[child-agent] received delegation token; running delegation flow');
+        delegationSummary = await runDelegationFlow(delegationToken);
+      } else {
+        console.log('[child-agent] no delegation token in incoming message');
+      }
+
       // Build a minimal FlueContext to use Flue's session.prompt()
       const sessionStore = new InMemorySessionStore();
       const ctx = createFlueContext({
@@ -82,10 +253,16 @@ class ChildAgentExecutor implements AgentExecutor {
         'Generate a random 8-character alphanumeric string. Reply with ONLY the string itself, no explanation.',
         { signal: promptTimeoutSignal(promptTimeoutMs) }
       );
-      const text = response.text.trim();
+      const randomString = response.text.trim();
 
       // Post event to registry
-      await postEvent(registryUrl, agentId, 'child_result', { result: text });
+      await postEvent(registryUrl, agentId, 'child_result', { result: randomString });
+
+      // Reply text: include the delegation summary when delegation ran, while
+      // keeping the random string so existing behavior still works.
+      const text = delegationSummary
+        ? `${delegationSummary} | randomString=${randomString}`
+        : randomString;
 
       // Publish A2A reply
       const replyMessage: Message = {

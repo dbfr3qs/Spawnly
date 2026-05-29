@@ -13,16 +13,21 @@ builder.Services.AddHttpClient("spire").ConfigurePrimaryHttpMessageHandler(() =>
     new HttpClientHandler { ServerCertificateCustomValidationCallback = (_, _, _, _) => true });
 builder.Services.AddSingleton(new AgentRegistryClient(registryUrl));
 
+// Shared SPIRE JWT-SVID validator (client_assertion + actor_token).
+builder.Services.AddSingleton(sp =>
+    new SpireSvidValidator(sp.GetRequiredService<IHttpClientFactory>(), spireJwksUrl));
+
 builder.Services.AddIdentityServer()
     .AddInMemoryApiScopes(Config.ApiScopes)
+    .AddInMemoryApiResources(Config.ApiResources)
     .AddInMemoryClients(Config.Clients())
-    .AddCustomTokenRequestValidator<AgentRegistryValidator>();
+    .AddCustomTokenRequestValidator<AgentRegistryValidator>()
+    .AddExtensionGrantValidator<TokenExchangeGrantValidator>();
 
 builder.Services.AddTransient<IClientSecretValidator>(sp =>
     new SpireClientSecretValidator(
         sp.GetRequiredService<IClientStore>(),
-        sp.GetRequiredService<IHttpClientFactory>(),
-        spireJwksUrl));
+        sp.GetRequiredService<SpireSvidValidator>()));
 
 var app = builder.Build();
 app.UseIdentityServer();

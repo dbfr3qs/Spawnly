@@ -153,6 +153,113 @@ func (tc *tokenCache) get(ctx context.Context, scope string) (string, int, error
 	return tc.token, expiresIn, nil
 }
 
+// exchangeToken performs an RFC 8693 OAuth2 token exchange. The provided
+// subjectToken (a delegated access token received from an upstream caller) is
+// exchanged for a fresh token, with this agent's SVID as the actor token so the
+// resulting token carries an extended `act` chain. Exchanged tokens bypass the
+// cache: they are short-lived and request-specific (audience/scope vary).
+func exchangeToken(ctx context.Context, cfg config, socketPath, subjectToken, audience, scope string) (string, int, error) {
+	svid, err := fetchJWT(ctx, socketPath, cfg.isTokenURL)
+	if err != nil {
+		return "", 0, fmt.Errorf("fetch SVID: %w", err)
+	}
+
+	form := url.Values{
+		"grant_type":            {"urn:ietf:params:oauth:grant-type:token-exchange"},
+		"subject_token":         {subjectToken},
+		"subject_token_type":    {"urn:ietf:params:oauth:token-type:access_token"},
+		"actor_token":           {svid},
+		"actor_token_type":      {"urn:ietf:params:oauth:token-type:jwt"},
+		"client_id":             {cfg.agentType},
+		"client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
+		"client_assertion":      {svid},
+	}
+	if audience != "" {
+		form.Set("audience", audience)
+	}
+	if scope != "" {
+		form.Set("scope", scope)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", cfg.isTokenURL,
+		strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", 0, fmt.Errorf("IS returned %d: %s", resp.StatusCode, b)
+	}
+
+	var tok struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
+		return "", 0, fmt.Errorf("decode token response: %w", err)
+	}
+	expiresIn := tok.ExpiresIn
+	if expiresIn == 0 {
+		expiresIn = 3600
+	}
+	return tok.AccessToken, expiresIn, nil
+}
+
+// clientCredentialsToken mints a fresh client_credentials token with an explicit
+// audience. Used to obtain a delegation token (audience="delegation") that a
+// parent hands to a child as the subject_token of a later exchange. Not cached:
+// audience/scope are request-specific.
+func clientCredentialsToken(ctx context.Context, cfg config, socketPath, scope, audience string) (string, int, error) {
+	svid, err := fetchJWT(ctx, socketPath, cfg.isTokenURL)
+	if err != nil {
+		return "", 0, fmt.Errorf("fetch SVID: %w", err)
+	}
+	form := url.Values{
+		"grant_type":            {"client_credentials"},
+		"client_id":             {cfg.agentType},
+		"client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
+		"client_assertion":      {svid},
+		"scope":                 {scope},
+	}
+	if audience != "" {
+		form.Set("audience", audience)
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", cfg.isTokenURL,
+		strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", 0, fmt.Errorf("IS returned %d: %s", resp.StatusCode, b)
+	}
+	var tok struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
+		return "", 0, fmt.Errorf("decode token response: %w", err)
+	}
+	expiresIn := tok.ExpiresIn
+	if expiresIn == 0 {
+		expiresIn = 3600
+	}
+	return tok.AccessToken, expiresIn, nil
+}
+
 func run(ctx context.Context, cfg config) error {
 	// 1. Fetch SVID for registry
 	regSVID, err := fetchJWT(ctx, cfg.socketPath, "registry")
@@ -211,20 +318,45 @@ func run(ctx context.Context, cfg config) error {
 			return
 		}
 		scope := r.URL.Query().Get("scope")
-		if scope == "" {
-			scope = "sample-api"
+		subjectToken := r.URL.Query().Get("subject_token")
+		audience := r.URL.Query().Get("audience")
+
+		var (
+			tok       string
+			expiresIn int
+			err       error
+		)
+		if subjectToken != "" {
+			// RFC 8693 token exchange: re-exchange an upstream caller's token,
+			// adding this agent to the act chain.
+			tok, expiresIn, err = exchangeToken(r.Context(), cfg, cfg.socketPath, subjectToken, audience, scope)
+		} else if audience != "" {
+			// Client-credentials with an explicit audience — used to mint a
+			// delegation token (audience=delegation) to hand to a child. Not
+			// cached: audience/scope are request-specific.
+			tok, expiresIn, err = clientCredentialsToken(r.Context(), cfg, cfg.socketPath, scope, audience)
+		} else {
+			if scope == "" {
+				scope = "sample-api"
+			}
+			tok, expiresIn, err = tc.get(r.Context(), scope)
 		}
-		tok, expiresIn, err := tc.get(r.Context(), scope)
 		if err != nil {
 			log.Printf("token error: %v", err)
 			http.Error(w, "token exchange failed", http.StatusInternalServerError)
 			return
 		}
+
+		eventType := "token_issued"
+		if subjectToken != "" {
+			eventType = "token_exchanged"
+		}
 		postEvent(r.Context(), cfg.registryURL, agentID, events.Event{
 			Source: events.SourceAgent,
-			Type:   "token_issued",
+			Type:   eventType,
 			Payload: mustMarshal(map[string]any{
 				"scope":      scope,
+				"audience":   audience,
 				"expires_in": expiresIn,
 				"token":      tok,
 			}),
