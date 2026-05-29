@@ -5,6 +5,20 @@ set -euo pipefail
 KIND_CLUSTER="agent-platform"
 IMAGE_TAG="latest"
 
+# ── Env file ───────────────────────────────────────────────────────────────────
+# Load a gitignored .env at the repo root so secrets (e.g. ANTHROPIC_API_KEY)
+# don't have to live in your shell. Values in .env override the current shell.
+# Set ENV_FILE to point elsewhere, or delete .env to fall back to the shell env.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV_FILE="${ENV_FILE:-$REPO_ROOT/.env}"
+if [ -f "$ENV_FILE" ]; then
+  echo "==> Loading env from ${ENV_FILE}"
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+fi
+
 # ── Cluster ──────────────────────────────────────────────────────────────────
 
 if kind get clusters 2>/dev/null | grep -q "^${KIND_CLUSTER}$"; then
