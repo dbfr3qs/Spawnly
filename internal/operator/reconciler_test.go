@@ -91,17 +91,19 @@ func TestReconcileNew_PullsTemplateAndCreatesPod(t *testing.T) {
 		t.Fatalf("expected 1 pod, got %d", len(pods.Items))
 	}
 	pod := pods.Items[0]
-	if len(pod.Spec.Containers) != 2 {
-		t.Fatalf("expected 2 containers, got %d", len(pod.Spec.Containers))
+	// The agent runs as the sole regular container; the sidecar is a native
+	// init container (restartPolicy:Always) so it can't block pod completion.
+	if len(pod.Spec.Containers) != 1 {
+		t.Fatalf("expected 1 container, got %d", len(pod.Spec.Containers))
 	}
 	if pod.Spec.Containers[0].Name != "agent" {
-		t.Errorf("expected first container named 'agent', got %q", pod.Spec.Containers[0].Name)
+		t.Errorf("expected container named 'agent', got %q", pod.Spec.Containers[0].Name)
 	}
 	if pod.Spec.Containers[0].Image != "agent-runner:latest" {
 		t.Errorf("unexpected image: %q", pod.Spec.Containers[0].Image)
 	}
-	if pod.Spec.Containers[1].Name != "agent-sidecar" {
-		t.Errorf("expected second container named 'agent-sidecar', got %q", pod.Spec.Containers[1].Name)
+	if len(pod.Spec.InitContainers) != 1 || pod.Spec.InitContainers[0].Name != "agent-sidecar" {
+		t.Fatalf("expected init container 'agent-sidecar', got %+v", pod.Spec.InitContainers)
 	}
 	for _, vm := range pod.Spec.Containers[0].VolumeMounts {
 		if vm.Name == "spiffe-workload-api" {
@@ -109,7 +111,7 @@ func TestReconcileNew_PullsTemplateAndCreatesPod(t *testing.T) {
 		}
 	}
 	sidecarHasSpiffe := false
-	for _, vm := range pod.Spec.Containers[1].VolumeMounts {
+	for _, vm := range pod.Spec.InitContainers[0].VolumeMounts {
 		if vm.Name == "spiffe-workload-api" {
 			sidecarHasSpiffe = true
 		}
@@ -143,7 +145,7 @@ func TestReconcileNew_PullsTemplateAndCreatesPod(t *testing.T) {
 		}
 	}
 	sidecarEnvMap := map[string]string{}
-	for _, e := range pod.Spec.Containers[1].Env {
+	for _, e := range pod.Spec.InitContainers[0].Env {
 		sidecarEnvMap[e.Name] = e.Value
 	}
 	for _, key := range []string{"AGENT_ID", "AGENT_TYPE", "TENANT_ID", "USER_ID", "REGISTRY_URL", "IS_TOKEN_URL"} {
@@ -342,5 +344,80 @@ func TestReconcileNew_NilEventsClient_NoPanic(t *testing.T) {
 	}
 	if result != (ctrl.Result{}) {
 		t.Errorf("expected empty Result, got %+v", result)
+	}
+}
+
+const testFinalizer = "agent-platform.io/cleanup"
+
+// A long-lived child killed by its parent right after serving its A2A reply has
+// a Running/Terminating pod (never Succeeded) — it must be recorded completed,
+// not failed.
+func TestReconcileDeletion_RunningPod_MarksCompleted(t *testing.T) {
+	aw := &agentv1alpha1.AgentWorkload{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "child-agent-x", Namespace: "default",
+			Finalizers: []string{testFinalizer},
+		},
+		Spec:   agentv1alpha1.AgentWorkloadSpec{AgentType: "worker", TenantID: "tenant-1", Lifecycle: "long-lived"},
+		Status: agentv1alpha1.AgentWorkloadStatus{Phase: "Running", PodName: "child-agent-x-pod"},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "child-agent-x-pod", Namespace: "default"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	s := buildScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(s).WithObjects(aw, pod).WithStatusSubresource(aw).Build()
+	reg := registry.NewMock(map[string]registry.AgentTemplate{"worker": workerTemplate()})
+	r := &operator.AgentWorkloadReconciler{Client: fakeClient, Scheme: s, Registry: reg, EventsClient: events.NewMock()}
+
+	// Deleting an object that has a finalizer sets DeletionTimestamp instead of
+	// removing it, which routes Reconcile into handleDeletion.
+	if err := fakeClient.Delete(context.Background(), aw); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "child-agent-x", Namespace: "default"}}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if len(reg.Completed) != 1 || reg.Completed[0] != "child-agent-x" {
+		t.Fatalf("expected Complete(child-agent-x), got Completed=%v Failed=%v", reg.Completed, reg.Failed)
+	}
+	if len(reg.Failed) != 0 {
+		t.Fatalf("expected no Fail calls, got %v", reg.Failed)
+	}
+}
+
+// A pod that genuinely failed must still be recorded failed on deletion.
+func TestReconcileDeletion_FailedPod_MarksFailed(t *testing.T) {
+	aw := &agentv1alpha1.AgentWorkload{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "crashed-agent", Namespace: "default",
+			Finalizers: []string{testFinalizer},
+		},
+		Spec:   agentv1alpha1.AgentWorkloadSpec{AgentType: "worker", TenantID: "tenant-1"},
+		Status: agentv1alpha1.AgentWorkloadStatus{Phase: "Running", PodName: "crashed-agent-pod"},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "crashed-agent-pod", Namespace: "default"},
+		Status:     corev1.PodStatus{Phase: corev1.PodFailed},
+	}
+	s := buildScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(s).WithObjects(aw, pod).WithStatusSubresource(aw).Build()
+	reg := registry.NewMock(map[string]registry.AgentTemplate{"worker": workerTemplate()})
+	r := &operator.AgentWorkloadReconciler{Client: fakeClient, Scheme: s, Registry: reg, EventsClient: events.NewMock()}
+
+	if err := fakeClient.Delete(context.Background(), aw); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "crashed-agent", Namespace: "default"}}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	if len(reg.Failed) != 1 || reg.Failed[0] != "crashed-agent" {
+		t.Fatalf("expected Fail(crashed-agent), got Completed=%v Failed=%v", reg.Completed, reg.Failed)
 	}
 }

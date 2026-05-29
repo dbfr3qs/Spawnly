@@ -187,22 +187,36 @@ func (r *AgentWorkloadReconciler) fetchPodLogs(ctx context.Context, namespace, p
 }
 
 func (r *AgentWorkloadReconciler) handleDeletion(ctx context.Context, aw *agentv1alpha1.AgentWorkload) (ctrl.Result, error) {
-	if controllerutil.ContainsFinalizer(aw, finalizer) {
-		if aw.Status.PodName != "" {
+	if !controllerutil.ContainsFinalizer(aw, finalizer) {
+		return ctrl.Result{}, nil
+	}
+
+	// A workload being torn down has completed its work unless we have positive
+	// evidence of failure. A long-lived child exits 0 after serving its A2A
+	// reply and is then deleted by its parent; at that instant its pod is
+	// Running/Terminating (never Succeeded), so the old PodSucceeded check
+	// mislabeled healthy children as "failed". Genuine crashes are caught by
+	// handleRunning (PodFailed -> Status.Phase="Failed") before deletion.
+	markFailed := aw.Status.Phase == "Failed"
+	if !markFailed {
+		if aw.Status.PodName == "" {
+			markFailed = true // never produced a pod
+		} else {
 			var pod corev1.Pod
 			key := types.NamespacedName{Name: aw.Status.PodName, Namespace: aw.Namespace}
-			if err := r.Get(ctx, key, &pod); err == nil && pod.Status.Phase == corev1.PodSucceeded {
-				_ = r.Registry.Complete(ctx, aw.Name)
-			} else {
-				_ = r.Registry.Fail(ctx, aw.Name)
+			if err := r.Get(ctx, key, &pod); err == nil && pod.Status.Phase == corev1.PodFailed {
+				markFailed = true
 			}
-		} else {
-			_ = r.Registry.Fail(ctx, aw.Name)
 		}
-		controllerutil.RemoveFinalizer(aw, finalizer)
-		return ctrl.Result{}, r.Update(ctx, aw)
 	}
-	return ctrl.Result{}, nil
+
+	if markFailed {
+		_ = r.Registry.Fail(ctx, aw.Name)
+	} else {
+		_ = r.Registry.Complete(ctx, aw.Name)
+	}
+	controllerutil.RemoveFinalizer(aw, finalizer)
+	return ctrl.Result{}, r.Update(ctx, aw)
 }
 
 func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl registry.AgentTemplate) *corev1.Pod {

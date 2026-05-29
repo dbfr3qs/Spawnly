@@ -58,8 +58,9 @@ deploy: spire
 redeploy-%:
 	docker build --target $* -t agent-$*:$(IMAGE_TAG) .
 	kind load docker-image agent-$*:$(IMAGE_TAG) --name $(KIND_CLUSTER)
-	kubectl rollout restart deployment/$*
-	kubectl rollout status deployment/$* --timeout=60s
+	@if [ "$*" = "operator" ]; then DEPLOY=agent-operator; else DEPLOY=$*; fi; \
+	kubectl rollout restart deployment/$$DEPLOY && \
+	kubectl rollout status deployment/$$DEPLOY --timeout=60s
 
 # reload-% — rebuild + load an agent image (not a Deployment) into Kind.
 # Use this for parent-agent, child-agent, weather-monitor, etc.
