@@ -43,7 +43,7 @@ func TestCallSampleAPISuccess(t *testing.T) {
 	}))
 	defer apiSrv.Close()
 
-	result, err := callSampleAPI(context.Background(), apiSrv.URL, "test-token", "hello")
+	result, err := callSampleAPI(context.Background(), apiSrv.URL, "test-token", "tenant-1", "hello")
 	if err != nil {
 		t.Fatalf("callSampleAPI: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestCallSampleAPIUnauthorized(t *testing.T) {
 	}))
 	defer apiSrv.Close()
 
-	_, err := callSampleAPI(context.Background(), apiSrv.URL, "bad-token", "hello")
+	_, err := callSampleAPI(context.Background(), apiSrv.URL, "bad-token", "tenant-1", "hello")
 	if err == nil {
 		t.Fatal("expected error on 403 from sample API")
 	}
@@ -77,7 +77,7 @@ func TestCallSampleAPIEmptyTask(t *testing.T) {
 	}))
 	defer apiSrv.Close()
 
-	result, err := callSampleAPI(context.Background(), apiSrv.URL, "tok", "")
+	result, err := callSampleAPI(context.Background(), apiSrv.URL, "tok", "tenant-1", "")
 	if err != nil {
 		t.Fatalf("callSampleAPI with empty task: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestGetSidecarTokenSuccess(t *testing.T) {
 	}))
 	defer apiSrv.Close()
 
-	_, err := callSampleAPI(context.Background(), apiSrv.URL, "my-access-token", "task")
+	_, err := callSampleAPI(context.Background(), apiSrv.URL, "my-access-token", "tenant-1", "task")
 	if err != nil {
 		t.Fatalf("callSampleAPI: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestCallSampleAPIServerError(t *testing.T) {
 	}))
 	defer apiSrv.Close()
 
-	_, err := callSampleAPI(context.Background(), apiSrv.URL, "tok", "task")
+	_, err := callSampleAPI(context.Background(), apiSrv.URL, "tok", "tenant-1", "task")
 	if err == nil {
 		t.Fatal("expected error on 500 from sample API")
 	}
