@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path"
 	"strings"
 
 	"github.com/agent-platform/poc/internal/spicedb"
@@ -63,19 +64,40 @@ func authorize(w http.ResponseWriter, r *http.Request, sdb spicedb.Client, valid
 		return tokenvalidator.Claims{}, false
 	}
 
-	agentName := claims.ActingAgentName
-	allowed, err := sdb.CheckPermission(r.Context(), "tenant:"+tenantID, "work_on", "agent:"+agentName)
+	// Authorize the ENTIRE delegation chain, not just the acting agent: every
+	// agent in the act chain must still hold work_on on the tenant. Suspending
+	// any ancestor removes its work_on grant, so this cascades to deny every
+	// descendant's in-flight token. The chain is bounded by the delegation maxDepth.
+	deniedMember, ok, err := authorizeChain(r.Context(), sdb, tenantID, claims.Chain)
 	if err != nil {
 		log.Printf("spicedb error: %v", err)
 		http.Error(w, "authz error", http.StatusInternalServerError)
 		return tokenvalidator.Claims{}, false
 	}
-	if !allowed {
+	if !ok {
+		log.Printf("chain authorization denied: member %q lacks work_on on tenant:%s", deniedMember, tenantID)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return tokenvalidator.Claims{}, false
 	}
 
 	return claims, true
+}
+
+// authorizeChain returns ok=true only if every agent in the delegation chain
+// currently holds work_on on the tenant. On the first member that does not, it
+// returns that member's id and ok=false (cascade denial for a suspended ancestor).
+func authorizeChain(ctx context.Context, sdb spicedb.Client, tenantID string, chain []string) (deniedMember string, ok bool, err error) {
+	for _, spiffeID := range chain {
+		id := path.Base(spiffeID)
+		allowed, err := sdb.CheckPermission(ctx, "tenant:"+tenantID, "work_on", "agent:"+id)
+		if err != nil {
+			return "", false, err
+		}
+		if !allowed {
+			return id, false, nil
+		}
+	}
+	return "", true, nil
 }
 
 func buildMux(sdb spicedb.Client, validator tokenvalidator.TokenValidator, cfg apiConfig) *http.ServeMux {

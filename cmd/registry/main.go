@@ -319,6 +319,63 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	// Suspend is the revocation primitive: drop the agent's SpiceDB authorization
+	// so any check for it (or for a delegation chain that includes it) denies, and
+	// mark the record "suspended" so the registry's own logic stops treating it as
+	// active (e.g. IsActive, exchange chain checks).
+	mux.HandleFunc("POST /v1/agents/{id}/suspend", func(w http.ResponseWriter, r *http.Request) {
+		agentID := r.PathValue("id")
+		rec := s.getAgent(agentID)
+		if rec.AgentID == "" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		s.updateAgent(agentID, "suspended")
+		if err := sdb.DeleteAgentRelationships(r.Context(), agentID); err != nil {
+			log.Printf("spicedb cleanup error for %s: %v", agentID, err)
+		}
+		s.appendEvent(agentID, events.Event{
+			Source:  events.SourceRegistry,
+			Type:    "agent_suspended",
+			Payload: mustMarshal(map[string]string{"agentId": agentID}),
+		})
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// Resume reverses a suspend: re-derive the agent's SpiceDB relations from its
+	// template (identical logic to registration) and mark the record active again.
+	mux.HandleFunc("POST /v1/agents/{id}/resume", func(w http.ResponseWriter, r *http.Request) {
+		agentID := r.PathValue("id")
+		rec := s.getAgent(agentID)
+		if rec.AgentID == "" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if rec.Status != "suspended" {
+			http.Error(w, "agent is not suspended", http.StatusConflict)
+			return
+		}
+		tpl, ok := s.getTemplate(rec.AgentType)
+		if !ok {
+			http.Error(w, "unknown agent type", http.StatusBadRequest)
+			return
+		}
+		s.updateAgent(agentID, "active")
+		for _, rel := range tpl.AuthZ.SpiceDBRelations {
+			res := substitute(rel.Resource, agentID, rec.TenantID)
+			sub := substitute(rel.Subject, agentID, rec.TenantID)
+			if err := sdb.WriteRelationship(r.Context(), res, rel.Relation, sub); err != nil {
+				log.Printf("spicedb resume write error for %s: %v", agentID, err)
+			}
+		}
+		s.appendEvent(agentID, events.Event{
+			Source:  events.SourceRegistry,
+			Type:    "agent_resumed",
+			Payload: mustMarshal(map[string]string{"agentId": agentID}),
+		})
+		w.WriteHeader(http.StatusOK)
+	})
+
 	// Delegation policy decision for parentType delegating to childType.
 	// Always returns HTTP 200 — a missing/unconfigured parent template yields allowed:false.
 	mux.HandleFunc("GET /v1/delegation-policy", func(w http.ResponseWriter, r *http.Request) {

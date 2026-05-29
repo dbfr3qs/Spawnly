@@ -201,6 +201,30 @@ public class TokenExchangeGrantValidator : IExtensionGrantValidator
             return;
         }
 
+        // 3c. Chain-revocation enforcement (Milestone 3).
+        //
+        //     Every agent in the delegation chain must currently be active. The chain is the new
+        //     actor (childAgentId, doing this exchange) plus every actor already named in the
+        //     subject_token's act chain. If ANY of them is missing from the registry or not in
+        //     status "active" (e.g. suspended/failed/completed), reject the exchange — this stops
+        //     any new or refreshed delegation routed through a revoked agent, whether it is the
+        //     immediate delegator or an ancestor.
+        var chainAgentIds = new HashSet<string> { childAgentId };
+        foreach (var id in AllActChainAgentIds(subject))
+        {
+            chainAgentIds.Add(id);
+        }
+        foreach (var id in chainAgentIds)
+        {
+            var agent = await _registry.GetAgent(id);
+            if (agent is null || agent.Status != "active")
+            {
+                context.Result = PolicyError(
+                    $"delegation chain member {id} is not active (status: {agent?.Status ?? "unknown"})");
+                return;
+            }
+        }
+
         // 4. act = { "sub": "<actor spiffe>", "act": <subject_token's act> }.
         //    Wrap the new actor around the previous delegation chain.
         //
@@ -341,6 +365,45 @@ public class TokenExchangeGrantValidator : IExtensionGrantValidator
         }
         catch { /* malformed act → treated as unresolvable below */ }
         return null;
+    }
+
+    /// <summary>
+    /// Returns the agentId of every actor named in the subject_token's act chain, by walking the
+    /// nested act objects and mapping each level's "sub" (a SPIFFE URI) to its agentId via
+    /// <see cref="LastPathSegment"/>. Levels without a usable "sub" are skipped. A subject_token
+    /// with no act claim yields an empty sequence.
+    /// </summary>
+    private static IEnumerable<string> AllActChainAgentIds(JsonWebToken subject)
+    {
+        if (!subject.TryGetClaim("act", out var actClaim) || string.IsNullOrEmpty(actClaim.Value))
+            yield break;
+
+        JsonDocument doc;
+        try
+        {
+            doc = JsonDocument.Parse(actClaim.Value);
+        }
+        catch
+        {
+            yield break;
+        }
+
+        using (doc)
+        {
+            var node = doc.RootElement;
+            while (node.ValueKind == JsonValueKind.Object)
+            {
+                if (node.TryGetProperty("sub", out var subProp) &&
+                    subProp.ValueKind == JsonValueKind.String)
+                {
+                    var agentId = LastPathSegment(subProp.GetString());
+                    if (!string.IsNullOrEmpty(agentId))
+                        yield return agentId;
+                }
+                if (!node.TryGetProperty("act", out var nested)) break;
+                node = nested;
+            }
+        }
     }
 
     /// <summary>

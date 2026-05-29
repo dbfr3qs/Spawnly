@@ -302,3 +302,30 @@ func TestTaskHandlerSpiceDBDenied(t *testing.T) {
 		t.Fatalf("got %d, want 403", rec.Code)
 	}
 }
+
+// A two-member chain where the acting (child) agent is authorized but an
+// ancestor (parent) has been suspended — its work_on grant removed — must
+// cascade to 403, even though the child itself is allowed.
+func TestWorkHandlerSuspendedAncestorDenied(t *testing.T) {
+	child := "spiffe://cluster.local/agent/tenant-1/user-1/child-agent/agent-child"
+	parent := "spiffe://cluster.local/agent/tenant-1/user-1/parent-agent/agent-parent"
+
+	sdb := spicedb.NewMock()
+	// child keeps work_on; parent's grant is absent (suspended).
+	sdb.WriteRelationship(context.Background(), "tenant:tenant-1", "agent", "agent:agent-child")
+
+	c := claimsFor(child, []string{"sample-api-a:read"})
+	c.Chain = []string{child, parent} // outermost (acting) first, ancestor nested
+	validator := &tokenvalidator.MockValidator{Claims: c}
+	mux := buildMux(sdb, validator, testConfig())
+
+	req := httptest.NewRequest("GET", "/work", nil)
+	req.Header.Set("Authorization", "Bearer fake-access-token")
+	req.Header.Set("X-Tenant-ID", "tenant-1")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403 (suspended ancestor should cascade-deny)", rec.Code)
+	}
+}

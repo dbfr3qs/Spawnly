@@ -70,6 +70,9 @@ public static class Config
                 ClientSecrets = { new Secret("placeholder".Sha256()) },
                 AlwaysSendClientClaims = true,
                 ClientClaimsPrefix = "",
+                // Short-lived delegated tokens (Milestone 3): a revocation backstop so an
+                // in-flight token cannot be used long after its chain is revoked.
+                AccessTokenLifetime = 120,
                 AllowedScopes =
                 {
                     "sample-api-a:read",
@@ -89,6 +92,9 @@ public static class Config
                 ClientSecrets = { new Secret("placeholder".Sha256()) },
                 AlwaysSendClientClaims = true,
                 ClientClaimsPrefix = "",
+                // Short-lived delegated tokens (Milestone 3): a revocation backstop so an
+                // in-flight token cannot be used long after its chain is revoked.
+                AccessTokenLifetime = 120,
                 AllowedScopes =
                 {
                     "sample-api-b:read",

@@ -460,3 +460,58 @@ func TestSelfRegistrationEmitsEvents(t *testing.T) {
 		t.Fatal("missing spicedb_relations_written event")
 	}
 }
+
+func TestSuspendResume_AuthZ(t *testing.T) {
+	s := newStore()
+	s.putTemplate(registry.AgentTemplate{
+		AgentType: "worker",
+		AuthZ: registry.AuthZSpec{SpiceDBRelations: []registry.SpiceDBRelationTemplate{
+			{Resource: "tenant:{{tenant_id}}", Relation: "agent", Subject: "agent:{{agent_id}}"},
+		}},
+	})
+	s.registerAgent(registry.AgentRecord{AgentID: "agent-test", AgentType: "worker", TenantID: "tenant-1", Status: "active"})
+	sdb := spicedb.NewMock()
+	sdb.WriteRelationship(t.Context(), "tenant:tenant-1", "agent", "agent:agent-test")
+	validator := &spiffe.MockSVIDValidator{}
+	mux := buildMux(s, sdb, validator)
+
+	// suspend: status -> suspended, tuple removed
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/agent-test/suspend", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("suspend: got %d, want 200", rec.Code)
+	}
+	if s.getAgent("agent-test").Status != "suspended" {
+		t.Fatal("status not suspended")
+	}
+	if ok, _ := sdb.CheckPermission(t.Context(), "tenant:tenant-1", "work_on", "agent:agent-test"); ok {
+		t.Fatal("expected SpiceDB tuple removed on suspend")
+	}
+
+	// resume: status -> active, tuple restored from template
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/agents/agent-test/resume", nil))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("resume: got %d, want 200", rec2.Code)
+	}
+	if s.getAgent("agent-test").Status != "active" {
+		t.Fatal("status not active after resume")
+	}
+	if ok, _ := sdb.CheckPermission(t.Context(), "tenant:tenant-1", "work_on", "agent:agent-test"); !ok {
+		t.Fatal("expected SpiceDB tuple restored on resume")
+	}
+
+	// resume of a non-suspended agent -> 409
+	rec3 := httptest.NewRecorder()
+	mux.ServeHTTP(rec3, httptest.NewRequest("POST", "/v1/agents/agent-test/resume", nil))
+	if rec3.Code != http.StatusConflict {
+		t.Fatalf("resume non-suspended: got %d, want 409", rec3.Code)
+	}
+
+	// suspend unknown agent -> 404
+	rec4 := httptest.NewRecorder()
+	mux.ServeHTTP(rec4, httptest.NewRequest("POST", "/v1/agents/nope/suspend", nil))
+	if rec4.Code != http.StatusNotFound {
+		t.Fatalf("suspend unknown: got %d, want 404", rec4.Code)
+	}
+}
