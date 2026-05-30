@@ -20,7 +20,7 @@ import {
   resolveModel,
 } from '@flue/runtime/internal';
 import { local } from '@flue/runtime/node';
-import { postEvent, instrumentFlue, promptTimeoutSignal } from '@agent-platform/sdk';
+import { postEvent, instrumentFlue, promptTimeoutSignal, TokenClient } from '@agent-platform/sdk';
 
 const agentId     = process.env.AGENT_ID      ?? 'unknown';
 const registryUrl  = process.env.REGISTRY_URL  ?? 'http://registry:8080';
@@ -38,40 +38,9 @@ const DELEGATION_METADATA_KEY = 'delegationToken';
 
 configureProvider(aiProvider, { apiKey: aiApiKey });
 
-interface TokenResponse {
-  access_token: string;
-  expires_in: number;
-}
-
-// Exchange a delegation token at the local sidecar for a token usable against
-// the target API (RFC 8693 act-chain extension). Throws on non-2xx.
-async function exchangeDelegationToken(
-  subjectToken: string,
-  audience: string,
-  scope: string,
-): Promise<string> {
-  const qs = new URLSearchParams({ subject_token: subjectToken, audience, scope }).toString();
-  const url = `${sidecarUrl}/token?${qs}`;
-  // The sidecar may not be listening on :8089 yet when the child is first
-  // invoked (its A2A server on :8080 comes up before the sidecar finishes
-  // SVID fetch + registration). Retry with backoff until it's ready.
-  const deadline = Date.now() + 30_000;
-  let lastErr: unknown;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url);
-      if (!res.ok) {
-        throw new Error(`sidecar exchange /token failed: ${res.status} ${await res.text()}`);
-      }
-      const data = (await res.json()) as TokenResponse;
-      return data.access_token;
-    } catch (e) {
-      lastErr = e;
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-  }
-  throw new Error(`sidecar exchange /token unreachable after 30s: ${lastErr}`);
-}
+// Sidecar token client (handles the SVID-not-ready retry and RFC 8693 exchange).
+// See @agent-platform/sdk.
+const tokens = new TokenClient(sidecarUrl);
 
 // Extract the delegation token from an incoming A2A message: prefer message
 // metadata, fall back to any text part shaped as "delegationToken=<...>".
@@ -98,7 +67,11 @@ function extractDelegationToken(message: Message | undefined): string | undefine
 async function runDelegationFlow(delegationToken: string): Promise<string> {
   let exchanged: string;
   try {
-    exchanged = await exchangeDelegationToken(delegationToken, 'sample-api-b', 'sample-api-b:read');
+    exchanged = await tokens.exchangeToken({
+      subjectToken: delegationToken,
+      audience: 'sample-api-b',
+      scope: 'sample-api-b:read',
+    });
   } catch (err) {
     console.error('[child-agent] token exchange failed:', err);
     await postEvent(registryUrl, agentId, 'delegation_exchange', {

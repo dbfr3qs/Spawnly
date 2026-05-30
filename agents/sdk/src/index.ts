@@ -10,32 +10,132 @@ interface CachedToken {
 
 const EXPIRY_BUFFER_MS = 5_000;
 
+export interface TokenClientOptions {
+  /** Deadline for the sidecar-not-ready retry loop. Default 30s. */
+  readyTimeoutMs?: number;
+  /** Backoff between retries while the sidecar is unreachable. Default 1s. */
+  retryDelayMs?: number;
+}
+
+export interface TokenRequestOptions {
+  /** Abort the (possibly retrying) request early. */
+  signal?: AbortSignal;
+}
+
+/**
+ * Wraps the per-agent sidecar's `/token` endpoint — the platform's neutral token
+ * contract. Covers all three modes the sidecar exposes:
+ *   - getToken(scope)                      → client_credentials
+ *   - getToken(scope, { audience })        → client_credentials, explicit audience
+ *                                            (e.g. minting a delegation token)
+ *   - exchangeToken({ subjectToken, ... }) → RFC 8693 token-exchange
+ *
+ * The sidecar binds :8089 only after it has fetched its SVID and self-registered,
+ * so the first calls at startup can hit ECONNREFUSED. Requests retry on
+ * connection errors / 5xx until `readyTimeoutMs`, but fail fast on 4xx (a bad
+ * scope or policy denial is not a readiness problem).
+ */
 export class TokenClient {
   private baseUrl: string;
+  private readyTimeoutMs: number;
+  private retryDelayMs: number;
   private cache = new Map<string, CachedToken>();
 
-  constructor(baseUrl = "http://localhost:8089") {
+  constructor(baseUrl = "http://localhost:8089", opts: TokenClientOptions = {}) {
     this.baseUrl = baseUrl;
+    this.readyTimeoutMs = opts.readyTimeoutMs ?? 30_000;
+    this.retryDelayMs = opts.retryDelayMs ?? 1_000;
   }
 
-  async getToken(scope: string): Promise<string> {
-    const cached = this.cache.get(scope);
+  /**
+   * Client-credentials token for `scope`. Cached per `scope|audience` until just
+   * before expiry. Pass `audience` to target a specific resource / mint a
+   * delegation token (e.g. `{ audience: "delegation" }`).
+   */
+  async getToken(scope: string, opts: TokenRequestOptions & { audience?: string } = {}): Promise<string> {
+    const { audience, signal } = opts;
+    const cacheKey = `${scope}|${audience ?? ""}`;
+    const cached = this.cache.get(cacheKey);
     if (cached && Date.now() < cached.expiresAt - EXPIRY_BUFFER_MS) {
       return cached.token;
     }
 
-    const res = await fetch(`${this.baseUrl}/token?scope=${encodeURIComponent(scope)}`);
-    if (!res.ok) {
-      throw new Error(`Token request failed: ${res.status} ${res.statusText}`);
-    }
+    const params: Record<string, string> = { scope };
+    if (audience) params.audience = audience;
+    const data = await this.request(params, signal);
 
-    const data = (await res.json()) as TokenResponse;
-    this.cache.set(scope, {
+    this.cache.set(cacheKey, {
       token: data.access_token,
       expiresAt: Date.now() + data.expires_in * 1_000,
     });
-
     return data.access_token;
+  }
+
+  /**
+   * RFC 8693 token-exchange: exchange a `subjectToken` (e.g. a delegation token
+   * received from a parent) for a token scoped to `audience`/`scope`, with this
+   * agent's SVID added to the act chain by the sidecar. Never cached — exchanged
+   * tokens are short-lived and request-specific.
+   */
+  async exchangeToken(
+    args: { subjectToken: string; audience: string; scope: string },
+    opts: TokenRequestOptions = {},
+  ): Promise<string> {
+    const data = await this.request(
+      { subject_token: args.subjectToken, audience: args.audience, scope: args.scope },
+      opts.signal,
+    );
+    return data.access_token;
+  }
+
+  // Issues the GET, retrying on connection errors / 5xx until the readiness
+  // deadline, failing fast on any 4xx. Honors an optional AbortSignal.
+  private async request(params: Record<string, string>, signal?: AbortSignal): Promise<TokenResponse> {
+    const qs = new URLSearchParams(params).toString();
+    const url = `${this.baseUrl}/token?${qs}`;
+    const deadline = Date.now() + this.readyTimeoutMs;
+    let lastErr: unknown;
+
+    while (Date.now() < deadline) {
+      if (signal?.aborted) throw new Error("token request aborted");
+
+      let res: Response;
+      try {
+        res = await fetch(url, { signal });
+      } catch (e) {
+        // Connection error (sidecar not listening yet) or abort.
+        if (signal?.aborted) throw e;
+        lastErr = e;
+        await this.sleep(signal);
+        continue;
+      }
+
+      if (res.ok) {
+        return (await res.json()) as TokenResponse;
+      }
+      // 4xx — a real error (bad scope / policy denial), not a readiness issue.
+      if (res.status >= 400 && res.status < 500) {
+        throw new Error(`token request failed: ${res.status} ${await res.text()}`);
+      }
+      // 5xx — transient; retry until the deadline.
+      lastErr = new Error(`token request failed: ${res.status}`);
+      await this.sleep(signal);
+    }
+    throw new Error(`sidecar /token unreachable after ${this.readyTimeoutMs}ms: ${lastErr}`);
+  }
+
+  private sleep(signal?: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const id = setTimeout(resolve, this.retryDelayMs);
+      signal?.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(id);
+          reject(new Error("token request aborted"));
+        },
+        { once: true },
+      );
+    });
   }
 }
 

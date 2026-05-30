@@ -8,7 +8,7 @@ import {
   resolveModel,
 } from '@flue/runtime/internal';
 import { local } from '@flue/runtime/node';
-import { postEvent, instrumentFlue, promptTimeoutSignal } from '@agent-platform/sdk';
+import { postEvent, instrumentFlue, promptTimeoutSignal, TokenClient } from '@agent-platform/sdk';
 
 const agentId       = process.env.AGENT_ID        ?? 'unknown';
 const registryUrl    = process.env.REGISTRY_URL    ?? 'http://registry:8080';
@@ -28,37 +28,9 @@ const DELEGATION_METADATA_KEY = 'delegationToken';
 
 configureProvider(aiProvider, { apiKey: aiApiKey });
 
-interface TokenResponse {
-  access_token: string;
-  expires_in: number;
-}
-
-// Fetch a token from the local sidecar. `params` is appended to /token as-is.
-// Never throws on a non-2xx in a way that crashes callers — but a missing token
-// is a hard error for the steps that need one, so we surface it.
-async function getSidecarToken(params: Record<string, string>): Promise<string> {
-  const qs = new URLSearchParams(params).toString();
-  const url = `${sidecarUrl}/token?${qs}`;
-  // The sidecar (native init container) fetches its SVID and self-registers
-  // before it starts listening on :8089, so at agent startup the first calls
-  // can hit ECONNREFUSED. Retry with backoff until it's ready.
-  const deadline = Date.now() + 30_000;
-  let lastErr: unknown;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url);
-      if (!res.ok) {
-        throw new Error(`sidecar /token failed: ${res.status} ${await res.text()}`);
-      }
-      const data = (await res.json()) as TokenResponse;
-      return data.access_token;
-    } catch (e) {
-      lastErr = e;
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-  }
-  throw new Error(`sidecar /token unreachable after 30s: ${lastErr}`);
-}
+// Sidecar token client (handles the SVID-not-ready retry and the three /token
+// modes). See @agent-platform/sdk.
+const tokens = new TokenClient(sidecarUrl);
 
 // The delegation token minted in main() and passed to the child via A2A.
 // Module-level so the call_child_agent tool can read it deterministically
@@ -206,7 +178,7 @@ const killChildAgent: ToolDef = {
 // Deterministic step (a): get a working token for API-A and call it directly.
 async function callApiADirect(): Promise<void> {
   try {
-    const token = await getSidecarToken({ scope: 'sample-api-a:read sample-api-a:write' });
+    const token = await tokens.getToken('sample-api-a:read sample-api-a:write');
     const res = await fetch(`${apiAUrl}/work`, {
       method: 'POST',
       headers: {
@@ -243,10 +215,7 @@ async function callApiADirect(): Promise<void> {
 // Deterministic step (b): mint a delegation token scoped to sample-api-b:read.
 async function mintDelegationToken(): Promise<void> {
   try {
-    delegationToken = await getSidecarToken({
-      audience: 'delegation',
-      scope: 'sample-api-b:read',
-    });
+    delegationToken = await tokens.getToken('sample-api-b:read', { audience: 'delegation' });
     console.log('[parent-agent] minted delegation token for sample-api-b:read');
     await postEvent(registryUrl, agentId, 'delegation_token_minted', {
       audience: 'delegation',
