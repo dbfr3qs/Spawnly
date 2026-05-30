@@ -149,6 +149,23 @@ Open `http://localhost:8090` to watch events and spin up agents in real time:
 
 ---
 
+## Authoring agents
+
+Guides for building a new agent from scratch live in [`docs/authoring/`](docs/authoring/).
+These render as a searchable documentation website (Starlight) under
+[`website/`](website/) — run `cd website && npm install && npm run dev`, or see
+[website/README.md](website/README.md). Start with the shared contract, then
+follow the scenario that matches your agent:
+
+- [Anatomy of an Agent](docs/authoring/00-anatomy.md) — the platform contract, injected env, the SDK, and the six-step build/register/spawn path.
+- [Scenario 1 — Job-and-exit](docs/authoring/01-job-and-exit.md) (Price Reporter): spin up, do one job, exit.
+- [Scenario 2 — Loop-until-stopped](docs/authoring/02-loop-until-stopped.md) (Queue Worker): long-lived, runs until deleted.
+- [Scenario 3 — Parent → child](docs/authoring/03-parent-and-child.md) (Trip Planner & Currency Converter): orchestration over A2A with delegated, attenuated authority.
+- [Defining a Template](docs/authoring/04-defining-a-template.md) — the full `AgentTemplate` schema field by field, who consumes each field, and the build/register lifecycle.
+- [Defining Policy](docs/authoring/05-defining-policy.md) — an agent's own authority (`authzTemplate` + scopes) and parent→child delegation (`delegation` block), with a set-vs-consume component map.
+
+---
+
 ## Running tests
 
 ```bash
