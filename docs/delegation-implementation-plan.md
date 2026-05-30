@@ -1,3 +1,8 @@
+---
+title: "Implementation Plan: Agent Delegation via Token Exchange"
+description: How the delegation milestones (token exchange, registry policy, suspension/revocation) were executed.
+---
+
 # Implementation Plan: Agent Delegation via Token Exchange
 
 Companion to [delegation-design.md](delegation-design.md). Executed with sub

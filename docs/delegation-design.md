@@ -1,3 +1,8 @@
+---
+title: Agent Delegation via OAuth2 Token Exchange (RFC 8693)
+description: The conceptual basis for delegation — trust model, locked decisions, and v1 simplifications.
+---
+
 # Agent Delegation via OAuth2 Token Exchange (RFC 8693)
 
 > Status: **design** (pre-implementation). This note is the conceptual basis for
