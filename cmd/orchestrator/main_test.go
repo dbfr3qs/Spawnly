@@ -33,6 +33,7 @@ func newScheme() *runtime.Scheme {
 //   - POST /v1/agents/*/events   → 201
 //   - GET  /v1/agents            → []
 //   - GET  /v1/templates/{type}  → stub template with lifecycle ""
+//   - GET  /v1/spawn-policy       → allowed iff childType == "child-agent"
 func defaultMockRegistry(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -42,6 +43,13 @@ func defaultMockRegistry(t *testing.T) *httptest.Server {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents":
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte("[]"))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/spawn-policy":
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Query().Get("childType") == "child-agent" {
+				w.Write([]byte(`{"allowed":true,"reason":""}`))
+			} else {
+				w.Write([]byte(`{"allowed":false,"reason":"not permitted"}`))
+			}
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/templates/"):
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte(`{"agentType":"worker","version":"1.0.0","status":"active","meta":{"displayName":"Worker","description":"Test"},"runtimeSpec":{"image":"agent-agent:latest","lifecycle":"","resources":{"cpuLimits":"","memoryLimits":""},"envDefaults":{}},"authzTemplate":{"spiceDbRelations":[]}}`))
@@ -101,6 +109,68 @@ func TestSpawnCreatesAgentWorkload(t *testing.T) {
 	}
 	if list.Items[0].Name != resp.WorkloadName {
 		t.Fatalf("CRD name %q does not match response workloadName %q", list.Items[0].Name, resp.WorkloadName)
+	}
+}
+
+func TestSpawnWithAllowedParentSucceeds(t *testing.T) {
+	mockReg := defaultMockRegistry(t)
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	sdb := spicedb.NewMock()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+
+	body, _ := json.Marshal(SpawnRequest{
+		AgentType: "child-agent", // allowed by the mock spawn-policy
+		UserID:    "user-1",
+		TenantID:  "tenant-1",
+		ParentID:  "parent-1",
+	})
+	req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("got %d, want 202", rec.Code)
+	}
+	var list agentv1alpha1.AgentWorkloadList
+	fakeClient.List(context.Background(), &list)
+	if len(list.Items) != 1 {
+		t.Fatalf("expected 1 AgentWorkload, got %d", len(list.Items))
+	}
+	if list.Items[0].Spec.ParentID != "parent-1" {
+		t.Fatalf("unexpected parentId: %q", list.Items[0].Spec.ParentID)
+	}
+}
+
+func TestSpawnWithDisallowedParentDenied(t *testing.T) {
+	mockReg := defaultMockRegistry(t)
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	sdb := spicedb.NewMock()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+
+	body, _ := json.Marshal(SpawnRequest{
+		AgentType: "forbidden-type", // denied by the mock spawn-policy
+		UserID:    "user-1",
+		TenantID:  "tenant-1",
+		ParentID:  "parent-1",
+	})
+	req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403", rec.Code)
+	}
+	// No workload should have been created.
+	var list agentv1alpha1.AgentWorkloadList
+	fakeClient.List(context.Background(), &list)
+	if len(list.Items) != 0 {
+		t.Fatalf("expected 0 AgentWorkloads after denied spawn, got %d", len(list.Items))
 	}
 }
 

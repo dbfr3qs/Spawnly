@@ -52,6 +52,42 @@ func TestTemplateCRUD(t *testing.T) {
 	}
 }
 
+func TestSpawnPolicy(t *testing.T) {
+	s := newStore()
+	s.putTemplate(registry.AgentTemplate{
+		AgentType: "parent-agent", Version: "1.0.0", Status: "active",
+		Delegation: registry.DelegationPolicy{AllowedChildTypes: []string{"child-agent"}},
+	})
+	s.registerAgent(registry.AgentRecord{AgentID: "parent-1", AgentType: "parent-agent", TenantID: "tenant-1"})
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{}
+	mux := buildMux(s, sdb, validator)
+
+	check := func(parentID, childType string) registry.SpawnDecision {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/spawn-policy?parentId="+parentID+"&childType="+childType, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("spawn-policy: got %d, want 200", rec.Code)
+		}
+		var d registry.SpawnDecision
+		json.NewDecoder(rec.Body).Decode(&d)
+		return d
+	}
+
+	if d := check("parent-1", "child-agent"); !d.Allowed {
+		t.Fatalf("expected allowed for listed child, got %+v", d)
+	}
+	// Deny-by-default: a child type not in allowedChildTypes is rejected.
+	if d := check("parent-1", "other-agent"); d.Allowed {
+		t.Fatalf("expected denied for unlisted child, got %+v", d)
+	}
+	// Unknown parent is denied.
+	if d := check("ghost", "child-agent"); d.Allowed {
+		t.Fatalf("expected denied for unknown parent, got %+v", d)
+	}
+}
+
 func TestAgentSelfRegistration(t *testing.T) {
 	s := newStore()
 	s.putTemplate(workerTemplate())

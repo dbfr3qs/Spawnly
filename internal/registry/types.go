@@ -19,6 +19,16 @@ type DelegationPolicy struct {
 	MaxDepth          int      `json:"maxDepth"`
 }
 
+// SpawnDecision is the registry's answer to "may this parent spawn this child
+// type?". Returned by GET /v1/spawn-policy and consumed by the orchestrator at
+// spawn time. The edge is gated by the parent template's AllowedChildTypes
+// (reused from DelegationPolicy); a parent that lists no child types may spawn
+// none (deny-by-default).
+type SpawnDecision struct {
+	Allowed bool   `json:"allowed"`
+	Reason  string `json:"reason"`
+}
+
 type TemplateMeta struct {
 	DisplayName string `json:"displayName"`
 	Description string `json:"description"`

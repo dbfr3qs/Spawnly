@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 
 	"github.com/agent-platform/poc/internal/events"
 )
@@ -21,6 +22,7 @@ type Client interface {
 	ListTemplates(ctx context.Context) ([]string, error)
 	DismissAgent(ctx context.Context, agentID string) error
 	PreRegisterAgent(ctx context.Context, r AgentRecord) error
+	CheckSpawnPolicy(ctx context.Context, parentID, childType string) (SpawnDecision, error)
 }
 
 type HTTPClient struct {
@@ -142,6 +144,21 @@ func (c *HTTPClient) PreRegisterAgent(ctx context.Context, r AgentRecord) error 
 	return nil
 }
 
+func (c *HTTPClient) CheckSpawnPolicy(ctx context.Context, parentID, childType string) (SpawnDecision, error) {
+	q := url.Values{"parentId": {parentID}, "childType": {childType}}
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.base+"/v1/spawn-policy?"+q.Encode(), nil)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return SpawnDecision{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return SpawnDecision{}, fmt.Errorf("spawn policy: status %d", resp.StatusCode)
+	}
+	var d SpawnDecision
+	return d, json.NewDecoder(resp.Body).Decode(&d)
+}
+
 func (c *HTTPClient) DismissAgent(ctx context.Context, agentID string) error {
 	req, _ := http.NewRequestWithContext(ctx, "POST", c.base+"/v1/agents/"+agentID+"/dismiss", nil)
 	resp, err := c.http.Do(req)
@@ -217,4 +234,27 @@ func (m *Mock) PreRegisterAgent(_ context.Context, r AgentRecord) error {
 	r.Status = "pending"
 	m.Agents = append(m.Agents, r)
 	return nil
+}
+
+func (m *Mock) CheckSpawnPolicy(_ context.Context, parentID, childType string) (SpawnDecision, error) {
+	var parentType string
+	for _, a := range m.Agents {
+		if a.AgentID == parentID {
+			parentType = a.AgentType
+			break
+		}
+	}
+	if parentType == "" {
+		return SpawnDecision{Reason: "unknown parent"}, nil
+	}
+	tpl, ok := m.Templates[parentType]
+	if !ok {
+		return SpawnDecision{Reason: "parent template not found"}, nil
+	}
+	for _, ct := range tpl.Delegation.AllowedChildTypes {
+		if ct == childType {
+			return SpawnDecision{Allowed: true}, nil
+		}
+	}
+	return SpawnDecision{Reason: fmt.Sprintf("%s may not spawn %s", parentType, childType)}, nil
 }

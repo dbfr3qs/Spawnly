@@ -410,6 +410,42 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 		json.NewEncoder(w).Encode(resp)
 	})
 
+	// Spawn-policy decision: may the agent identified by parentId spawn a child of
+	// childType? Resolves parentId -> agentType -> template in-process and checks
+	// the parent template's allowedChildTypes. Deny-by-default: a parent whose
+	// template lists no (or no matching) child types may spawn none. The
+	// orchestrator calls this at spawn time when a parentId is present.
+	mux.HandleFunc("GET /v1/spawn-policy", func(w http.ResponseWriter, r *http.Request) {
+		parentID := r.URL.Query().Get("parentId")
+		childType := r.URL.Query().Get("childType")
+
+		resp := registry.SpawnDecision{Allowed: false}
+
+		rec := s.getAgent(parentID)
+		switch {
+		case rec.AgentID == "":
+			resp.Reason = "unknown parent"
+		default:
+			tpl, ok := s.getTemplate(rec.AgentType)
+			if !ok {
+				resp.Reason = "parent template not found"
+				break
+			}
+			for _, ct := range tpl.Delegation.AllowedChildTypes {
+				if ct == childType {
+					resp.Allowed = true
+					break
+				}
+			}
+			if !resp.Allowed {
+				resp.Reason = fmt.Sprintf("%s may not spawn %s", rec.AgentType, childType)
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
+
 	// Delegation lineage for an agent: the agent itself up to the root via ParentID.
 	mux.HandleFunc("GET /v1/agents/{id}/chain", func(w http.ResponseWriter, r *http.Request) {
 		agentID := r.PathValue("id")

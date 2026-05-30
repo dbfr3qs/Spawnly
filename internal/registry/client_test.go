@@ -49,6 +49,50 @@ func TestHTTPClientGetTemplateNotFound(t *testing.T) {
 	}
 }
 
+func TestHTTPClientCheckSpawnPolicy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/spawn-policy" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Query().Get("childType") == "child-agent" {
+			json.NewEncoder(w).Encode(registry.SpawnDecision{Allowed: true})
+		} else {
+			json.NewEncoder(w).Encode(registry.SpawnDecision{Allowed: false, Reason: "denied"})
+		}
+	}))
+	defer srv.Close()
+
+	client := registry.New(srv.URL)
+	if d, err := client.CheckSpawnPolicy(context.Background(), "parent-1", "child-agent"); err != nil || !d.Allowed {
+		t.Fatalf("allowed case: err=%v, decision=%+v", err, d)
+	}
+	if d, err := client.CheckSpawnPolicy(context.Background(), "parent-1", "other"); err != nil || d.Allowed {
+		t.Fatalf("denied case: err=%v, decision=%+v", err, d)
+	}
+}
+
+func TestMockClientSpawnPolicy(t *testing.T) {
+	m := registry.NewMock(map[string]registry.AgentTemplate{
+		"parent-agent": {
+			AgentType:  "parent-agent",
+			Delegation: registry.DelegationPolicy{AllowedChildTypes: []string{"child-agent"}},
+		},
+	})
+	m.PreRegisterAgent(context.Background(), registry.AgentRecord{AgentID: "parent-1", AgentType: "parent-agent"})
+
+	if d, _ := m.CheckSpawnPolicy(context.Background(), "parent-1", "child-agent"); !d.Allowed {
+		t.Fatalf("expected allowed for listed child, got %+v", d)
+	}
+	if d, _ := m.CheckSpawnPolicy(context.Background(), "parent-1", "other"); d.Allowed {
+		t.Fatalf("expected denied for unlisted child, got %+v", d)
+	}
+	if d, _ := m.CheckSpawnPolicy(context.Background(), "ghost", "child-agent"); d.Allowed {
+		t.Fatalf("expected denied for unknown parent, got %+v", d)
+	}
+}
+
 func TestMockClient(t *testing.T) {
 	tpl := registry.AgentTemplate{AgentType: "worker"}
 	m := registry.NewMock(map[string]registry.AgentTemplate{"worker": tpl})

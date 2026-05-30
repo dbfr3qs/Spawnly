@@ -166,6 +166,33 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			lifecycle = "short-lived"
 		}
 
+		// Spawn-time policy: an agent-initiated spawn (parentId present) is allowed
+		// only if the parent template lists this child type in allowedChildTypes
+		// (deny-by-default). Top-level spawns (no parentId) are unconstrained.
+		if req.ParentID != "" {
+			dec, err := regClient.CheckSpawnPolicy(r.Context(), req.ParentID, req.AgentType)
+			if err != nil {
+				log.Printf("spawn policy check for parent %s -> %s: %v", req.ParentID, req.AgentType, err)
+				http.Error(w, "spawn policy check failed", http.StatusBadGateway)
+				return
+			}
+			if !dec.Allowed {
+				log.Printf("spawn denied: parent %s may not spawn %s: %s", req.ParentID, req.AgentType, dec.Reason)
+				go func() {
+					_ = evtClient.PostEvent(context.Background(), req.ParentID, events.Event{
+						Source: events.SourceOrchestrator,
+						Type:   "spawn_denied",
+						Payload: mustMarshal(map[string]string{
+							"childType": req.AgentType,
+							"reason":    dec.Reason,
+						}),
+					})
+				}()
+				http.Error(w, "spawn denied: "+dec.Reason, http.StatusForbidden)
+				return
+			}
+		}
+
 		// The workload name becomes the pod name and the agent-id label, which SPIRE
 		// uses to issue the SVID. The agent's identity is the SVID, not this name.
 		workloadName := "agent-" + shortID()
