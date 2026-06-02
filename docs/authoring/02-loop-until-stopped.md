@@ -8,8 +8,9 @@ description: A long-lived agent that loops on a queue until deleted — lifecycl
 > **Prerequisite:** [Anatomy of an Agent](00-anatomy.md).
 >
 > **Reference implementation:** [`agents/weather-monitor`](../../agents/weather-monitor),
-> registered as the `weather-monitor` template in
-> [`scripts/reseed.sh`](../../scripts/reseed.sh). It is a long-lived agent that
+> whose template lives beside it at
+> [`agents/weather-monitor/template.json`](../../agents/weather-monitor/template.json)
+> (seeded by [`scripts/seed.sh`](../../scripts/seed.sh)). It is a long-lived agent that
 > beats on an interval; the Queue Worker is the same lifecycle with real
 > per-iteration work.
 

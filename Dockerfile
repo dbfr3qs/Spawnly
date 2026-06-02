@@ -122,6 +122,45 @@ COPY agents/sdk/package.json ./node_modules/@agent-platform/sdk/package.json
 COPY --from=build-sdk /sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
 CMD ["node", "dist/index.js"]
 
+# Currency-converter Node.js/Flue build
+FROM node:22-alpine AS build-currency-converter-node
+WORKDIR /app
+COPY agents/sdk/ /sdk/
+COPY agents/currency-converter/package*.json ./
+RUN npm ci
+COPY agents/currency-converter/src ./src
+COPY agents/currency-converter/tsconfig.json ./tsconfig.json
+RUN npm run build
+
+# Final currency-converter image
+FROM node:22-slim AS currency-converter
+WORKDIR /app
+COPY --from=build-currency-converter-node /app/dist ./dist
+COPY --from=build-currency-converter-node /app/node_modules ./node_modules
+COPY agents/sdk/package.json ./node_modules/@agent-platform/sdk/package.json
+COPY --from=build-sdk /sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
+EXPOSE 8080
+CMD ["node", "dist/index.js"]
+
+# Trip-planner Node.js/Flue build
+FROM node:22-alpine AS build-trip-planner-node
+WORKDIR /app
+COPY agents/sdk/ /sdk/
+COPY agents/trip-planner/package*.json ./
+RUN npm ci
+COPY agents/trip-planner/src ./src
+COPY agents/trip-planner/tsconfig.json ./tsconfig.json
+RUN npm run build
+
+# Final trip-planner image
+FROM node:22-slim AS trip-planner
+WORKDIR /app
+COPY --from=build-trip-planner-node /app/dist ./dist
+COPY --from=build-trip-planner-node /app/node_modules ./node_modules
+COPY agents/sdk/package.json ./node_modules/@agent-platform/sdk/package.json
+COPY --from=build-sdk /sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
+CMD ["node", "dist/index.js"]
+
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build-identity-server
 WORKDIR /src
 COPY identityserver/ .

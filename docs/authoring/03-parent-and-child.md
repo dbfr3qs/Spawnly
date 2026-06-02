@@ -10,9 +10,8 @@ description: Agent-to-agent orchestration over A2A, with delegated and attenuate
 > a long-lived A2A server (Scenario 2 lifecycle).
 >
 > **Reference implementations:** [`agents/parent-agent`](../../agents/parent-agent)
-> and [`agents/child-agent`](../../agents/child-agent), registered as the
-> `parent-agent` and `child-agent` templates in
-> [`scripts/reseed.sh`](../../scripts/reseed.sh).
+> and [`agents/child-agent`](../../agents/child-agent), whose templates live beside
+> them as `template.json` (seeded by [`scripts/seed.sh`](../../scripts/seed.sh)).
 >
 > **Background:** [delegation-design.md](../delegation-design.md) explains the
 > RFC 8693 token-exchange model this scenario relies on.

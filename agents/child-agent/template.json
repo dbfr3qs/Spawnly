@@ -1,0 +1,17 @@
+{
+  "agentType": "child-agent",
+  "version": "1.0.0",
+  "status": "active",
+  "meta": {"displayName": "Child Agent", "description": "Long-lived A2A server that generates a random string on request"},
+  "runtimeSpec": {
+    "image": "agent-child-agent:latest",
+    "lifecycle": "long-lived",
+    "resources": {"cpuLimits": "500m", "memoryLimits": "256Mi"},
+    "envDefaults": {}
+  },
+  "authzTemplate": {
+    "spiceDbRelations": [
+      {"resource": "tenant:{{tenant_id}}", "relation": "agent", "subject": "agent:{{agent_id}}"}
+    ]
+  }
+}

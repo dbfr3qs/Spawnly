@@ -100,5 +100,49 @@ public static class Config
                     "sample-api-b:read",
                 },
             },
+            new Client
+            {
+                ClientId = "trip-planner",
+                // Both client_credentials (to mint a root token) and token-exchange
+                // (to delegate to a child / re-exchange).
+                AllowedGrantTypes = new List<string>
+                {
+                    GrantType.ClientCredentials,
+                    TokenExchangeGrantType,
+                },
+                RequireClientSecret = true,
+                ClientSecrets = { new Secret("placeholder".Sha256()) },
+                AlwaysSendClientClaims = true,
+                ClientClaimsPrefix = "",
+                // Short-lived delegated tokens (Milestone 3): a revocation backstop so an
+                // in-flight token cannot be used long after its chain is revoked.
+                AccessTokenLifetime = 120,
+                AllowedScopes =
+                {
+                    "sample-api-a:read",
+                    "sample-api-a:write",
+                    "sample-api-b:read",
+                },
+            },
+            new Client
+            {
+                ClientId = "currency-converter",
+                AllowedGrantTypes = new List<string>
+                {
+                    GrantType.ClientCredentials,
+                    TokenExchangeGrantType,
+                },
+                RequireClientSecret = true,
+                ClientSecrets = { new Secret("placeholder".Sha256()) },
+                AlwaysSendClientClaims = true,
+                ClientClaimsPrefix = "",
+                // Short-lived delegated tokens (Milestone 3): a revocation backstop so an
+                // in-flight token cannot be used long after its chain is revoked.
+                AccessTokenLifetime = 120,
+                AllowedScopes =
+                {
+                    "sample-api-b:read",
+                },
+            },
         };
 }

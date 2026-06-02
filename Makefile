@@ -3,7 +3,7 @@ MODULE        := github.com/agent-platform/poc
 KIND_CLUSTER  := agent-platform
 IMAGE_TAG     := latest
 GO_SERVICES   := operator orchestrator registry sample-api agent agent-sidecar dashboard
-NODE_AGENTS   := child-agent parent-agent
+NODE_AGENTS   := child-agent parent-agent currency-converter trip-planner
 SERVICES      := $(GO_SERVICES) $(NODE_AGENTS)
 
 .PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward redeploy-% reload-% logs-% reseed
@@ -87,8 +87,9 @@ logs-%:
 
 # reseed — re-seed agent templates into the running registry without rebuilding.
 # Run this after redeploying the registry (which loses its in-memory state).
+# Seeds every co-located template.json via scripts/seed.sh.
 reseed:
-	./scripts/reseed.sh
+	./scripts/seed.sh
 
 port-forward:
 	@echo "Dashboard → http://localhost:8090  (Ctrl+C to stop)"

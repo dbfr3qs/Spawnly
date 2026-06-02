@@ -1,0 +1,17 @@
+{
+  "agentType": "weather-monitor",
+  "version": "1.0.0",
+  "status": "active",
+  "meta": {"displayName": "Weather Monitor", "description": "Long-lived agent that monitors weather on a loop"},
+  "runtimeSpec": {
+    "image": "agent-weather-monitor:latest",
+    "lifecycle": "long-lived",
+    "resources": {"cpuLimits": "500m", "memoryLimits": "256Mi"},
+    "envDefaults": {"LOG_LEVEL": "info"}
+  },
+  "authzTemplate": {
+    "spiceDbRelations": [
+      {"resource": "tenant:{{tenant_id}}", "relation": "agent", "subject": "agent:{{agent_id}}"}
+    ]
+  }
+}

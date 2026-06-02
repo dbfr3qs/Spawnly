@@ -123,11 +123,13 @@ make kind-load
 
 ### 4. Register a template
 
-The registry is an in-memory template + agent store. Register your agent type
-with `POST /v1/templates` and add it to [`scripts/reseed.sh`](../../scripts/reseed.sh)
-so it survives a registry restart:
+The registry is an in-memory template + agent store. Save your agent type as a
+`template.json` next to your agent (`agents/<name>/template.json`) — it is
+discovered and seeded by [`scripts/seed.sh`](../../scripts/seed.sh) (`make reseed`)
+so it survives a registry restart. The file is just the `POST /v1/templates` body:
 
 ```bash
+# agents/<name>/template.json
 curl -sf -X POST http://localhost:18080/v1/templates \
   -H 'Content-Type: application/json' \
   -d '{
@@ -150,7 +152,7 @@ curl -sf -X POST http://localhost:18080/v1/templates \
 ```
 
 `{{tenant_id}}` and `{{agent_id}}` are expanded by the registry at registration
-time. `reseed.sh` port-forwards the registry to `localhost:18080`. For the full
+time. `seed.sh` port-forwards the registry to `localhost:18080`. For the full
 field-by-field schema see [04 — Defining a Template](04-defining-a-template.md);
 for what `authzTemplate`/`delegation` authorise see [05 — Defining Policy](05-defining-policy.md).
 

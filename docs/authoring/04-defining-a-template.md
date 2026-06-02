@@ -9,8 +9,9 @@ description: The full AgentTemplate schema field by field, which component consu
 > template in passing. This guide owns the full contract.
 >
 > **Schema source of truth:** [`internal/registry/types.go`](../../internal/registry/types.go)
-> (`AgentTemplate`). **Worked references:** every block in
-> [`scripts/reseed.sh`](../../scripts/reseed.sh).
+> (`AgentTemplate`). **Worked references:** the co-located `template.json` files
+> (e.g. [`agents/trip-planner/template.json`](../../agents/trip-planner/template.json)),
+> which [`scripts/seed.sh`](../../scripts/seed.sh) sweeps up.
 
 An **agent template** is the registry's description of an agent *type*: the image
 to run, how to run it, the relationships to grant it, and which children it may
@@ -104,15 +105,23 @@ Full treatment in [05 — Defining Policy](05-defining-policy.md#part-2--delegat
 
 ### 4. Register it
 
-The registry stores templates in memory. Register with `POST /v1/templates` and
-**also add the block to [`scripts/reseed.sh`](../../scripts/reseed.sh)** so it
-survives a registry restart:
+The registry stores templates in memory. Save your template as a `template.json`
+**next to your agent** (`agents/report-builder/template.json`, or
+`cmd/agent/template.json` for the Go worker) — [`scripts/seed.sh`](../../scripts/seed.sh)
+discovers every co-located `template.json` and POSTs it, so it survives a registry
+restart. Seed with:
 
 ```bash
-# reseed.sh port-forwards the registry to localhost:18080
+make reseed        # runs scripts/seed.sh: sweeps up every template.json and POSTs it
+```
+
+To register a one-off without re-seeding everything, you can still POST directly:
+
+```bash
+# seed.sh port-forwards the registry to localhost:18080
 curl -sf -X POST http://localhost:18080/v1/templates \
   -H 'Content-Type: application/json' \
-  -d @report-builder-template.json
+  -d @agents/report-builder/template.json
 ```
 
 ### 5. Spawn and verify
@@ -211,15 +220,16 @@ What the platform expects of a template's `image`:
 |--------|-----|
 | Register / update | `POST /v1/templates` (upsert by `agentType`). |
 | List types | `GET /v1/templates`. |
-| Persist across restarts | Add to [`scripts/reseed.sh`](../../scripts/reseed.sh); run `make reseed`. |
+| Persist across restarts | Drop a `template.json` next to your agent (`agents/<type>/template.json`); run `make reseed` ([`scripts/seed.sh`](../../scripts/seed.sh)). |
 
 ### Status callouts
 
 Honest notes about what is and isn't enforced today:
 
 - ⚠️ **The registry store is in-memory** ([`newStore`](../../cmd/registry/main.go#L29)).
-  Restarting the registry deletes every template and agent record. Always keep
-  templates in `reseed.sh` and re-seed after redeploying the registry.
+  Restarting the registry deletes every template and agent record. Always keep a
+  `template.json` next to your agent and re-seed (`make reseed`) after redeploying
+  the registry.
 - ⚠️ **`version` is informational.** `getTemplate` keys on `agentType` only
   ([main.go:43](../../cmd/registry/main.go#L43)); there is no version selection.
   A second `POST` for the same `agentType` overwrites the first.

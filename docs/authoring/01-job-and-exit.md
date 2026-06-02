@@ -8,8 +8,9 @@ description: The simplest agent — acquire a scoped token, call a protected API
 > **Prerequisite:** [Anatomy of an Agent](00-anatomy.md).
 >
 > **Reference implementation:** the `worker` agent — [`cmd/agent`](../../cmd/agent),
-> registered as the `worker` template in [`scripts/reseed.sh`](../../scripts/reseed.sh).
-> It is the simplest agent on the platform and exercises exactly this shape.
+> whose template lives beside it at [`cmd/agent/template.json`](../../cmd/agent/template.json)
+> (seeded by [`scripts/seed.sh`](../../scripts/seed.sh)). It is the simplest agent
+> on the platform and exercises exactly this shape.
 
 ## The personality
 
@@ -90,8 +91,8 @@ the LLM entirely — a job-and-exit agent does not need one.
 ## The template
 
 No `lifecycle` field — it defaults to short-lived, so the operator marks the
-workload Completed on exit and creates no Service. This is the `worker` block
-from [`scripts/reseed.sh`](../../scripts/reseed.sh), renamed:
+workload Completed on exit and creates no Service. This is the `worker` template
+from [`cmd/agent/template.json`](../../cmd/agent/template.json), renamed:
 
 ```json
 {
