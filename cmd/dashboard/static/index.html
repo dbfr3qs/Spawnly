@@ -268,6 +268,8 @@
     .event-item.evt-run      { border-left: 3px solid var(--green); }
     .event-item.evt-compact  { border-left: 3px solid var(--orange); }
     .event-item.evt-log      { border-left: 3px solid var(--grey); }
+    .event-item.evt-system   { border-left: 3px solid var(--grey); }
+    .event-item.evt-hidden   { display: none; }
 
     .event-icon {
       font-size: 12px;
@@ -282,6 +284,37 @@
     .event-item.evt-run      .event-type { color: #58d68d; }
     .event-item.evt-compact  .event-type { color: #f0a500; }
     .event-item.evt-log      .event-type { color: var(--text-dim); }
+    .event-item.evt-system   .event-type { color: var(--text-dim); }
+
+    /* ── Per-agent event filter chips ── */
+    .event-filter-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .evt-chip {
+      font-family: var(--mono);
+      font-size: 10px;
+      line-height: 1;
+      padding: 4px 9px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      background: rgba(255,255,255,.03);
+      cursor: pointer;
+      user-select: none;
+      opacity: .45;
+      transition: opacity .12s, border-color .12s, background .12s;
+      white-space: nowrap;
+    }
+    .evt-chip:hover { border-color: var(--text-dim); }
+    .evt-chip.on {
+      opacity: 1;
+      color: var(--text);
+      background: rgba(255,255,255,.07);
+      border-color: rgba(255,255,255,.18);
+    }
 
     /* ── Staleness / last-activity indicator ── */
     .agent-stale {
@@ -712,6 +745,52 @@
   let lastEventAt = {};          // agentId -> ms epoch of newest known event
   const STALE_MS  = 30000;       // threshold after which a non-terminal agent is flagged stale
 
+  // ── Per-agent event filtering ─────────────────────────────────────────────
+  // Each agent independently hides a set of event categories. 'system' (e.g.
+  // heartbeat) is hidden by default. Persisted per-agent so choices survive a
+  // refresh; pruned when an agent is killed/dismissed.
+  const EVENT_FILTER_KEY  = 'eventFiltersByAgent';
+  const DEFAULT_HIDDEN    = ['system'];
+  // Fixed chip set: [category, label, icon]. Order is the display order.
+  const EVENT_CATEGORIES  = [
+    ['tool',     'Tools',    '🔧'],
+    ['model',    'Model',    '🧠'],
+    ['thinking', 'Thinking', '💭'],
+    ['run',      'Run',      '▶'],
+    ['error',    'Errors',   '⚠'],
+    ['compact',  'Compact',  '🗜'],
+    ['log',      'Logs',     '·'],
+    ['system',   'System',   '♥'],
+    ['other',    'Other',    '•'],
+  ];
+
+  let eventFilters = {};         // agentId -> Set of hidden category keys
+  (function loadEventFilters() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(EVENT_FILTER_KEY) || '{}');
+      for (const [id, cats] of Object.entries(raw)) {
+        if (Array.isArray(cats)) eventFilters[id] = new Set(cats);
+      }
+    } catch { /* ignore malformed storage */ }
+  })();
+
+  function saveEventFilters() {
+    const obj = {};
+    for (const [id, set] of Object.entries(eventFilters)) obj[id] = [...set];
+    try { localStorage.setItem(EVENT_FILTER_KEY, JSON.stringify(obj)); } catch { /* quota */ }
+  }
+
+  // This agent's hidden-category set, lazily seeded with the defaults.
+  function getEventFilter(agentId) {
+    let set = eventFilters[agentId];
+    if (!set) { set = new Set(DEFAULT_HIDDEN); eventFilters[agentId] = set; }
+    return set;
+  }
+
+  function forgetEventFilter(agentId) {
+    if (eventFilters[agentId]) { delete eventFilters[agentId]; saveEventFilters(); }
+  }
+
   const TERMINAL = ['completed', 'failed', 'killed'];
   function isTerminalStatus(s) { return TERMINAL.includes((s || '').toLowerCase()); }
 
@@ -810,8 +889,16 @@
       case 'run_end':    return 'evt-run';
       case 'compaction': return 'evt-compact';
       case 'log':        return 'evt-log';
+      case 'heartbeat':  return 'evt-system';
       default:           return '';
     }
+  }
+
+  // Stable filter-category key for an event type. Single source of truth shared
+  // by the filter chips and per-row tagging; derived from eventTypeClass so the
+  // two never drift. Uncategorized types fall into 'other'.
+  function eventCategory(type) {
+    return eventTypeClass(type).replace('evt-', '') || 'other';
   }
 
   function eventTypeIcon(type) {
@@ -825,6 +912,7 @@
       case 'run_end':    return '■';
       case 'compaction': return '🗜';
       case 'log':        return '·';
+      case 'heartbeat':  return '♥';
       default:           return '';
     }
   }
@@ -1021,15 +1109,14 @@
     let listEl = panel.querySelector('.event-list');
     if (!listEl) {
       // First events arriving — replace placeholder. Keep a stable structure:
-      // header, logs mount point, then the append-only event list.
+      // header, per-agent filter chips, logs mount point, then the append-only
+      // event list.
       panel.innerHTML = `<div class="event-panel-header">Event Timeline — ${evts.length} event${evts.length !== 1 ? 's' : ''}</div>
+        ${filterBarHtml(agentId)}
         <div class="logs-mount" id="logsmount-${agentId}"></div>
         <div class="event-list"></div>`;
       listEl = panel.querySelector('.event-list');
     }
-
-    const hdr = panel.querySelector('.event-panel-header');
-    if (hdr) hdr.textContent = `Event Timeline — ${evts.length} event${evts.length !== 1 ? 's' : ''}`;
 
     renderLogsEntry(agentId);
 
@@ -1051,6 +1138,10 @@
       const icon    = eventTypeIcon(e.type);
       const item = document.createElement('div');
       item.className = 'event-item' + (typeCls ? ' ' + typeCls : '');
+      // Tag every row with its filter category — never skip rendering, so the
+      // append-only renderedEventCount invariant holds. Filtering is purely
+      // visual (toggle .evt-hidden), applied below.
+      item.dataset.evtCat = eventCategory(e.type);
       item.innerHTML = `<details>
         <summary>
           <span class="event-icon">${escHtml(icon)}</span>
@@ -1063,6 +1154,62 @@
       listEl.appendChild(item);
     }
     renderedEventCount[agentId] = evts.length;
+
+    // Hide rows in this agent's filtered-out categories (including freshly
+    // appended heartbeats) and update the header count.
+    applyEventFilter(agentId);
+  }
+
+  // ── Per-agent event filter: chip bar + apply + toggle ─────────────────────
+
+  function filterBarHtml(agentId) {
+    const hidden = getEventFilter(agentId);
+    const chips = EVENT_CATEGORIES.map(([cat, label, icon]) => {
+      const on = !hidden.has(cat);
+      return `<span class="evt-chip${on ? ' on' : ''}" data-cat="${cat}"
+                    onclick="toggleEventCat('${agentId}','${cat}')"
+                    title="${on ? 'Hide' : 'Show'} ${escHtml(label)} events">${escHtml(icon)} ${escHtml(label)}</span>`;
+    }).join('');
+    return `<div class="event-filter-bar" id="evtfilter-${agentId}">${chips}</div>`;
+  }
+
+  // Toggle .evt-hidden per row from this agent's hidden set, and reflect the
+  // visible/total counts in the header.
+  function applyEventFilter(agentId) {
+    const panel = document.getElementById(`events-${agentId}`);
+    if (!panel) return;
+    const hidden = getEventFilter(agentId);
+    const items = panel.querySelectorAll('.event-item');
+    let shown = 0;
+    for (const el of items) {
+      const hide = hidden.has(el.dataset.evtCat || 'other');
+      el.classList.toggle('evt-hidden', hide);
+      if (!hide) shown++;
+    }
+    const total = items.length;
+    const hdr = panel.querySelector('.event-panel-header');
+    if (hdr) {
+      hdr.textContent = (shown === total)
+        ? `Event Timeline — ${total} event${total !== 1 ? 's' : ''}`
+        : `Event Timeline — showing ${shown} of ${total}`;
+    }
+  }
+
+  function refreshFilterChips(agentId) {
+    const bar = document.getElementById(`evtfilter-${agentId}`);
+    if (!bar) return;
+    const hidden = getEventFilter(agentId);
+    for (const chip of bar.querySelectorAll('.evt-chip')) {
+      chip.classList.toggle('on', !hidden.has(chip.dataset.cat));
+    }
+  }
+
+  function toggleEventCat(agentId, cat) {
+    const set = getEventFilter(agentId);
+    if (set.has(cat)) set.delete(cat); else set.add(cat);
+    saveEventFilters();
+    refreshFilterChips(agentId);
+    applyEventFilter(agentId);
   }
 
   // ── Live container logs ──────────────────────────────────────────────────
@@ -1400,6 +1547,7 @@
       if (panel) panel.remove();
       expandedChats.delete(agentId);
       delete chatHistory[agentId];
+      forgetEventFilter(agentId);
       const chatPanel = document.getElementById(`chat-${agentId}`);
       if (chatPanel) chatPanel.remove();
     } catch (e) {
@@ -1419,6 +1567,7 @@
       delete lastEventAt[agentId];
       expandedChats.delete(agentId);
       delete chatHistory[agentId];
+      forgetEventFilter(agentId);
       const card = document.getElementById(`card-${agentId}`);
       if (card) card.remove();
       showToast(`Agent ${agentId.slice(0,8)}… dismissed`);
