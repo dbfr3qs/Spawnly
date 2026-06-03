@@ -469,6 +469,29 @@
       transition: border-color .15s;
     }
     .chat-input-row input:focus { border-color: #27ae60; }
+    .chat-input-row input:disabled { opacity: .5; }
+    .chat-input-row button:disabled { opacity: .5; cursor: not-allowed; }
+
+    /* ── "Agent is typing" indicator ── */
+    .chat-msg.typing {
+      display: inline-flex;
+      gap: 4px;
+      align-items: center;
+      padding: 10px 12px;
+    }
+    .typing-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: #2ecc71;
+      opacity: .35;
+      animation: typing-bounce 1.2s infinite ease-in-out;
+    }
+    .typing-dot:nth-child(2) { animation-delay: .15s; }
+    .typing-dot:nth-child(3) { animation-delay: .30s; }
+    @keyframes typing-bounce {
+      0%, 60%, 100% { transform: translateY(0);   opacity: .35; }
+      30%           { transform: translateY(-4px); opacity: 1;   }
+    }
 
     /* ── Empty state ── */
     .empty-state {
@@ -1315,18 +1338,50 @@
     log.scrollTop = log.scrollHeight;
   }
 
+  // Transient "agent is typing" bubble — not stored in chatHistory, so it never
+  // survives a re-render and is removed once the reply (or error) arrives.
+  function showTyping(agentId) {
+    const log = document.getElementById(`chatlog-${agentId}`);
+    if (!log || document.getElementById(`typing-${agentId}`)) return;
+    const div = document.createElement('div');
+    div.className = 'chat-msg agent typing';
+    div.id = `typing-${agentId}`;
+    div.innerHTML = '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>';
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function hideTyping(agentId) {
+    document.getElementById(`typing-${agentId}`)?.remove();
+  }
+
   async function handleChatSend(agentId) {
     const input = document.getElementById(`chatinput-${agentId}`);
     if (!input) return;
     const msg = input.value.trim();
     if (!msg) return;
+    const btn = input.parentElement?.querySelector('button');
     input.value = '';
     appendChatMsg(agentId, 'user', msg);
+
+    // Lock the controls and show the typing indicator while the LLM works.
+    input.disabled = true;
+    if (btn) btn.disabled = true;
+    showTyping(agentId);
+
     try {
       const result = await sendMessage(agentId, msg);
-      appendChatMsg(agentId, 'agent', result.response ?? JSON.stringify(result));
+      // Flue webhook agents wrap the handler return in { result, _meta }; other
+      // agents may reply with { response } directly. Unwrap either shape.
+      const reply = result?.result?.response ?? result?.response ?? JSON.stringify(result);
+      appendChatMsg(agentId, 'agent', reply);
     } catch (e) {
       appendChatMsg(agentId, 'agent', `[Error: ${e.message}]`);
+    } finally {
+      hideTyping(agentId);
+      input.disabled = false;
+      if (btn) btn.disabled = false;
+      input.focus();
     }
   }
 
