@@ -2,8 +2,8 @@
   "agentType": "weather-monitor",
   "version": "1.0.0",
   "status": "active",
-  "requiresTenant": true,
-  "meta": {"displayName": "Weather Monitor", "description": "Long-lived agent that monitors weather on a loop"},
+  "requiresTenant": false,
+  "meta": {"displayName": "Weather Monitor", "description": "Global (tenant-less) long-lived agent you can chat with to check the weather anywhere"},
   "runtimeSpec": {
     "image": "agent-weather-monitor:latest",
     "lifecycle": "long-lived",
@@ -11,8 +11,6 @@
     "envDefaults": {"LOG_LEVEL": "info"}
   },
   "authzTemplate": {
-    "spiceDbRelations": [
-      {"resource": "tenant:{{tenant_id}}", "relation": "agent", "subject": "agent:{{agent_id}}"}
-    ]
+    "spiceDbRelations": []
   }
 }

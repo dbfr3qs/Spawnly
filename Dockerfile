@@ -76,7 +76,6 @@ FROM node:22-slim AS weather-monitor
 WORKDIR /app
 COPY --from=build-weather-monitor-node /app/dist ./dist
 COPY --from=build-weather-monitor-node /app/node_modules ./node_modules
-COPY agents/weather-monitor/heartbeat.mjs ./heartbeat.mjs
 COPY agents/sdk/package.json ./node_modules/@agent-platform/sdk/package.json
 COPY --from=build-sdk /sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
 ENV PORT=8080
