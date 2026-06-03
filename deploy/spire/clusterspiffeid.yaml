@@ -1,12 +1,27 @@
 apiVersion: spire.spiffe.io/v1alpha1
 kind: ClusterSPIFFEID
 metadata:
-  name: agent-workloads
+  name: agent-workloads-tenant
 spec:
   className: "spire-system-spire"
   spiffeIDTemplate: 'spiffe://cluster.local/agent/{{ index .PodMeta.Labels "tenant-id" }}/{{ index .PodMeta.Labels "user-id" }}/{{ index .PodMeta.Labels "agent-type" }}/{{ index .PodMeta.Labels "agent-id" }}'
   podSelector:
     matchLabels:
       agent-platform.io/managed: "true"
+      agent-platform.io/scope: "tenant"
+  workloadSelectorTemplates:
+    - "k8s:ns:default"
+---
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: agent-workloads-global
+spec:
+  className: "spire-system-spire"
+  spiffeIDTemplate: 'spiffe://cluster.local/agent/{{ index .PodMeta.Labels "agent-type" }}/{{ index .PodMeta.Labels "agent-id" }}'
+  podSelector:
+    matchLabels:
+      agent-platform.io/managed: "true"
+      agent-platform.io/scope: "global"
   workloadSelectorTemplates:
     - "k8s:ns:default"

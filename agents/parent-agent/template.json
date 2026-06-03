@@ -2,6 +2,7 @@
   "agentType": "parent-agent",
   "version": "1.0.0",
   "status": "active",
+  "requiresTenant": true,
   "meta": {"displayName": "Parent Agent", "description": "Spawns a child agent, retrieves a random string via A2A, then exits"},
   "runtimeSpec": {
     "image": "agent-parent-agent:latest",

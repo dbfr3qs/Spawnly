@@ -2,6 +2,7 @@
   "agentType": "worker",
   "version": "1.0.0",
   "status": "active",
+  "requiresTenant": true,
   "meta": {"displayName": "Generic Worker", "description": "Calls the sample API and exits"},
   "runtimeSpec": {
     "image": "agent-agent:latest",

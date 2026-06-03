@@ -2,6 +2,7 @@
   "agentType": "trip-planner",
   "version": "1.0.0",
   "status": "active",
+  "requiresTenant": true,
   "meta": {"displayName": "Trip Planner", "description": "Spawns a currency converter, delegates a read-only conversion, then exits"},
   "runtimeSpec": {
     "image": "agent-trip-planner:latest",

@@ -135,6 +135,9 @@ func TestReconcileNew_PullsTemplateAndCreatesPod(t *testing.T) {
 	if labels["agent-platform.io/managed"] != "true" {
 		t.Errorf("expected agent-platform.io/managed label 'true'")
 	}
+	if labels["agent-platform.io/scope"] != "tenant" {
+		t.Errorf("expected agent-platform.io/scope label 'tenant', got %q", labels["agent-platform.io/scope"])
+	}
 	agentEnvMap := map[string]string{}
 	for _, e := range pod.Spec.Containers[0].Env {
 		agentEnvMap[e.Name] = e.Value
@@ -158,6 +161,51 @@ func TestReconcileNew_PullsTemplateAndCreatesPod(t *testing.T) {
 	fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-agent", Namespace: "default"}, &updated)
 	if updated.Status.Phase != "Running" {
 		t.Fatalf("expected Running, got %q", updated.Status.Phase)
+	}
+}
+
+// A global (untenanted) agent has no tenant id, so the operator must stamp the
+// scope label "global" to route SPIRE to the global ClusterSPIFFEID.
+func TestReconcileNew_GlobalAgent_StampsGlobalScopeLabel(t *testing.T) {
+	aw := &agentv1alpha1.AgentWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "global-agent", Namespace: "default"},
+		Spec: agentv1alpha1.AgentWorkloadSpec{
+			AgentType: "worker", UserID: "user-1", Lifecycle: "short-lived",
+		},
+	}
+
+	s := buildScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(s).WithObjects(aw).WithStatusSubresource(aw).Build()
+
+	reg := registry.NewMock(map[string]registry.AgentTemplate{"worker": workerTemplate()})
+
+	r := &operator.AgentWorkloadReconciler{
+		Client:       fakeClient,
+		Scheme:       s,
+		Registry:     reg,
+		RegistryURL:  "http://registry:8080",
+		ISTokenURL:   "http://identity-server:8080/connect/token",
+		SampleAPIURL: "http://sample-api:8080",
+		EventsClient: events.NewMock(),
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "global-agent", Namespace: "default"},
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile (1st): %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile (2nd): %v", err)
+	}
+
+	var pod corev1.Pod
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "global-agent-pod", Namespace: "default"}, &pod); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	if pod.Labels["agent-platform.io/scope"] != "global" {
+		t.Errorf("expected agent-platform.io/scope label 'global', got %q", pod.Labels["agent-platform.io/scope"])
 	}
 }
 

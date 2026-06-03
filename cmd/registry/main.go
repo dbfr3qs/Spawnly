@@ -122,6 +122,13 @@ func substitute(tmpl, agentID, tenantID string) string {
 	return strings.ReplaceAll(tmpl, "{{tenant_id}}", tenantID)
 }
 
+// referencesTenant reports whether a relation template depends on the tenant
+// id. Such relations are skipped for global (tenant-less) agents so we never
+// write a malformed "tenant:" tuple.
+func referencesTenant(rel registry.SpiceDBRelationTemplate) bool {
+	return strings.Contains(rel.Resource, "{{tenant_id}}") || strings.Contains(rel.Subject, "{{tenant_id}}")
+}
+
 func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *http.ServeMux {
 	mux := http.NewServeMux()
 
@@ -221,20 +228,23 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 			Relation string `json:"relation"`
 			Subject  string `json:"subject"`
 		}
+		tuples := []relTuple{}
 		for _, rel := range tpl.AuthZ.SpiceDBRelations {
+			// Global (tenant-less) agents must not produce a malformed
+			// "tenant:" tuple, so skip any relation referencing {{tenant_id}}.
+			if req.TenantID == "" && referencesTenant(rel) {
+				continue
+			}
 			res := substitute(rel.Resource, agentID, req.TenantID)
 			sub := substitute(rel.Subject, agentID, req.TenantID)
 			if err := sdb.WriteRelationship(r.Context(), res, rel.Relation, sub); err != nil {
 				log.Printf("spicedb write error: %v", err)
 			}
-		}
-		tuples := make([]relTuple, len(tpl.AuthZ.SpiceDBRelations))
-		for i, rel := range tpl.AuthZ.SpiceDBRelations {
-			tuples[i] = relTuple{
-				Resource: substitute(rel.Resource, agentID, req.TenantID),
+			tuples = append(tuples, relTuple{
+				Resource: res,
 				Relation: rel.Relation,
-				Subject:  substitute(rel.Subject, agentID, req.TenantID),
-			}
+				Subject:  sub,
+			})
 		}
 		s.appendEvent(agentID, events.Event{
 			Source:  events.SourceRegistry,
@@ -362,6 +372,11 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 		}
 		s.updateAgent(agentID, "active")
 		for _, rel := range tpl.AuthZ.SpiceDBRelations {
+			// Global (tenant-less) agents must not produce a malformed
+			// "tenant:" tuple, so skip any relation referencing {{tenant_id}}.
+			if rec.TenantID == "" && referencesTenant(rel) {
+				continue
+			}
 			res := substitute(rel.Resource, agentID, rec.TenantID)
 			sub := substitute(rel.Subject, agentID, rec.TenantID)
 			if err := sdb.WriteRelationship(r.Context(), res, rel.Relation, sub); err != nil {

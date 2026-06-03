@@ -52,6 +52,81 @@ func TestTemplateCRUD(t *testing.T) {
 	}
 }
 
+// globalRelationTemplate carries one tenant-referencing relation and one
+// tenant-independent relation, exercising the skip-for-global behavior.
+func globalRelationTemplate() registry.AgentTemplate {
+	return registry.AgentTemplate{
+		AgentType: "worker", Version: "1.0.0", Status: "active",
+		Runtime: registry.RuntimeSpec{Image: "agent-agent:latest"},
+		AuthZ: registry.AuthZSpec{SpiceDBRelations: []registry.SpiceDBRelationTemplate{
+			{Resource: "tenant:{{tenant_id}}", Relation: "agent", Subject: "agent:{{agent_id}}"},
+			{Resource: "platform:global", Relation: "agent", Subject: "agent:{{agent_id}}"},
+		}},
+	}
+}
+
+// registerWorker drives a self-registration with the given tenant id and
+// returns the recording mock so callers can assert which tuples were written.
+func registerWorker(t *testing.T, tpl registry.AgentTemplate, agentID, tenantID string) *spicedb.Mock {
+	t.Helper()
+	s := newStore()
+	s.putTemplate(tpl)
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/" + agentID}
+	mux := buildMux(s, sdb, validator)
+
+	payload := map[string]string{"agentType": tpl.AgentType, "userId": "user-1"}
+	if tenantID != "" {
+		payload["tenantId"] = tenantID
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest("POST", "/v1/agents", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-svid")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("self-register: got %d, want 201", rec.Code)
+	}
+	return sdb
+}
+
+func TestRegister_TenantRelationWrittenWhenTenanted(t *testing.T) {
+	sdb := registerWorker(t, workerTemplate(), "agent-tenanted", "acme")
+	if ok, _ := sdb.CheckPermission(t.Context(), "tenant:acme", "work_on", "agent:agent-tenanted"); !ok {
+		t.Fatal("expected tenant:acme tuple written for tenanted agent")
+	}
+}
+
+func TestRegister_TenantRelationSkippedWhenGlobal(t *testing.T) {
+	sdb := registerWorker(t, workerTemplate(), "agent-global", "")
+	// The tenant-referencing relation must be skipped: no "tenant:" tuple
+	// (and crucially no malformed "tenant:#..." tuple) should be written.
+	if ok, _ := sdb.CheckPermission(t.Context(), "tenant:", "work_on", "agent:agent-global"); ok {
+		t.Fatal("expected tenant relation skipped for global agent, but a tenant: tuple was written")
+	}
+}
+
+func TestRegister_NonTenantRelationAlwaysWritten(t *testing.T) {
+	// Present: the non-tenant relation is written alongside the tenant one.
+	tenanted := registerWorker(t, globalRelationTemplate(), "agent-t", "acme")
+	if ok, _ := tenanted.CheckPermission(t.Context(), "platform:global", "work_on", "agent:agent-t"); !ok {
+		t.Fatal("expected non-tenant relation written for tenanted agent")
+	}
+	if ok, _ := tenanted.CheckPermission(t.Context(), "tenant:acme", "work_on", "agent:agent-t"); !ok {
+		t.Fatal("expected tenant relation written for tenanted agent")
+	}
+
+	// Absent: the non-tenant relation is still written; the tenant one is skipped.
+	global := registerWorker(t, globalRelationTemplate(), "agent-g", "")
+	if ok, _ := global.CheckPermission(t.Context(), "platform:global", "work_on", "agent:agent-g"); !ok {
+		t.Fatal("expected non-tenant relation written for global agent")
+	}
+	if ok, _ := global.CheckPermission(t.Context(), "tenant:", "work_on", "agent:agent-g"); ok {
+		t.Fatal("expected tenant relation skipped for global agent")
+	}
+}
+
 func TestSpawnPolicy(t *testing.T) {
 	s := newStore()
 	s.putTemplate(registry.AgentTemplate{
