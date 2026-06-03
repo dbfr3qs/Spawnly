@@ -6,7 +6,7 @@ GO_SERVICES   := operator orchestrator registry sample-api agent agent-sidecar d
 NODE_AGENTS   := child-agent parent-agent currency-converter trip-planner
 SERVICES      := $(GO_SERVICES) $(NODE_AGENTS)
 
-.PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward redeploy-% reload-% logs-% reseed
+.PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward redeploy-% reload-% reload-sidecar logs-% reseed
 
 build:
 	@for svc in $(GO_SERVICES); do \
@@ -18,10 +18,14 @@ test:
 	go test ./... -v -count=1
 
 docker-build:
-	@for svc in $(SERVICES); do \
+	@for svc in $(filter-out agent-sidecar,$(SERVICES)); do \
 		echo "Building image agent-$$svc:$(IMAGE_TAG)..."; \
 		docker build --target $$svc -t agent-$$svc:$(IMAGE_TAG) .; \
 	done
+	# agent-sidecar is special: its stage is `agent-sidecar` and the operator
+	# references the image as `agent-sidecar:latest`, so the generic agent-<svc>
+	# convention (agent-agent-sidecar) does not apply.
+	docker build --target agent-sidecar -t agent-sidecar:$(IMAGE_TAG) .
 	docker build --target identity-server -t agent-identity-server:$(IMAGE_TAG) .
 	docker build --target weather-monitor -t agent-weather-monitor:$(IMAGE_TAG) .
 
@@ -32,9 +36,10 @@ kind-down:
 	kind delete cluster --name $(KIND_CLUSTER)
 
 kind-load: docker-build
-	@for svc in $(SERVICES); do \
+	@for svc in $(filter-out agent-sidecar,$(SERVICES)); do \
 		kind load docker-image agent-$$svc:$(IMAGE_TAG) --name $(KIND_CLUSTER); \
 	done
+	kind load docker-image agent-sidecar:$(IMAGE_TAG) --name $(KIND_CLUSTER)
 	kind load docker-image agent-identity-server:$(IMAGE_TAG) --name $(KIND_CLUSTER)
 	kind load docker-image agent-weather-monitor:$(IMAGE_TAG) --name $(KIND_CLUSTER)
 
@@ -75,6 +80,19 @@ reload-%:
 	kind load docker-image agent-$*:$(IMAGE_TAG) --name $(KIND_CLUSTER)
 	@echo ""
 	@echo "  agent-$* reloaded. Spawn a new agent in the dashboard to test."
+
+# reload-sidecar — explicit override of reload-%. The sidecar is special: its
+# Dockerfile stage is `agent-sidecar` and the operator references the image as
+# `agent-sidecar:latest` (internal/operator/reconciler.go), NOT the
+# `agent-<name>` the generic convention would produce (which would mis-target
+# `sidecar` or mis-name `agent-agent-sidecar`). The sidecar runs as an init
+# container in every agent pod (not a Deployment), so freshly spawned agents
+# pick up the reloaded image — nothing to roll.
+reload-sidecar:
+	docker build --target agent-sidecar -t agent-sidecar:$(IMAGE_TAG) .
+	kind load docker-image agent-sidecar:$(IMAGE_TAG) --name $(KIND_CLUSTER)
+	@echo ""
+	@echo "  agent-sidecar:$(IMAGE_TAG) reloaded. Spawn a new agent to pick it up."
 
 # logs-% — stream logs from the most recently spawned pod of a given agent type.
 # Usage: make logs-parent-agent

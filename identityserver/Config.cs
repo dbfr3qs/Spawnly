@@ -58,6 +58,16 @@ public static class Config
             },
             new Client
             {
+                ClientId = "global-worker",
+                AllowedGrantTypes = GrantTypes.ClientCredentials,
+                RequireClientSecret = true,
+                ClientSecrets = { new Secret("placeholder".Sha256()) },
+                AlwaysSendClientClaims = true,
+                ClientClaimsPrefix = "",
+                AllowedScopes = { "sample-api-a:read", "sample-api-a:write" },
+            },
+            new Client
+            {
                 ClientId = "parent-agent",
                 // Both client_credentials (to mint a root token) and token-exchange
                 // (to delegate to a child / re-exchange).

@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-api-global
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sample-api-global
+  template:
+    metadata:
+      labels:
+        app: sample-api-global
+    spec:
+      containers:
+        - name: sample-api
+          image: agent-sample-api:latest
+          imagePullPolicy: Never
+          env:
+            - name: REQUIRE_TENANT
+              value: "false"
+            - name: API_AUDIENCE
+              value: "sample-api-a"
+            - name: SCOPE_PREFIX
+              value: "sample-api-a"
+            - name: SPICEDB_ENDPOINT
+              value: "spicedb:50051"
+            - name: SPICEDB_PSK
+              value: "poc-secret"
+            - name: IS_ISSUER
+              value: "http://identity-server:8080"
+            - name: IS_JWKS_URL
+              value: "http://identity-server:8080/.well-known/openid-configuration/jwks"
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sample-api-global
+  namespace: default
+spec:
+  selector:
+    app: sample-api-global
+  ports:
+    - port: 80
+      targetPort: 8080

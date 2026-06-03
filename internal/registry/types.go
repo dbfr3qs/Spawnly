@@ -9,6 +9,13 @@ type AgentTemplate struct {
 	Runtime    RuntimeSpec      `json:"runtimeSpec"`
 	AuthZ      AuthZSpec        `json:"authzTemplate"`
 	Delegation DelegationPolicy `json:"delegation"`
+	// RequiresTenant, when true, makes the orchestrator reject a spawn of this
+	// agent-type that has no tenant id. Defaults false: tenant-ness is otherwise
+	// derived from the presence of a tenant id (present => tenanted, absent =>
+	// global). Set true on templates whose authz relations reference
+	// {{tenant_id}}, so a tenant-less spawn fails fast instead of silently
+	// coming up "global" with no tenant grant.
+	RequiresTenant bool `json:"requiresTenant"`
 }
 
 // DelegationPolicy describes which child agent-types a given agent-type may

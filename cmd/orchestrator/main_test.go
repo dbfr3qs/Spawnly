@@ -19,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentv1alpha1 "github.com/agent-platform/poc/api/v1alpha1"
+	"github.com/agent-platform/poc/internal/registry"
 	"github.com/agent-platform/poc/internal/spicedb"
 )
 
@@ -191,6 +192,134 @@ func TestSpawnMissingRequiredFields(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d, want 400", rec.Code)
+	}
+}
+
+// mockRegistryWithTemplate returns an httptest.Server like defaultMockRegistry,
+// except its GET /v1/templates/{type} response sets requiresTenant to the given
+// value, letting tests exercise the tenant-presence guard.
+func mockRegistryWithTemplate(t *testing.T, requiresTenant bool) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/events"):
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte("[]"))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/templates/"):
+			w.Header().Set("Content-Type", "application/json")
+			tpl := registry.AgentTemplate{
+				AgentType:      "worker",
+				Version:        "1.0.0",
+				Status:         "active",
+				Meta:           registry.TemplateMeta{DisplayName: "Worker", Description: "Test"},
+				Runtime:        registry.RuntimeSpec{Image: "agent-agent:latest", EnvDefaults: map[string]string{}},
+				AuthZ:          registry.AuthZSpec{SpiceDBRelations: []registry.SpiceDBRelationTemplate{}},
+				RequiresTenant: requiresTenant,
+			}
+			json.NewEncoder(w).Encode(tpl)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func TestSpawnTenantPresenceGuard(t *testing.T) {
+	tests := []struct {
+		name           string
+		requiresTenant bool
+		userID         string
+		tenantID       string
+		wantStatus     int
+		wantWorkload   bool   // a single AgentWorkload should exist
+		wantTenantID   string // expected Spec.TenantID when wantWorkload
+	}{
+		{
+			name:           "requiresTenant with tenant accepted",
+			requiresTenant: true,
+			userID:         "user-1",
+			tenantID:       "acme",
+			wantStatus:     http.StatusAccepted,
+			wantWorkload:   true,
+			wantTenantID:   "acme",
+		},
+		{
+			name:           "requiresTenant without tenant rejected",
+			requiresTenant: true,
+			userID:         "user-1",
+			tenantID:       "",
+			wantStatus:     http.StatusBadRequest,
+		},
+		{
+			name:           "global template with tenant is tenanted",
+			requiresTenant: false,
+			userID:         "user-1",
+			tenantID:       "acme",
+			wantStatus:     http.StatusAccepted,
+			wantWorkload:   true,
+			wantTenantID:   "acme",
+		},
+		{
+			name:           "global template without tenant is global",
+			requiresTenant: false,
+			userID:         "user-1",
+			tenantID:       "",
+			wantStatus:     http.StatusAccepted,
+			wantWorkload:   true,
+			wantTenantID:   "",
+		},
+		{
+			name:           "missing userId rejected even when tenant present",
+			requiresTenant: false,
+			userID:         "",
+			tenantID:       "acme",
+			wantStatus:     http.StatusBadRequest,
+		},
+		{
+			name:           "missing userId rejected when requiresTenant",
+			requiresTenant: true,
+			userID:         "",
+			tenantID:       "acme",
+			wantStatus:     http.StatusBadRequest,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mockReg := mockRegistryWithTemplate(t, tc.requiresTenant)
+			defer mockReg.Close()
+
+			fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+			sdb := spicedb.NewMock()
+			mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+
+			body, _ := json.Marshal(SpawnRequest{
+				AgentType: "worker",
+				UserID:    tc.userID,
+				TenantID:  tc.tenantID,
+			})
+			req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("got %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+
+			var list agentv1alpha1.AgentWorkloadList
+			fakeClient.List(context.Background(), &list)
+			if tc.wantWorkload {
+				if len(list.Items) != 1 {
+					t.Fatalf("expected 1 AgentWorkload, got %d", len(list.Items))
+				}
+				if list.Items[0].Spec.TenantID != tc.wantTenantID {
+					t.Fatalf("unexpected Spec.TenantID: got %q, want %q", list.Items[0].Spec.TenantID, tc.wantTenantID)
+				}
+			} else if len(list.Items) != 0 {
+				t.Fatalf("expected 0 AgentWorkloads, got %d", len(list.Items))
+			}
+		})
 	}
 }
 

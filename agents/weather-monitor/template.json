@@ -2,6 +2,7 @@
   "agentType": "weather-monitor",
   "version": "1.0.0",
   "status": "active",
+  "requiresTenant": true,
   "meta": {"displayName": "Weather Monitor", "description": "Long-lived agent that monitors weather on a loop"},
   "runtimeSpec": {
     "image": "agent-weather-monitor:latest",

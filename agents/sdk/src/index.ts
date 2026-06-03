@@ -141,16 +141,27 @@ export class TokenClient {
 
 type FetchSignature = typeof fetch;
 
+/**
+ * Returns the X-Tenant-ID header for a tenanted agent, or an empty object for
+ * a global (tenant-less) agent. Centralizes the "assert a tenant only when we
+ * have one" rule so callers never hard-code the header.
+ */
+export function tenantHeader(tenantId?: string): Record<string, string> {
+  return tenantId ? { "X-Tenant-ID": tenantId } : {};
+}
+
 export function createAuthenticatedFetch(
   baseUrl: string,
   scope: string,
-  tokenClient: TokenClient = new TokenClient()
+  tokenClient: TokenClient = new TokenClient(),
+  tenantId?: string,
 ): FetchSignature {
   return async (input: RequestInfo | URL, init?: RequestInit) => {
     const token = await tokenClient.getToken(scope);
 
     const headers = new Headers(init?.headers);
     headers.set("Authorization", `Bearer ${token}`);
+    for (const [k, v] of Object.entries(tenantHeader(tenantId))) headers.set(k, v);
 
     const url =
       typeof input === "string" && !input.startsWith("http")

@@ -20,6 +20,12 @@ type apiConfig struct {
 	audience string
 	// scopePrefix is prepended to ":read"/":write" for scope checks.
 	scopePrefix string
+	// requireTenant gates tenant enforcement. When true (default) the handler
+	// demands an X-Tenant-ID header and authorizes the full delegation chain
+	// against tenant:<id> in SpiceDB. When false the instance is tenant-agnostic:
+	// it skips both, validating only the token signature, token_use, audience,
+	// and scope — for serving global (tenant-less) agents.
+	requireTenant bool
 }
 
 // authorize validates the bearer token, enforces audience + scope, and checks
@@ -28,7 +34,7 @@ type apiConfig struct {
 // ok=false.
 func authorize(w http.ResponseWriter, r *http.Request, sdb spicedb.Client, validator tokenvalidator.TokenValidator, cfg apiConfig, requiredScope string) (tokenvalidator.Claims, bool) {
 	tenantID := r.Header.Get("X-Tenant-ID")
-	if tenantID == "" {
+	if cfg.requireTenant && tenantID == "" {
 		http.Error(w, "missing X-Tenant-ID", http.StatusBadRequest)
 		return tokenvalidator.Claims{}, false
 	}
@@ -68,16 +74,20 @@ func authorize(w http.ResponseWriter, r *http.Request, sdb spicedb.Client, valid
 	// agent in the act chain must still hold work_on on the tenant. Suspending
 	// any ancestor removes its work_on grant, so this cascades to deny every
 	// descendant's in-flight token. The chain is bounded by the delegation maxDepth.
-	deniedMember, ok, err := authorizeChain(r.Context(), sdb, tenantID, claims.Chain)
-	if err != nil {
-		log.Printf("spicedb error: %v", err)
-		http.Error(w, "authz error", http.StatusInternalServerError)
-		return tokenvalidator.Claims{}, false
-	}
-	if !ok {
-		log.Printf("chain authorization denied: member %q lacks work_on on tenant:%s", deniedMember, tenantID)
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return tokenvalidator.Claims{}, false
+	// Skipped entirely on tenant-agnostic instances: a global agent has no tenant
+	// grant and the instance does not enforce one.
+	if cfg.requireTenant {
+		deniedMember, ok, err := authorizeChain(r.Context(), sdb, tenantID, claims.Chain)
+		if err != nil {
+			log.Printf("spicedb error: %v", err)
+			http.Error(w, "authz error", http.StatusInternalServerError)
+			return tokenvalidator.Claims{}, false
+		}
+		if !ok {
+			log.Printf("chain authorization denied: member %q lacks work_on on tenant:%s", deniedMember, tenantID)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return tokenvalidator.Claims{}, false
+		}
 	}
 
 	return claims, true
@@ -179,7 +189,8 @@ func main() {
 
 	audience := getenv("API_AUDIENCE", "sample-api")
 	scopePrefix := getenv("SCOPE_PREFIX", audience)
-	cfg := apiConfig{audience: audience, scopePrefix: scopePrefix}
+	requireTenant := getenv("REQUIRE_TENANT", "true") != "false"
+	cfg := apiConfig{audience: audience, scopePrefix: scopePrefix, requireTenant: requireTenant}
 
 	sdb, err := spicedb.New(spicedbEndpoint, spicedbPSK)
 	if err != nil {
@@ -191,6 +202,6 @@ func main() {
 		log.Fatalf("token validator init: %v", err)
 	}
 
-	log.Printf("sample-api listening on :8080 (audience=%s, scopePrefix=%s)", audience, scopePrefix)
+	log.Printf("sample-api listening on :8080 (audience=%s, scopePrefix=%s, requireTenant=%t)", audience, scopePrefix, requireTenant)
 	log.Fatal(http.ListenAndServe(":8080", buildMux(sdb, validator, cfg)))
 }

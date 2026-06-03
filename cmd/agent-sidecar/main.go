@@ -401,8 +401,11 @@ func main() {
 		socketPath:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
 	}
 
-	if cfg.tenantID == "" || cfg.registryURL == "" || cfg.isTokenURL == "" {
-		log.Fatal("TENANT_ID, REGISTRY_URL, and IS_TOKEN_URL are required")
+	// tenantID is optional: a global agent has no tenant. The empty value
+	// flows harmlessly through selfRegister's "tenantId" field, and the token
+	// path does not use it at all.
+	if cfg.registryURL == "" || cfg.isTokenURL == "" {
+		log.Fatal("REGISTRY_URL and IS_TOKEN_URL are required")
 	}
 	if cfg.agentType == "" {
 		cfg.agentType = "worker"

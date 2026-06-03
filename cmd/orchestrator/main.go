@@ -147,8 +147,8 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if req.TenantID == "" || req.UserID == "" {
-			http.Error(w, "tenantId and userId are required", http.StatusBadRequest)
+		if req.UserID == "" {
+			http.Error(w, "userId is required", http.StatusBadRequest)
 			return
 		}
 		if req.AgentType == "" {
@@ -159,6 +159,12 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		if err != nil {
 			log.Printf("get template %s: %v", req.AgentType, err)
 			http.Error(w, "unknown agent type", http.StatusBadRequest)
+			return
+		}
+		// Tenant-ness is derived from the presence of a tenant id; a tenant id is
+		// only mandatory when the template explicitly requires one.
+		if tpl.RequiresTenant && req.TenantID == "" {
+			http.Error(w, "tenantId is required for this agent type", http.StatusBadRequest)
 			return
 		}
 		lifecycle := tpl.Runtime.Lifecycle

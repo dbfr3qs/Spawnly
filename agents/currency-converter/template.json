@@ -2,6 +2,7 @@
   "agentType": "currency-converter",
   "version": "1.0.0",
   "status": "active",
+  "requiresTenant": true,
   "meta": {"displayName": "Currency Converter", "description": "Long-lived A2A server that performs a delegated, read-only conversion"},
   "runtimeSpec": {
     "image": "agent-currency-converter:latest",

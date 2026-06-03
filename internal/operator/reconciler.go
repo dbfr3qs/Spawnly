@@ -221,6 +221,16 @@ func (r *AgentWorkloadReconciler) handleDeletion(ctx context.Context, aw *agentv
 	return ctrl.Result{}, r.Update(ctx, aw)
 }
 
+// scopeLabel reports the SPIRE-routing scope for a workload: "tenant" when a
+// tenant id is present, "global" when it is absent. This selects which
+// ClusterSPIFFEID (and thus which SVID path shape) SPIRE applies to the pod.
+func scopeLabel(tenantID string) string {
+	if tenantID == "" {
+		return "global"
+	}
+	return "tenant"
+}
+
 func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl registry.AgentTemplate) *corev1.Pod {
 	sharedEnv := []corev1.EnvVar{
 		{Name: "TENANT_ID", Value: aw.Spec.TenantID},
@@ -283,6 +293,7 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 				"tenant-id":                 aw.Spec.TenantID,
 				"user-id":                   aw.Spec.UserID,
 				"agent-platform.io/managed": "true",
+				"agent-platform.io/scope":   scopeLabel(aw.Spec.TenantID),
 			},
 		},
 		Spec: corev1.PodSpec{

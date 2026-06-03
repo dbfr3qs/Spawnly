@@ -2,6 +2,7 @@
   "agentType": "child-agent",
   "version": "1.0.0",
   "status": "active",
+  "requiresTenant": true,
   "meta": {"displayName": "Child Agent", "description": "Long-lived A2A server that generates a random string on request"},
   "runtimeSpec": {
     "image": "agent-child-agent:latest",
