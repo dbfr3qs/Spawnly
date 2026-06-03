@@ -8,12 +8,12 @@ import {
   resolveModel,
 } from '@flue/runtime/internal';
 import { local } from '@flue/runtime/node';
-import { postEvent, instrumentFlue, promptTimeoutSignal, TokenClient } from '@agent-platform/sdk';
+import { postEvent, instrumentFlue, promptTimeoutSignal, TokenClient, tenantHeader } from '@agent-platform/sdk';
 
 const agentId       = process.env.AGENT_ID        ?? 'unknown';
 const registryUrl    = process.env.REGISTRY_URL    ?? 'http://registry:8080';
 const orchestratorUrl = process.env.ORCHESTRATOR_URL ?? 'http://orchestrator:8080';
-const tenantId       = process.env.TENANT_ID       ?? 'default';
+const tenantId       = process.env.TENANT_ID       || undefined;
 const userId         = process.env.USER_ID         ?? 'unknown';
 const aiProvider     = process.env.AI_PROVIDER     ?? 'anthropic';
 const aiApiKey       = process.env.AI_API_KEY      ?? '';
@@ -183,7 +183,7 @@ async function callApiADirect(): Promise<void> {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
-        'X-Tenant-ID': tenantId,
+        ...tenantHeader(tenantId),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({}),

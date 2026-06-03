@@ -20,7 +20,7 @@ import {
   resolveModel,
 } from '@flue/runtime/internal';
 import { local } from '@flue/runtime/node';
-import { postEvent, instrumentFlue, promptTimeoutSignal, TokenClient } from '@agent-platform/sdk';
+import { postEvent, instrumentFlue, promptTimeoutSignal, TokenClient, tenantHeader } from '@agent-platform/sdk';
 
 const agentId     = process.env.AGENT_ID      ?? 'unknown';
 const registryUrl  = process.env.REGISTRY_URL  ?? 'http://registry:8080';
@@ -31,7 +31,7 @@ const promptTimeoutMs = Number(process.env.PROMPT_TIMEOUT_MS ?? 120000);
 
 const sidecarUrl = process.env.SIDECAR_URL ?? 'http://localhost:8089';
 const apiBUrl    = process.env.API_B_URL   ?? 'http://sample-api-b:8080';
-const tenantId   = process.env.TENANT_ID   ?? 'default';
+const tenantId   = process.env.TENANT_ID   || undefined;
 
 // Metadata key the parent uses to carry the delegation token over A2A.
 const DELEGATION_METADATA_KEY = 'delegationToken';
@@ -92,7 +92,7 @@ async function runDelegationFlow(delegationToken: string): Promise<string> {
   try {
     const res = await fetch(`${apiBUrl}/work`, {
       method: 'GET',
-      headers: { Authorization: `Bearer ${exchanged}`, 'X-Tenant-ID': tenantId },
+      headers: { Authorization: `Bearer ${exchanged}`, ...tenantHeader(tenantId) },
     });
     readStatus = res.status;
     let body: any;
@@ -128,7 +128,7 @@ async function runDelegationFlow(delegationToken: string): Promise<string> {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${exchanged}`,
-        'X-Tenant-ID': tenantId,
+        ...tenantHeader(tenantId),
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({}),

@@ -51,7 +51,9 @@ func callSampleAPI(ctx context.Context, sampleAPIURL, accessToken, tenantID, tas
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Tenant-ID", tenantID)
+	if tenantID != "" {
+		req.Header.Set("X-Tenant-ID", tenantID)
+	}
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -73,17 +75,18 @@ func main() {
 	task := os.Getenv("TASK")
 	sampleAPIURL := os.Getenv("SAMPLE_API_URL")
 	tenantID := os.Getenv("TENANT_ID")
+	scope := os.Getenv("SCOPE")
+	if scope == "" {
+		scope = "sample-api"
+	}
 
 	if sampleAPIURL == "" {
 		log.Fatal("SAMPLE_API_URL is required")
 	}
-	if tenantID == "" {
-		log.Fatal("TENANT_ID is required")
-	}
 
 	ctx := context.Background()
 
-	accessToken, err := getSidecarToken(ctx, "sample-api")
+	accessToken, err := getSidecarToken(ctx, scope)
 	if err != nil {
 		log.Fatalf("get access token: %v", err)
 	}

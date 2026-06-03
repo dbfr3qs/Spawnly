@@ -17,7 +17,94 @@ import (
 const testAudience = "sample-api-a"
 
 func testConfig() apiConfig {
-	return apiConfig{audience: testAudience, scopePrefix: testAudience}
+	return apiConfig{audience: testAudience, scopePrefix: testAudience, requireTenant: true}
+}
+
+// countingSDB wraps a spicedb.Client and records how many times
+// CheckPermission is invoked, so tests can assert the tenant chain check is
+// (not) reached. All other methods delegate unchanged.
+type countingSDB struct {
+	spicedb.Client
+	checks int
+}
+
+func (c *countingSDB) CheckPermission(ctx context.Context, resource, permission, subject string) (bool, error) {
+	c.checks++
+	return c.Client.CheckPermission(ctx, resource, permission, subject)
+}
+
+// TestWorkHandlerRequireTenantMissingTenantID confirms that with requireTenant
+// true (today's default) a request lacking X-Tenant-ID is still rejected 400.
+func TestWorkHandlerRequireTenantMissingTenantID(t *testing.T) {
+	sdb := spicedb.NewMock()
+	validator := &tokenvalidator.MockValidator{
+		Claims: claimsFor("spiffe://cluster.local/agent/agent-1", []string{"sample-api-a:read"}),
+	}
+	mux := buildMux(sdb, validator, testConfig())
+
+	req := httptest.NewRequest("GET", "/work", nil)
+	req.Header.Set("Authorization", "Bearer fake-access-token")
+	// no X-Tenant-ID
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", rec.Code)
+	}
+}
+
+// TestWorkHandlerTenantAgnosticNoTenantID confirms that a tenant-agnostic
+// instance (requireTenant=false) serves a valid token with NO X-Tenant-ID and
+// never consults SpiceDB for the delegation chain.
+func TestWorkHandlerTenantAgnosticNoTenantID(t *testing.T) {
+	sdb := &countingSDB{Client: spicedb.NewMock()} // no grants written
+	cfg := testConfig()
+	cfg.requireTenant = false
+
+	validator := &tokenvalidator.MockValidator{
+		Claims: claimsFor("spiffe://cluster.local/agent/agent-global", []string{"sample-api-a:read"}),
+	}
+	mux := buildMux(sdb, validator, cfg)
+
+	req := httptest.NewRequest("GET", "/work", nil)
+	req.Header.Set("Authorization", "Bearer fake-access-token")
+	// no X-Tenant-ID
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+	if sdb.checks != 0 {
+		t.Fatalf("CheckPermission called %d times, want 0 (tenant check must be skipped)", sdb.checks)
+	}
+}
+
+// TestWorkHandlerTenantAgnosticMissingScope confirms token-level checks still
+// apply when requireTenant=false: a token missing the required scope is 403.
+func TestWorkHandlerTenantAgnosticMissingScope(t *testing.T) {
+	sdb := &countingSDB{Client: spicedb.NewMock()}
+	cfg := testConfig()
+	cfg.requireTenant = false
+
+	// Only write scope present, GET requires read.
+	validator := &tokenvalidator.MockValidator{
+		Claims: claimsFor("spiffe://cluster.local/agent/agent-global", []string{"sample-api-a:write"}),
+	}
+	mux := buildMux(sdb, validator, cfg)
+
+	req := httptest.NewRequest("GET", "/work", nil)
+	req.Header.Set("Authorization", "Bearer fake-access-token")
+	// no X-Tenant-ID
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403", rec.Code)
+	}
 }
 
 // claimsFor builds Claims for an acting agent with the given audience/scopes.
