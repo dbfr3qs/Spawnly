@@ -18,10 +18,14 @@ test:
 	go test ./... -v -count=1
 
 docker-build:
-	@for svc in $(SERVICES); do \
+	@for svc in $(filter-out agent-sidecar,$(SERVICES)); do \
 		echo "Building image agent-$$svc:$(IMAGE_TAG)..."; \
 		docker build --target $$svc -t agent-$$svc:$(IMAGE_TAG) .; \
 	done
+	# agent-sidecar is special: its stage is `agent-sidecar` and the operator
+	# references the image as `agent-sidecar:latest`, so the generic agent-<svc>
+	# convention (agent-agent-sidecar) does not apply.
+	docker build --target agent-sidecar -t agent-sidecar:$(IMAGE_TAG) .
 	docker build --target identity-server -t agent-identity-server:$(IMAGE_TAG) .
 	docker build --target weather-monitor -t agent-weather-monitor:$(IMAGE_TAG) .
 
@@ -32,9 +36,10 @@ kind-down:
 	kind delete cluster --name $(KIND_CLUSTER)
 
 kind-load: docker-build
-	@for svc in $(SERVICES); do \
+	@for svc in $(filter-out agent-sidecar,$(SERVICES)); do \
 		kind load docker-image agent-$$svc:$(IMAGE_TAG) --name $(KIND_CLUSTER); \
 	done
+	kind load docker-image agent-sidecar:$(IMAGE_TAG) --name $(KIND_CLUSTER)
 	kind load docker-image agent-identity-server:$(IMAGE_TAG) --name $(KIND_CLUSTER)
 	kind load docker-image agent-weather-monitor:$(IMAGE_TAG) --name $(KIND_CLUSTER)
 
