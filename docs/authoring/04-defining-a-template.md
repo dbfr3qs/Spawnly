@@ -85,6 +85,36 @@ time ([`substitute()`](../../cmd/registry/main.go#L120)). What this grant *means
 — and how to design more of them — is the subject of
 [05 — Defining Policy](05-defining-policy.md).
 
+### Tenanted vs global agents
+
+Whether an agent belongs to a tenant is **derived from the presence of a tenant
+id at spawn**, not declared by a flag:
+
+- **Tenanted** (the common case) — spawned with a `tenantId`. Its SVID is
+  `spiffe://…/agent/<tenant>/<user>/<type>/<id>`, and any `{{tenant_id}}`
+  relation above is written to SpiceDB.
+- **Global / tenant-agnostic** — spawned **without** a `tenantId`. Its SVID drops
+  the tenant/user segments (`spiffe://…/agent/<type>/<id>`), and the registry
+  **skips** any relation that references `{{tenant_id}}` (so a template's tenant
+  grant goes inert rather than writing a malformed `tenant:` tuple). Use this for
+  agents that only call [tenant-agnostic resource servers](05-defining-policy.md#tenant-agnostic-resource-servers).
+
+Because the tenant grant assumes a tenant, **set `requiresTenant: true` on any
+template that has a `{{tenant_id}}` relation** — the orchestrator then rejects a
+tenant-less spawn with `400` instead of letting it come up "global" with no
+tenant grant (which would be silently denied by every tenant-checking API):
+
+```json
+  "requiresTenant": true
+```
+
+Leave it `false` (the default, or omit it) only for a genuinely tenant-agnostic
+type whose `authzTemplate` has **no** `{{tenant_id}}` relation.
+
+> ⚠️ This pairing is a convention, **not enforced**: nothing warns if a template
+> has a `{{tenant_id}}` relation but omits `requiresTenant`. Keep them in sync by
+> hand.
+
 ### 3. (Parent agents only) allow spawning / delegation — `delegation`
 
 Omit this for an agent that never spawns children. **Any agent that spawns
@@ -148,6 +178,7 @@ That's the whole loop: define → register → spawn → observe.
 | `agentType` | string | ✅ | Unique type key; the registry's map key and the `/spawn` `agentType`. |
 | `version` | string | — | Recorded only. Not used for selection ([status callouts](#status-callouts)). |
 | `status` | string | — | `active` \| `deprecated`. Recorded only; not enforced. |
+| `requiresTenant` | bool | — | When `true`, the orchestrator rejects a tenant-less spawn of this type. Default `false`. Set `true` whenever `authzTemplate` has a `{{tenant_id}}` relation. See [tenanted vs global](#tenanted-vs-global-agents). |
 | `meta.displayName` | string | — | Shown on the dashboard. |
 | `meta.description` | string | — | Human description. |
 | `runtimeSpec.image` | string | ✅ | Container image (must be loaded into Kind). |
@@ -167,6 +198,7 @@ The template is read by four components at different moments — a template is n
 
 | Field(s) | Consumer | When |
 |----------|----------|------|
+| `requiresTenant` | **Orchestrator** | At `/spawn` — rejects the request with `400` if `true` and no `tenantId` was supplied. |
 | `runtimeSpec.lifecycle` | **Orchestrator** | At `/spawn` — copied onto the `AgentWorkload` ([main.go:164](../../cmd/orchestrator/main.go#L164)). |
 | `runtimeSpec.image`, `resources`, `envDefaults` | **Operator** | At pod build ([reconciler.go:224](../../internal/operator/reconciler.go#L224)). |
 | `authzTemplate.spiceDbRelations` | **Registry** → SpiceDB | At agent self-registration (relations projected into SpiceDB). |
@@ -182,6 +214,10 @@ Only two, expanded by the registry when an agent registers
 |-------|---------|
 | `{{tenant_id}}` | the spawning request's `tenantId` |
 | `{{agent_id}}` | the agent's canonical id (`AGENT_ID`) |
+
+For a [global agent](#tenanted-vs-global-agents) (no `tenantId`), any relation
+referencing `{{tenant_id}}` is **skipped** at registration rather than written
+with an empty tenant.
 
 ### The lifecycle switch
 

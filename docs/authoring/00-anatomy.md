@@ -54,7 +54,7 @@ Read them with `process.env`:
 | Variable | Meaning |
 |----------|---------|
 | `AGENT_ID` | This agent's canonical id (also the workload/pod name). Use it for events and as the A2A service host (`<AGENT_ID>-svc`). |
-| `TENANT_ID` / `USER_ID` | Tenant and user the agent acts for. Pass `X-Tenant-ID` on protected API calls. |
+| `TENANT_ID` / `USER_ID` | Tenant and user the agent acts for. `TENANT_ID` is **empty for a global (tenant-agnostic) agent** — send `X-Tenant-ID` on protected calls only when it is set (the SDK's authenticated fetch does this for you). See [tenanted vs global](04-defining-a-template.md#tenanted-vs-global-agents). |
 | `PARENT_ID` | Set when this agent was spawned by another agent (empty otherwise). |
 | `REGISTRY_URL` | Post lifecycle events here. |
 | `ORCHESTRATOR_URL` | Spawn / kill other agents here. |

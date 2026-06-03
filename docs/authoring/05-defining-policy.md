@@ -132,17 +132,23 @@ await fetch(`${process.env.API_A_URL}/work`, {
 ### What the resource server checks
 
 `sample-api`'s `authorize()` ([`cmd/sample-api/main.go`](../../cmd/sample-api/main.go))
-runs three gates, in order:
+runs these gates, in order:
 
-1. **`X-Tenant-ID` present** — which tenant is this call for?
+1. **`X-Tenant-ID` present** — which tenant is this call for? *(tenant gate — see below)*
 2. **Scope present** — the token must carry the scope for the method
    (`:read` for GET, `:write` for POST). Missing scope → `403`.
 3. **`work_on` on every chain hop** — for the calling agent *and every actor in
    its `act` chain*, SpiceDB must say `tenant:T#work_on@agent:<id>`
-   ([main.go:78](../../cmd/sample-api/main.go#L78)). Any member lacking it → `403`.
+   ([main.go:78](../../cmd/sample-api/main.go#L78)). Any member lacking it → `403`. *(tenant gate)*
 
 Gate 3 is what makes suspension cascade (Part 2): drop one agent's relation and
 every protected call whose chain includes it is denied.
+
+The two **tenant gates** (1 and 3) are active only when the instance requires a
+tenant (`REQUIRE_TENANT`, default `true`). A
+[tenant-agnostic instance](#tenant-agnostic-resource-servers) skips both,
+validating only the token signature, audience, and scope — that's what lets a
+[global agent](04-defining-a-template.md#tenanted-vs-global-agents) call it.
 
 ---
 
@@ -308,6 +314,26 @@ permissions, then have templates write the matching relations via
 `authzTemplate.spiceDbRelations`. The resource server for that resource then
 calls `CheckPermission(resource, permission, agent:<id>)`. Keep the projection
 pattern: the registry writes tuples; resource servers only read.
+
+### Tenant-agnostic resource servers
+
+Tenant enforcement is a **per-resource-server choice**, not a platform-wide
+rule. A `sample-api` instance reads `REQUIRE_TENANT` (default `true`):
+
+| `REQUIRE_TENANT` | Behaviour |
+|------------------|-----------|
+| `true` (default) | Demands `X-Tenant-ID` and checks `work_on` on every chain hop (gates 1 + 3 above). |
+| `false` | **Tenant-agnostic:** skips both tenant gates; still validates token signature, `token_use`, audience, and scope. |
+
+A tenant-agnostic instance is what a
+[global agent](04-defining-a-template.md#tenanted-vs-global-agents) calls — it
+asserts no tenant and holds no `tenant:` grant, so a tenant-checking instance
+would (correctly) deny it. The `sample-api-global` manifest
+([`deploy/manifests/sample-api-global.yaml`](../../deploy/manifests/sample-api-global.yaml))
+and the `global-worker` template
+([`agents/global-worker/template.json`](../../agents/global-worker/template.json))
+are a worked example of the pair. Setting `REQUIRE_TENANT=false` relaxes **only**
+the tenant check — authn and scope are still enforced.
 
 ### Scopes and audiences catalog
 
