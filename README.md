@@ -2,7 +2,7 @@
 
 A proof-of-concept platform for running AI agents on Kubernetes with cryptographic identity, fine-grained authorisation, and full lifecycle observability. Agents may be **short-lived** (do one job and exit) or **long-lived** (serve until deleted — including chat).
 
-Each agent pod gets a unique SPIFFE identity (JWT-SVID) issued by SPIRE at start. A per-pod **sidecar** uses that identity to obtain scoped OAuth 2.0 access tokens; the agent self-registers with the registry, calls protected APIs, and emits structured lifecycle events throughout — all visible in a real-time web dashboard.
+Each agent pod gets a unique SPIFFE identity (JWT-SVID) issued by SPIRE at start. A per-pod **sidecar** uses that identity to register the agent with the **agent registry** and to obtain scoped OAuth 2.0 access tokens; the agent then calls protected APIs and emits structured lifecycle events throughout — all visible in a real-time web dashboard.
 
 Two agent flavours run on the same platform contract:
 
@@ -24,7 +24,7 @@ Spawnly is a handful of small, single-purpose services. Before the architecture 
 
 - **SPIRE** — issues every agent pod a unique cryptographic identity (a JWT-SVID) at startup — no shared secrets or static keys.
 - **agent-sidecar** — a helper container in every agent pod. It exchanges the pod's SVID for scoped OAuth access tokens and hands them to the agent on request, so agent code carries no identity plumbing.
-- **IdentityServer** — the OAuth 2.0 authority that mints those access tokens, trusting the SVID as proof of who the agent is.
+- **IdentityServer** — the OAuth 2.0 authority that mints those access tokens, trusting the SVID as proof of who the agent is — but only after checking the agent registry that the agent exists and is active.
 - **SpiceDB** — the authorisation database. Relationship-based ("this agent may act for this tenant"); protected services check it before serving a request.
 
 **Agents & the services they call**
@@ -34,7 +34,7 @@ Spawnly is a handful of small, single-purpose services. Before the architecture 
 
 **Observability**
 
-- **Registry** — the system's memory. Agents self-register here, every component records lifecycle events here, and agent templates live here too.
+- **Agent Registry** — the system's memory. The sidecar registers each agent here, every component records lifecycle events here, agent templates live here, and IdentityServer consults it to check an agent is active before issuing a token.
 - **Dashboard UI** — the real-time web view: spawn agents, watch their event timelines, and chat with long-lived ones ([screenshot](spawnly-ui.jpg)).
 
 For the directory-level breakdown (paths, languages, internal packages), see [Repository layout](#repository-layout).
@@ -49,7 +49,9 @@ The diagram shows the full flow for a single agent — spawn request → CRD →
 
 > Source: [`docs/architecture.d2`](docs/architecture.d2). Regenerate with `d2 docs/architecture.d2 docs/architecture.svg`.
 
-**The key thing the sidecar does:** the agent container never performs the SVID/token dance itself. The `agent-sidecar` fetches the JWT-SVID from SPIRE, exchanges it at IdentityServer for a scoped access token, and exposes a local `/token` endpoint (`:8089`). The agent asks the sidecar for tokens via the SDK's `TokenClient`. This keeps agent code framework- and language-agnostic.
+**The key thing the sidecar does:** the agent container never performs the SVID/registration/token dance itself. The `agent-sidecar` fetches the JWT-SVID from SPIRE, **self-registers the agent** with the agent registry (SVID as Bearer), exchanges the SVID at IdentityServer for a scoped access token, and exposes a local `/token` endpoint (`:8089`). The agent asks the sidecar for tokens via the SDK's `TokenClient`. This keeps agent code framework- and language-agnostic.
+
+IdentityServer doesn't mint a token blindly: during the grant it **looks up the agent registry to confirm the agent exists and is `active`** (`AgentRegistryValidator`), so a deregistered or unknown agent can't obtain credentials.
 
 ### Lifecycle events
 
@@ -62,7 +64,7 @@ As an agent moves through its life — spawned, given an identity, doing work, e
 | Orchestrator  | `workload_created`          | `POST /spawn` accepted; `AgentWorkload` CRD written to Kubernetes     |
 | Orchestrator  | `workload_spawning`         | Spawn request validated and dispatched                               |
 | Operator      | `pod_created`               | Operator reconciles the CRD, fetches the template, creates the Pod   |
-| Registry      | `registry_record_created`   | Agent self-registers via `POST /v1/agents` (SVID as Bearer token)    |
+| Registry      | `registry_record_created`   | Sidecar self-registers the agent via `POST /v1/agents` (SVID as Bearer token) |
 | Registry      | `spicedb_relations_written` | Registry writes the agent's SpiceDB relations (omitted if global)    |
 
 **Agent activity events** (the neutral, framework-agnostic vocabulary forwarded by the SDK's `instrumentFlue`, plus sidecar/agent startup):
@@ -84,7 +86,7 @@ Every directory, by language and purpose:
 | `cmd/orchestrator/` | Go | REST API. Accepts `POST /spawn`, creates `AgentWorkload` CRDs, proxies agent/event queries and chat messages to agents/registry |
 | `cmd/operator/` | Go | Kubernetes controller (controller-runtime). Watches `AgentWorkload` CRDs and manages the agent Pod (and Service, for long-lived agents) lifecycle |
 | `cmd/registry/` | Go | In-memory agent and template store. Accepts self-registration, persists lifecycle events, writes SpiceDB relationships |
-| `cmd/agent/` | Go | Minimal short-lived reference workload. Gets a token from the sidecar, self-registers, calls the sample API, emits events |
+| `cmd/agent/` | Go | Minimal short-lived reference workload. Gets a token from the sidecar, calls the sample API, emits events (the sidecar handles registration) |
 | `cmd/agent-sidecar/` | Go | Per-pod native sidecar (`:8089`). Fetches the JWT-SVID, exchanges it for scoped OAuth tokens, and serves `/token` to the agent |
 | `cmd/sample-api/` | Go | Protected HTTP API (`GET /work`, `POST /task`). Validates OAuth 2.0 Bearer tokens and a SpiceDB `work_on` check. Deployed as `sample-api`, `sample-api-a`, `sample-api-b`, and `sample-api-global` (the last with `REQUIRE_TENANT=false`) |
 | `cmd/dashboard/` | Go + HTML | Web UI. Polls agents and events, chats with long-lived agents, filters events per-agent; proxies all requests to the orchestrator |
@@ -304,8 +306,8 @@ make kind-load
 ## Key design decisions
 
 - **SPIFFE/SPIRE for workload identity**: every agent pod gets a unique JWT-SVID (`spiffe://cluster.local/...`) via the CSI driver — no shared secrets or static API keys.
-- **A per-pod sidecar owns token exchange**: the `agent-sidecar` turns the SVID into scoped OAuth tokens and serves them at `:8089`, so agent code stays free of identity plumbing and works the same in Go or TypeScript.
-- **IdentityServer as the OAuth 2.0 authority**: the sidecar uses the SVID as a `client_assertion` (RFC 7523 JWT Bearer) to obtain a scoped access token, validated against SPIRE's JWKS endpoint.
+- **A per-pod sidecar owns registration and token exchange**: the `agent-sidecar` self-registers the agent with the agent registry and turns the SVID into scoped OAuth tokens served at `:8089`, so agent code stays free of identity plumbing and works the same in Go or TypeScript.
+- **IdentityServer as the OAuth 2.0 authority**: the sidecar uses the SVID as a `client_assertion` (RFC 7523 JWT Bearer) to obtain a scoped access token, validated against SPIRE's JWKS endpoint — and IdentityServer additionally checks the agent registry that the agent is `active` before issuing.
 - **SpiceDB for authorisation**: the registry writes the agent's relationships on registration (a `tenant:T#agent@agent:X` relation when tenanted, none when global). The sample API checks `work_on` permission before serving requests.
 - **Tenancy from presence**: an agent is tenanted iff a tenant id is present; the same code path serves global agents by simply omitting the tenant segment, header, and relations.
 - **Append-only, filterable event log**: lifecycle events flow into the registry's in-memory store. The dashboard appends new events to the DOM without replacing existing rows (preserving expanded/collapsed state) and filters them per-agent by category (heartbeat hidden by default).

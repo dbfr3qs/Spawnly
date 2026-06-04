@@ -1,10 +1,12 @@
 # Spawnly architecture — source for docs/architecture.svg
 # Regenerate with:  d2 docs/architecture.d2 docs/architecture.svg
 #
-# Key point this diagram gets right (the old ASCII one did not): the agent
-# container does NOT do the SVID/token dance itself — the agent-sidecar fetches
-# the JWT-SVID and exchanges it for an OAuth token, and the agent asks the
-# sidecar for scoped tokens over :8089 via the SDK's TokenClient.
+# Points this diagram gets right (the old ASCII one did not):
+#  - The agent-sidecar (not the agent) fetches the JWT-SVID, self-registers the
+#    agent with the Agent Registry, and exchanges the SVID for OAuth tokens. The
+#    agent asks the sidecar for scoped tokens over :8089 via the SDK TokenClient.
+#  - IdentityServer checks the Agent Registry that the agent exists and is active
+#    before it issues an access token.
 
 direction: down
 
@@ -25,7 +27,7 @@ k8s: "Kubernetes (Kind)" {
   crd: "AgentWorkload\nCRD" {
     shape: page
   }
-  registry: "Registry\n:8080\nevents · templates" {
+  registry: "Agent Registry\n:8080\nagents · events · templates" {
     shape: rectangle
   }
   spicedb: "SpiceDB\n:50051" {
@@ -63,17 +65,19 @@ k8s: "Kubernetes (Kind)" {
   operator -> registry: "GetTemplate"
   operator -> pod: "(3) create Pod\n(+ Service if long-lived)"
 
-  # ---- identity: sidecar owns the SVID/token exchange ----
+  # ---- identity & registration: the sidecar owns this ----
   spire.ds -> pod.sidecar: "(4) JWT-SVID\nvia CSI volume"
-  pod.sidecar -> idsrv: "(5) SVID assertion →\naccess_token"
-  idsrv -> spire.oidc: "validate (JWKS)"
-  pod.agent -> pod.sidecar: "(6) GET /token\n(SDK TokenClient)"
+  pod.sidecar -> registry: "(5) self-register\n(SVID as Bearer)"
+  registry -> spicedb: "(6) write relations\n(omitted if global)"
+  pod.agent -> pod.sidecar: "(7) GET /token\n(SDK TokenClient)"
+  pod.sidecar -> idsrv: "(8) SVID assertion →\naccess_token"
+  idsrv -> spire.oidc: "validate SVID (JWKS)"
+  idsrv -> registry: "check agent is active"
 
-  # ---- agent work: register, authorize, call API ----
-  pod.agent -> registry: "(7) self-register\n+ lifecycle events"
-  registry -> spicedb: "(8) write relations\n(omitted if global)"
+  # ---- agent work ----
   pod.agent -> sampleapi: "(9) Bearer token →\n/work, /task"
   sampleapi -> spicedb: "work_on check"
+  pod.agent -> registry: "lifecycle events"
 
   # ---- chat path (long-lived agents only) ----
   orchestrator -> pod: "chat: POST /agents/chat/:session" {
