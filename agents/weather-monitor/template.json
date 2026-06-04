@@ -7,6 +7,7 @@
   "runtimeSpec": {
     "image": "agent-weather-monitor:latest",
     "lifecycle": "long-lived",
+    "supportsChat": true,
     "resources": {"cpuLimits": "500m", "memoryLimits": "256Mi"},
     "envDefaults": {"LOG_LEVEL": "info"}
   },

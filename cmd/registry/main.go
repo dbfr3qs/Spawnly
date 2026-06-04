@@ -208,13 +208,14 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 		}
 
 		rec := registry.AgentRecord{
-			AgentID:   agentID,
-			AgentType: req.AgentType,
-			TenantID:  req.TenantID,
-			UserID:    req.UserID,
-			Status:    "active",
-			Lifecycle: tpl.Runtime.Lifecycle,
-			ParentID:  req.ParentID,
+			AgentID:      agentID,
+			AgentType:    req.AgentType,
+			TenantID:     req.TenantID,
+			UserID:       req.UserID,
+			Status:       "active",
+			Lifecycle:    tpl.Runtime.Lifecycle,
+			SupportsChat: tpl.Runtime.SupportsChat,
+			ParentID:     req.ParentID,
 		}
 		s.registerAgent(rec)
 		s.appendEvent(agentID, events.Event{

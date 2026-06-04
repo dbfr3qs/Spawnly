@@ -46,6 +46,10 @@ type RuntimeSpec struct {
 	Resources   ResourceLimits    `json:"resources"`
 	EnvDefaults map[string]string `json:"envDefaults"`
 	Lifecycle   string            `json:"lifecycle"`
+	// SupportsChat, when true, tells the dashboard this agent serves the
+	// /agents/chat/:sessionId endpoint, so the chat UI should be offered. Only
+	// meaningful for long-lived agents (a Service must exist to route to).
+	SupportsChat bool `json:"supportsChat"`
 }
 
 type ResourceLimits struct {
@@ -70,6 +74,11 @@ type AgentRecord struct {
 	UserID    string `json:"userId"`
 	Status    string `json:"status"` // active | completed | failed
 	Lifecycle string `json:"lifecycle"`
-	Dismissed bool   `json:"dismissed,omitempty"`
-	ParentID  string `json:"parentId,omitempty"`
+	// SupportsChat is copied from the template's runtimeSpec so the dashboard
+	// can offer chat only for agents that actually serve the chat endpoint.
+	// omitempty: a false value is simply absent, which the dashboard reads as
+	// "no chat" — and keeps records without the field decoding cleanly.
+	SupportsChat bool   `json:"supportsChat,omitempty"`
+	Dismissed    bool   `json:"dismissed,omitempty"`
+	ParentID     string `json:"parentId,omitempty"`
 }

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Agent Platform</title>
+  <title>Spawnly</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -682,7 +682,7 @@
 <body>
 
 <header>
-  <h1>Agent Platform</h1>
+  <h1>Spawnly</h1>
   <button class="btn btn-primary" id="open-modal-btn">+ New Agent</button>
 </header>
 
@@ -1026,7 +1026,7 @@
           <span class="agent-stale" data-agent="${a.agentId}" id="stale-${a.agentId}"></span>
           <button class="btn btn-events" id="evtbtn-${a.agentId}"
                   onclick="toggleEvents('${a.agentId}')">▼ Events</button>
-          ${a.lifecycle === 'long-lived' ? `<button class="btn btn-chat" id="chatbtn-${a.agentId}" onclick="toggleChat('${a.agentId}')">💬 Chat</button>` : ''}
+          ${a.lifecycle === 'long-lived' && a.supportsChat ? `<button class="btn btn-chat" id="chatbtn-${a.agentId}" onclick="toggleChat('${a.agentId}')">💬 Chat</button>` : ''}
           <span id="killwrap-${a.agentId}">
             ${isActive ? `<button class="btn btn-danger" onclick="handleKill('${a.agentId}')">Kill</button>` : ''}
           </span>

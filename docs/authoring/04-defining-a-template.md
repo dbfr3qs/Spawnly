@@ -63,6 +63,9 @@ it. Start with the two things that name and describe the type:
   "Completed", and whether the agent is **chattable** from the dashboard. See
   [the lifecycle switch](#the-lifecycle-switch) and
   [Chatting with a Long-Lived Agent](06-chat.md).
+- **`supportsChat`** — set `true` on a long-lived agent that serves the
+  `/agents/chat/:sessionId` endpoint, to offer the dashboard Chat button. See
+  [Chatting with a Long-Lived Agent](06-chat.md).
 - **`resources`** — CPU/memory limits applied to the agent container.
 - **`envDefaults`** — extra env vars injected verbatim. Use these for
   agent-specific config (poll intervals, feature flags). See
@@ -185,6 +188,7 @@ That's the whole loop: define → register → spawn → observe.
 | `meta.description` | string | — | Human description. |
 | `runtimeSpec.image` | string | ✅ | Container image (must be loaded into Kind). |
 | `runtimeSpec.lifecycle` | string | — | `short-lived` (default) \| `long-lived`. |
+| `runtimeSpec.supportsChat` | bool | — | `true` if the agent serves `/agents/chat/:sessionId`; gates the dashboard Chat button (long-lived only). See [Chatting with a Long-Lived Agent](06-chat.md). |
 | `runtimeSpec.resources.cpuLimits` | string | — | K8s CPU limit, e.g. `500m`. |
 | `runtimeSpec.resources.memoryLimits` | string | — | K8s memory limit, e.g. `256Mi`. |
 | `runtimeSpec.envDefaults` | map | — | Extra env injected verbatim. |

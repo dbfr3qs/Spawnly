@@ -17,29 +17,34 @@ The dashboard can hold a back-and-forth conversation with an agent. This page
 explains how that works **from a configuration point of view** — what you set,
 what the platform does for you, and what your agent has to implement.
 
-## The only knob is `lifecycle: long-lived`
+## Two template knobs: `lifecycle` and `supportsChat`
 
-There is no separate "chat" flag. The single switch is the `lifecycle` field in
-your template's `runtimeSpec`:
+Chat needs two things from the template's `runtimeSpec`: the agent must be
+**long-lived** (so it has a Service to route to), and it must declare
+**`supportsChat: true`** (so the dashboard offers the chat UI only for agents
+that actually serve the endpoint):
 
 ```json
 {
   "runtimeSpec": {
-    "lifecycle": "long-lived"
+    "lifecycle": "long-lived",
+    "supportsChat": true
   }
 }
 ```
 
-Setting it to `long-lived` turns on three independent things across three
-components:
+These drive three things across three components:
 
-| What | Where | Component |
-|------|-------|-----------|
-| The 💬 **Chat** button appears on the agent card | gated on `lifecycle === 'long-lived'` | [`cmd/dashboard/static/index.html`](../../cmd/dashboard/static/index.html) |
-| A **`{id}-svc` Service** (port 8080) is created — long-lived only | `if aw.Spec.Lifecycle == "long-lived"` | [`internal/operator/reconciler.go`](../../internal/operator/reconciler.go) |
+| What | Gate | Component |
+|------|------|-----------|
+| The 💬 **Chat** button appears on the agent card | `lifecycle === 'long-lived' && supportsChat` | [`cmd/dashboard/static/index.html`](../../cmd/dashboard/static/index.html) |
+| A **`{id}-svc` Service** (port 8080) is created | `lifecycle === 'long-lived'` (operator) | [`internal/operator/reconciler.go`](../../internal/operator/reconciler.go) |
 | Chat messages are **routed** to that Service | `POST /v1/agents/{id}/message` → the agent | [`cmd/orchestrator/main.go`](../../cmd/orchestrator/main.go) |
 
-A short-lived agent has none of these: no button, no Service, no route.
+`supportsChat` is copied from the template onto the agent's record (at
+preregistration and self-registration) and surfaced in `GET /v1/agents`, where
+the dashboard reads it. A short-lived agent, or a long-lived one without
+`supportsChat`, shows no Chat button.
 
 ## The round-trip
 
@@ -67,9 +72,9 @@ job.** The contract is:
   Flue webhook envelope `{ "result": { "response": "..." } }` (the dashboard
   unwraps either shape).
 
-If a long-lived agent does **not** serve this route, the Chat button still
-appears (see [Known gap](#known-gap)), but sending a message fails with
-`agent unreachable` (502) or a 404 from the agent.
+Set `supportsChat: true` only once your agent serves this route. If you set it
+but the agent doesn't implement the endpoint, the button appears and sending a
+message fails with `agent unreachable` (502) or a 404 from the agent.
 
 ## Flue agents implement chat for free
 
@@ -126,11 +131,12 @@ curl -X POST http://localhost:8080/v1/agents/<workloadName>/message \
 # → {"result":{"response":"…"},"_meta":{...}}
 ```
 
-## Known gap
+## A note on capability vs. reachability
 
-The Chat button is gated **purely on `lifecycle`** — the platform never checks
-that the agent actually serves `/agents/chat/:sessionId`. A long-lived agent
-that isn't chat-capable will still show the button, and messages to it fail.
-Capability is currently conflated with lifecycle; an explicit `supportsChat`
-template flag that gates the button independently would close this gap (not yet
-implemented).
+`supportsChat` is a **declaration**, not a probe — the platform trusts the
+template and never actively checks that the agent serves
+`/agents/chat/:sessionId`. So the button reflects what the template claims, not
+runtime reality: if you set `supportsChat: true` on an agent that doesn't
+implement the route, the button appears and messages fail. The flag exists so
+that a long-lived agent which is *not* chat-capable (for example an A2A agent
+that serves JSON-RPC at `/`) simply omits it and shows no button.

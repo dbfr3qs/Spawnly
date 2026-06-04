@@ -161,7 +161,7 @@ Open `http://localhost:8090` to watch events, spin up agents, and chat with long
 
 Flue agents read their LLM config from the `ai-provider` Secret, injected by the operator as `AI_PROVIDER` / `AI_API_KEY` / `AI_MODEL`. Both OpenAI (`openai/gpt-4o`, …) and Anthropic (`anthropic/claude-sonnet-4-6`, …) are supported.
 
-**Long-lived agents can be chatted with from the dashboard** (the 💬 Chat button). A message round-trips:
+**Long-lived agents that declare `supportsChat: true` can be chatted with from the dashboard** (the 💬 Chat button). A message round-trips:
 
 ```
 Dashboard → POST /api/agents/{id}/message → Orchestrator → POST http://{id}-svc:8080/agents/chat/{sessionId} → agent

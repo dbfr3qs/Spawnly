@@ -226,12 +226,13 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		// Pre-register immediately so the agent appears in the UI with "pending"
 		// status before the pod starts. The sidecar will overwrite this to "active".
 		_ = regClient.PreRegisterAgent(r.Context(), registry.AgentRecord{
-			AgentID:   workloadName,
-			AgentType: req.AgentType,
-			TenantID:  req.TenantID,
-			UserID:    req.UserID,
-			Lifecycle: lifecycle,
-			ParentID:  req.ParentID,
+			AgentID:      workloadName,
+			AgentType:    req.AgentType,
+			TenantID:     req.TenantID,
+			UserID:       req.UserID,
+			Lifecycle:    lifecycle,
+			SupportsChat: tpl.Runtime.SupportsChat,
+			ParentID:     req.ParentID,
 		})
 
 		go func() {
