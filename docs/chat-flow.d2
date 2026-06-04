@@ -1,0 +1,33 @@
+# Spawnly chat round-trip — source for docs/chat-flow.svg
+# Regenerate with:  d2 docs/chat-flow.d2 docs/chat-flow.svg
+#
+# The message path for chatting with a long-lived agent, as a sequence. The
+# {id}-svc Service and the routing only exist because the template is
+# lifecycle: long-lived; the agent must serve /agents/chat/:sessionId itself.
+
+shape: sequence_diagram
+
+you: You
+dash: Dashboard
+orch: Orchestrator
+svc: "{id}-svc :8080" {
+  style.stroke-dash: 2
+}
+agent: Agent
+
+you -> dash: type message
+dash -> orch: "POST /api/agents/{id}/message\n{ message, sessionId }"
+orch -> svc: "POST /agents/chat/{sessionId}\n(long-lived agents only)"
+svc -> agent: forward
+agent -> svc: "{ response }" {
+  style.stroke-dash: 3
+}
+svc -> orch: "" {
+  style.stroke-dash: 3
+}
+orch -> dash: "{ result: { response } }" {
+  style.stroke-dash: 3
+}
+dash -> you: render reply {
+  style.stroke-dash: 3
+}

@@ -25,6 +25,7 @@ reference on templates and policy.
 - **[Parent → child: Trip Planner & Currency Converter](/authoring/03-parent-and-child)** — orchestration over A2A with delegated, attenuated authority.
 - **[Defining a Template](/authoring/04-defining-a-template)** — the full `AgentTemplate` schema, field by field.
 - **[Defining Policy](/authoring/05-defining-policy)** — an agent's own authority and parent→child delegation.
+- **[Chatting with a Long-Lived Agent](/authoring/06-chat)** — how the dashboard chat interface works and the `/agents/chat/:sessionId` contract.
 
 ## Design notes
 

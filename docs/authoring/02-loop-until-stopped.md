@@ -191,5 +191,8 @@ until you delete it — then it transitions to Completed.
 - Heartbeats to stay observable between units of work.
 - Graceful shutdown via `SIGTERM`, and why a clean stop is Completed not Failed.
 
+Because it is long-lived, the dashboard also lets you **chat** with this agent —
+see [Chatting with a Long-Lived Agent](06-chat.md).
+
 **Next:** have one agent drive another in
 [Scenario 3 — Parent → child](03-parent-and-child.md).

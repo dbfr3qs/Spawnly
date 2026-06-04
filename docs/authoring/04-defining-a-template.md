@@ -59,8 +59,10 @@ it. Start with the two things that name and describe the type:
 - **`image`** — the container the operator runs. It must be loaded into Kind
   (`make kind-load`) and built from a [`Dockerfile`](../../Dockerfile) target.
 - **`lifecycle`** — `short-lived` (default) or `long-lived`. This single field
-  decides whether the operator creates a Service and whether pod-exit means
-  "Completed". See [the lifecycle switch](#the-lifecycle-switch).
+  decides whether the operator creates a Service, whether pod-exit means
+  "Completed", and whether the agent is **chattable** from the dashboard. See
+  [the lifecycle switch](#the-lifecycle-switch) and
+  [Chatting with a Long-Lived Agent](06-chat.md).
 - **`resources`** — CPU/memory limits applied to the agent container.
 - **`envDefaults`** — extra env vars injected verbatim. Use these for
   agent-specific config (poll intervals, feature flags). See

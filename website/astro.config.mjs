@@ -35,6 +35,7 @@ export default defineConfig({
             { slug: 'authoring/03-parent-and-child' },
             { slug: 'authoring/04-defining-a-template' },
             { slug: 'authoring/05-defining-policy' },
+            { slug: 'authoring/06-chat' },
           ],
         },
         {
