@@ -11,6 +11,36 @@ Two agent flavours run on the same platform contract:
 
 ---
 
+## Components at a glance
+
+Spawnly is a handful of small, single-purpose services. Before the architecture diagram, here is what each one does — in a sentence.
+
+**Control plane — spawning & lifecycle**
+
+- **Orchestrator** — the front door. A REST API that accepts spawn requests, lists agents, and forwards chat messages. It turns a spawn request into an `AgentWorkload` record in Kubernetes.
+- **Operator** — a Kubernetes controller that watches those records and creates (and tears down) each agent's Pod, plus a Service if the agent is long-lived.
+
+**Identity & authorisation**
+
+- **SPIRE** — issues every agent pod a unique cryptographic identity (a JWT-SVID) at startup — no shared secrets or static keys.
+- **agent-sidecar** — a helper container in every agent pod. It exchanges the pod's SVID for scoped OAuth access tokens and hands them to the agent on request, so agent code carries no identity plumbing.
+- **IdentityServer** — the OAuth 2.0 authority that mints those access tokens, trusting the SVID as proof of who the agent is.
+- **SpiceDB** — the authorisation database. Relationship-based ("this agent may act for this tenant"); protected services check it before serving a request.
+
+**Agents & the services they call**
+
+- **Agents** — the actual workloads: a minimal Go worker, plus TypeScript/Flue agents that chat over an LLM, call tools, and can spawn child agents.
+- **Sample API** — a protected example service that agents call, to demonstrate token-based access and tenant/authorisation checks.
+
+**Observability**
+
+- **Registry** — the system's memory. Agents self-register here, every component records lifecycle events here, and agent templates live here too.
+- **Dashboard UI** — the real-time web view: spawn agents, watch their event timelines, and chat with long-lived ones ([screenshot](spawnly-ui.jpg)).
+
+For the directory-level breakdown (paths, languages, internal packages), see [Repository layout](#repository-layout).
+
+---
+
 ## Architecture
 
 The diagram shows the full flow for a single agent — spawn request → CRD → pod, the sidecar-owned identity/token exchange, agent work, and the chat path.
@@ -23,7 +53,7 @@ The diagram shows the full flow for a single agent — spawn request → CRD →
 
 ### Lifecycle events
 
-Events flow from every component into the registry's in-memory event store, which the dashboard polls. They fall into two groups.
+As an agent moves through its life — spawned, given an identity, doing work, exiting — each component records what happened as a structured **event**: a timestamped record with a `source` (which component emitted it), a `type` (what happened), and a JSON `payload` (the details). Every event is POSTed to the registry, which keeps them per-agent in an append-only store. The dashboard polls that store and renders each agent's events as a live timeline — so the whole system is observable without attaching a debugger or grepping pod logs. Events fall into two groups.
 
 **Platform events** (emitted by the orchestrator, operator, and registry):
 
@@ -41,9 +71,13 @@ Events flow from every component into the registry's in-memory event store, whic
 
 The dashboard's event panel has **per-agent category filters** — click the chips to show/hide Tools, Model, Thinking, Run, Errors, Logs, System, etc. `heartbeat` (the long-lived liveness signal) is classified as **System** and hidden by default so it doesn't clog the timeline.
 
+![The Spawnly dashboard — chatting with a long-lived agent while its event timeline streams below, with per-category filters (System and Other hidden, "showing 22 of 1219").](spawnly-ui.jpg)
+
 ---
 
-## Components
+## Repository layout
+
+Every directory, by language and purpose:
 
 | Path | Language | Description |
 |------|----------|-------------|
@@ -119,8 +153,7 @@ This will:
 - Tail its phase until `Completed` or `Failed`
 - Print the lifecycle event timeline
 
-Open `http://localhost:8090` to watch events, spin up agents, and chat with long-lived ones in real time:
-![](agent-platform-ui.png)
+Open `http://localhost:8090` to watch events, spin up agents, and chat with long-lived ones in real time — as in the [dashboard screenshot](#lifecycle-events) above.
 
 ---
 
