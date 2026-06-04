@@ -3,7 +3,7 @@ title: Spawnly Documentation
 description: Authoring and policy documentation for the Spawnly agent platform.
 template: splash
 hero:
-  tagline: Build, run, and govern short-lived agents with cryptographic identity, scoped tokens, and least-privilege delegation.
+  tagline: Build, run, and govern short-lived and long-lived agents with cryptographic identity, scoped tokens, and least-privilege delegation.
   actions:
     - text: Start with the anatomy
       link: /authoring/00-anatomy

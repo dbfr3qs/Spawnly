@@ -1,77 +1,45 @@
-# Agent Platform POC
+# Spawnly
 
-A proof-of-concept platform for running short-lived AI agents on Kubernetes with cryptographic identity, fine-grained authorisation, and full lifecycle observability.
+A proof-of-concept platform for running AI agents on Kubernetes with cryptographic identity, fine-grained authorisation, and full lifecycle observability. Agents may be **short-lived** (do one job and exit) or **long-lived** (serve until deleted — including chat).
 
-Each agent gets a unique SPIFFE identity (JWT-SVID) issued by SPIRE at pod start. It uses that identity to self-register with the registry, exchange it for an OAuth 2.0 access token via IdentityServer, call a protected sample API, and emit structured lifecycle events throughout — all visible in a real-time web dashboard.
+Each agent pod gets a unique SPIFFE identity (JWT-SVID) issued by SPIRE at start. A per-pod **sidecar** uses that identity to obtain scoped OAuth 2.0 access tokens; the agent self-registers with the registry, calls protected APIs, and emits structured lifecycle events throughout — all visible in a real-time web dashboard.
+
+Two agent flavours run on the same platform contract:
+
+- **A Go worker** (`cmd/agent/`) — the minimal short-lived reference workload.
+- **TypeScript / [Flue](https://www.npmjs.com/package/@flue/runtime) agents** (`agents/`) — built on the `@agent-platform/sdk`. These can chat over an LLM (OpenAI or Anthropic), call tools, and orchestrate child agents over A2A.
 
 ---
 
 ## Architecture
 
-The diagram below shows the complete flow for a single agent, from spawn request through to completion.
+The diagram shows the full flow for a single agent — spawn request → CRD → pod, the sidecar-owned identity/token exchange, agent work, and the chat path.
 
-```
-  +----------------------------------------------------------------------------------------------------+
-  |  Kubernetes (Kind)                                                                                 |
-  |                                                                                                    |
-  |  +----------+     +--------------+   (1) create   +------------------+                           |
-  |  | Dashboard|---->| Orchestrator |--------------->| AgentWorkload    |                           |
-  |  |  :8090   |     |    :8080     |                |    CRD           |                           |
-  |  +----------+     +--------------+                +--------+---------+                           |
-  |   browser SPA      spawn / list                            |                                     |
-  |                                               (2) watched by Operator                            |
-  |                                                            v                                     |
-  |  +----------+     +--------------+                +--------+---------+                           |
-  |  | SpiceDB  | <-- |   Registry   | <-GetTemplate- |    Operator     |                           |
-  |  |  :50051  |     |    :8080     |                | (ctrl-runtime)  |                           |
-  |  +----------+     +--------------+                +--------+---------+                           |
-  |  write rels on     events /                               |                                      |
-  |  self-register     templates                      (3) creates Pod                                |
-  |                        ^                                   v                                     |
-  |                        |             +---------------------+                                     |
-  |                        |             |      Agent Pod      |                                     |
-  |                        |             |    (short-lived)    |                                     |
-  |                        |             |                     |                                     |
-  |                        |             | (4) fetch JWT-SVID <+-- SPIRE CSI volume                 |
-  |                        +-------------|    aud: registry    |                                     |
-  |                                      | (5) self-register   |                                     |
-  |                                      |                     |                                     |
-  |                                      | (6) fetch JWT-SVID <+-- SPIRE CSI volume                 |
-  |                                      |    aud: IS URL      |                                     |
-  |                                      |                     |   +---------------------------+     |
-  |                                      | (7) SVID assertion -+-->| IdentityServer :5001      |     |
-  |                                      |                     |   | client_credentials grant  |     |
-  |                                      |   <-- access_token <+---| issues JWT access_token   |     |
-  |                                      |                     |   +---------------------------+     |
-  |                                      |                     |   +---------------------------+     |
-  |                                      | (8) Bearer token   -+-->| Sample API :8080          |     |
-  |                                      |     POST /task      |   | validates JWT Bearer +    |     |
-  |                                      |     <-- result     <+---| SpiceDB work_on check     |     |
-  |                                      |                     |   +---------------------------+     |
-  |                                      +---------------------+                                     |
-  |                                                                                                    |
-  |  +----------------------------------------------------------------------------------------------+ |
-  |  | SPIRE (spire-system): Server + Agent DaemonSet + OIDC Discovery Provider                   | |
-  |  | Issues JWT-SVIDs to pods automatically via CSI volume mount                                 | |
-  |  +----------------------------------------------------------------------------------------------+ |
-  +----------------------------------------------------------------------------------------------------+
-```
+![Spawnly architecture](docs/architecture.svg)
 
-### Agent lifecycle event sequence
+> Source: [`docs/architecture.d2`](docs/architecture.d2). Regenerate with `d2 docs/architecture.d2 docs/architecture.svg`.
 
-| Step | Source        | Event                      | What happens                                                        |
-|------|---------------|----------------------------|---------------------------------------------------------------------|
-| (1)  | Orchestrator  | `workload_created`         | `POST /spawn` accepted; `AgentWorkload` CRD written to K8s          |
-| (2)  | Operator      | `pod_created`              | Operator reconciles CRD, fetches template, creates agent Pod        |
-| (3)  | Registry      | `registry_record_created`  | Agent self-registers via `POST /v1/agents` with SVID as Bearer token|
-| (4)  | Registry      | `spicedb_relations_written`| Registry writes `tenant:T#agent@agent:X` relationship to SpiceDB   |
-| (5)  | Agent         | `svid_acquired`            | Agent fetches JWT-SVID from SPIRE (audience: `registry`)            |
-| (6)  | Agent         | `registry_self_registered` | Registration confirmed; agent receives its canonical `agentId`      |
-| (7)  | Agent         | `token_requested`          | Agent fetches second SVID (audience: IdentityServer token URL)      |
-| (8)  | Agent         | `token_received`           | `client_credentials` grant completes; OAuth 2.0 access token issued |
-| (9)  | Agent         | `task_dispatched`          | Agent calls `POST /task` on Sample API with Bearer access token     |
-| (10) | Agent         | `task_result`              | Sample API responds; result captured                                |
-| (11) | Agent         | `agent_completed`          | Agent exits cleanly; operator marks CRD `Completed`                 |
+**The key thing the sidecar does:** the agent container never performs the SVID/token dance itself. The `agent-sidecar` fetches the JWT-SVID from SPIRE, exchanges it at IdentityServer for a scoped access token, and exposes a local `/token` endpoint (`:8089`). The agent asks the sidecar for tokens via the SDK's `TokenClient`. This keeps agent code framework- and language-agnostic.
+
+### Lifecycle events
+
+Events flow from every component into the registry's in-memory event store, which the dashboard polls. They fall into two groups.
+
+**Platform events** (emitted by the orchestrator, operator, and registry):
+
+| Source        | Event                       | What happens                                                          |
+|---------------|-----------------------------|----------------------------------------------------------------------|
+| Orchestrator  | `workload_created`          | `POST /spawn` accepted; `AgentWorkload` CRD written to Kubernetes     |
+| Orchestrator  | `workload_spawning`         | Spawn request validated and dispatched                               |
+| Operator      | `pod_created`               | Operator reconciles the CRD, fetches the template, creates the Pod   |
+| Registry      | `registry_record_created`   | Agent self-registers via `POST /v1/agents` (SVID as Bearer token)    |
+| Registry      | `spicedb_relations_written` | Registry writes the agent's SpiceDB relations (omitted if global)    |
+
+**Agent activity events** (the neutral, framework-agnostic vocabulary forwarded by the SDK's `instrumentFlue`, plus sidecar/agent startup):
+
+`svid_fetched` · `started` · `run_start` / `run_end` · `model_turn` · `tool_start` / `tool_end` · `thinking` · `compaction` · `heartbeat` · `log` · `error`
+
+The dashboard's event panel has **per-agent category filters** — click the chips to show/hide Tools, Model, Thinking, Run, Errors, Logs, System, etc. `heartbeat` (the long-lived liveness signal) is classified as **System** and hidden by default so it doesn't clog the timeline.
 
 ---
 
@@ -79,25 +47,29 @@ The diagram below shows the complete flow for a single agent, from spawn request
 
 | Path | Language | Description |
 |------|----------|-------------|
-| `cmd/orchestrator/` | Go | REST API. Accepts `POST /spawn`, creates `AgentWorkload` CRDs, proxies agent/event queries to the registry |
-| `cmd/operator/` | Go | Kubernetes controller (controller-runtime). Watches `AgentWorkload` CRDs and manages the agent Pod lifecycle |
+| `cmd/orchestrator/` | Go | REST API. Accepts `POST /spawn`, creates `AgentWorkload` CRDs, proxies agent/event queries and chat messages to agents/registry |
+| `cmd/operator/` | Go | Kubernetes controller (controller-runtime). Watches `AgentWorkload` CRDs and manages the agent Pod (and Service, for long-lived agents) lifecycle |
 | `cmd/registry/` | Go | In-memory agent and template store. Accepts self-registration, persists lifecycle events, writes SpiceDB relationships |
-| `cmd/agent/` | Go | Short-lived workload. Fetches SVIDs, self-registers, exchanges for an OAuth token, calls the sample API, emits events |
-| `cmd/sample-api/` | Go | Protected HTTP API (`GET /work`, `POST /task`). Validates OAuth 2.0 Bearer tokens and SpiceDB `work_on` permission |
-| `cmd/dashboard/` | Go + HTML | Web UI. Polls agent list and lifecycle events; proxies all requests to the orchestrator |
-| `identityserver/` | C# (.NET) | Duende IdentityServer. Issues OAuth 2.0 access tokens; authenticates agents via JWT-SVID `client_assertion` |
+| `cmd/agent/` | Go | Minimal short-lived reference workload. Gets a token from the sidecar, self-registers, calls the sample API, emits events |
+| `cmd/agent-sidecar/` | Go | Per-pod native sidecar (`:8089`). Fetches the JWT-SVID, exchanges it for scoped OAuth tokens, and serves `/token` to the agent |
+| `cmd/sample-api/` | Go | Protected HTTP API (`GET /work`, `POST /task`). Validates OAuth 2.0 Bearer tokens and a SpiceDB `work_on` check. Deployed as `sample-api`, `sample-api-a`, `sample-api-b`, and `sample-api-global` (the last with `REQUIRE_TENANT=false`) |
+| `cmd/dashboard/` | Go + HTML | Web UI. Polls agents and events, chats with long-lived agents, filters events per-agent; proxies all requests to the orchestrator |
+| `agents/` | TypeScript | Flue agents on the `@agent-platform/sdk`: `weather-monitor` (chat + tool calls), `currency-converter`, `trip-planner`, `parent-agent`, `child-agent`, `global-worker`, and `sdk/` (the SDK itself) |
+| `identityserver/` | C# (.NET) | Duende IdentityServer. Issues OAuth 2.0 access tokens; authenticates the sidecar via JWT-SVID `client_assertion` |
 | `internal/events/` | Go | Shared lifecycle event types and HTTP client used by all Go services |
 | `internal/operator/` | Go | Reconciler logic (separated from `cmd/operator/` for testability) |
 | `internal/registry/` | Go | Registry client interface and mock (used by operator and orchestrator) |
 | `internal/spicedb/` | Go | SpiceDB gRPC client wrapper (schema write, relationship write, permission check) |
 | `internal/spiffe/` | Go | SPIFFE JWT-SVID fetch and validation helpers |
-| `internal/tokenvalidator/` | Go | OAuth 2.0 JWT access-token validator (used by sample API) |
+| `internal/tokenvalidator/` | Go | OAuth 2.0 JWT access-token validator (used by the sample API) |
 | `api/v1alpha1/` | Go | `AgentWorkload` CRD Go types and scheme registration |
 | `deploy/crds/` | YAML | `AgentWorkload` CustomResourceDefinition manifest |
 | `deploy/manifests/` | YAML | Kubernetes Deployment/Service manifests for every component |
+| `deploy/secrets/` | YAML | `ai-provider` Secret (`provider`, `api-key`, `model`) consumed by Flue agents |
 | `deploy/spire/` | YAML | SPIRE Helm values and `ClusterSPIFFEID` for automatic agent identity assignment |
 | `deploy/kind/` | YAML | Kind cluster config (single control-plane + worker node) |
-| `scripts/` | Bash | `bootstrap.sh` (one-shot cluster setup) and `demo.sh` (interactive demo) |
+| `scripts/` | Bash | `bootstrap.sh` (one-shot cluster setup), `seed.sh` (template seeding), `demo.sh` (interactive demo) |
+| `website/` | Astro / Starlight | The authoring docs site (renders `docs/`) |
 
 ---
 
@@ -108,10 +80,13 @@ The diagram below shows the complete flow for a single agent, from spawn request
 - [kubectl](https://kubernetes.io/docs/tasks/tools/)
 - [Helm](https://helm.sh/docs/intro/install/)
 - [jq](https://stedolan.github.io/jq/)
-- Go 1.22+ (for local builds and tests)
+- Go 1.25+ (for local builds and tests)
+- Node.js 20+ and npm (for the TypeScript agents and the docs site)
 - .NET 8 SDK (for IdentityServer local builds only; not required for Docker/Kind)
 
 > If you are using the included devcontainer, all of these are pre-installed.
+
+To use the LLM-backed agents, copy `.env.example` to `.env` and set `AI_PROVIDER` (`openai` or `anthropic`) and `AI_API_KEY`. `make bootstrap` loads these into the `ai-provider` Secret.
 
 ---
 
@@ -125,11 +100,11 @@ make bootstrap
 
 This single command:
 1. Creates a Kind cluster named `agent-platform`
-2. Builds all Docker images (Go services + .NET IdentityServer)
+2. Builds all Docker images (Go services, the TypeScript agents, and the .NET IdentityServer)
 3. Loads images into Kind nodes
 4. Installs SPIRE via Helm and applies the `ClusterSPIFFEID`
-5. Applies the `AgentWorkload` CRD and all Kubernetes manifests
-6. Seeds the `worker` agent template into the registry
+5. Applies the `AgentWorkload` CRD, the `ai-provider` Secret, and all Kubernetes manifests
+6. Seeds **all** agent templates into the registry (via `scripts/seed.sh`, which discovers every co-located `template.json`)
 
 ### 2. Run the interactive demo
 
@@ -144,8 +119,40 @@ This will:
 - Tail its phase until `Completed` or `Failed`
 - Print the lifecycle event timeline
 
-Open `http://localhost:8090` to watch events and spin up agents in real time:
+Open `http://localhost:8090` to watch events, spin up agents, and chat with long-lived ones in real time:
 ![](agent-platform-ui.png)
+
+---
+
+## AI provider & chat
+
+Flue agents read their LLM config from the `ai-provider` Secret, injected by the operator as `AI_PROVIDER` / `AI_API_KEY` / `AI_MODEL`. Both OpenAI (`openai/gpt-4o`, …) and Anthropic (`anthropic/claude-sonnet-4-6`, …) are supported.
+
+**Long-lived agents can be chatted with from the dashboard** (the 💬 Chat button). A message round-trips:
+
+```
+Dashboard → POST /api/agents/{id}/message → Orchestrator → POST http://{id}-svc:8080/agents/chat/{sessionId} → agent
+```
+
+The agent replies with `{ "response": "..." }`. The `weather-monitor` agent, for example, holds a per-session conversation and calls a `get_weather` tool. The equivalent from the CLI:
+
+```bash
+curl -X POST http://localhost:8080/v1/agents/<workloadName>/message \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"What is the weather in Tokyo?","sessionId":"<workloadName>"}'
+```
+
+---
+
+## Tenancy
+
+Agents may be **tenanted** or **global (tenant-less)**, decided by presence of a tenant id rather than a separate mode:
+
+- A template's `requiresTenant` field gates spawning. The orchestrator rejects a tenant-less `POST /spawn` for a template with `requiresTenant: true`.
+- A global agent (no `tenantId`) gets a SPIFFE id without the tenant segment and an empty SpiceDB relation set; `tenantHeader()` in the SDK omits the `X-Tenant-ID` header.
+- The sample API's `REQUIRE_TENANT` env var (default `true`) controls whether it enforces a tenant header. `sample-api-global` runs with `REQUIRE_TENANT=false` so global agents can call it.
+
+See [Defining a Template](docs/authoring/04-defining-a-template.md) for the full schema.
 
 ---
 
@@ -157,7 +164,7 @@ These render as a searchable documentation website (Starlight) under
 [website/README.md](website/README.md). Start with the shared contract, then
 follow the scenario that matches your agent:
 
-- [Anatomy of an Agent](docs/authoring/00-anatomy.md) — the platform contract, injected env, the SDK, and the six-step build/register/spawn path.
+- [Anatomy of an Agent](docs/authoring/00-anatomy.md) — the platform contract, injected env, the SDK, and the build/register/spawn path.
 - [Scenario 1 — Job-and-exit](docs/authoring/01-job-and-exit.md) (Price Reporter): spin up, do one job, exit.
 - [Scenario 2 — Loop-until-stopped](docs/authoring/02-loop-until-stopped.md) (Queue Worker): long-lived, runs until deleted.
 - [Scenario 3 — Parent → child](docs/authoring/03-parent-and-child.md) (Trip Planner & Currency Converter): orchestration over A2A with delegated, attenuated authority.
@@ -172,18 +179,34 @@ follow the scenario that matches your agent:
 make test
 ```
 
-Runs all Go unit tests (`go test ./... -v -count=1`). Tests cover the operator reconciler, registry client, SpiceDB client, and orchestrator HTTP handlers using mocks — no cluster required.
+Runs all Go unit tests (`go test ./... -v -count=1`). Tests cover the operator reconciler, registry client, SpiceDB client, sample API handlers, and orchestrator HTTP handlers using mocks — no cluster required.
 
 ---
 
 ## Manual operations
 
-### Spawn an agent
+### Spawn a tenanted agent
 
 ```bash
 curl -X POST http://localhost:8080/spawn \
   -H 'Content-Type: application/json' \
   -d '{"userId":"user-1","tenantId":"tenant-1","agentType":"worker","task":"hello"}'
+```
+
+### Spawn a global (tenant-less) agent
+
+```bash
+curl -X POST http://localhost:8080/spawn \
+  -H 'Content-Type: application/json' \
+  -d '{"userId":"user-1","agentType":"weather-monitor"}'
+```
+
+### Chat with a long-lived agent
+
+```bash
+curl -X POST http://localhost:8080/v1/agents/<workloadName>/message \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"hello","sessionId":"<workloadName>"}'
 ```
 
 ### List agents
@@ -213,31 +236,43 @@ kubectl logs -l app=identity-server --follow
 kubectl logs -l app=sample-api --follow
 # Agent pods are ephemeral — find them by name:
 kubectl get pods
-kubectl logs <workloadName>-pod
+kubectl logs <workloadName>-pod -c agent          # the agent container
+kubectl logs <workloadName>-pod -c agent-sidecar  # the identity/token sidecar
 ```
 
 ---
 
 ## Rebuilding after code changes
 
-```bash
-# Rebuild a single service image and reload into Kind:
-docker build --target orchestrator -t agent-orchestrator:latest .
-docker exec agent-platform-control-plane ctr -n k8s.io images rm docker.io/library/agent-orchestrator:latest 2>/dev/null || true
-kind load docker-image agent-orchestrator:latest --name agent-platform
-kubectl rollout restart deployment/orchestrator
+The Makefile provides targets for the common loops:
 
-# Or rebuild everything:
+```bash
+# Rebuild + roll a Go service Deployment (orchestrator, registry, dashboard, operator, sample-api):
+make redeploy-dashboard
+
+# Rebuild + load a TypeScript agent image into Kind (then spawn a fresh agent to pick it up):
+make reload-weather-monitor
+
+# Rebuild + load the per-pod sidecar (picked up by newly spawned agents):
+make reload-sidecar
+
+# Re-seed templates into the registry (its store is in-memory and resets on restart):
+make reseed
+
+# Tail a service's logs:
+make logs-orchestrator
+
+# Or rebuild and load everything:
 make kind-load
-kubectl rollout restart deployment/orchestrator deployment/registry deployment/dashboard \
-  deployment/agent-operator deployment/sample-api deployment/identity-server
 ```
 
 ---
 
 ## Key design decisions
 
-- **SPIFFE/SPIRE for workload identity**: every agent pod gets a unique JWT-SVID (`spiffe://cluster.local/agent/<workload-name>`) via the CSI driver — no shared secrets or static API keys.
-- **IdentityServer as the OAuth 2.0 authority**: agents use their SVID as a `client_assertion` (RFC 7523 JWT Bearer) to obtain a scoped access token. IdentityServer validates the assertion against SPIRE's JWKS endpoint.
-- **SpiceDB for authorisation**: the registry writes a `tenant:T#agent@agent:X` relationship when an agent registers. The sample API checks `work_on` permission before serving requests.
-- **Append-only event log**: lifecycle events flow from every component into the registry's in-memory event store. The dashboard polls this store and appends new events to the DOM without replacing existing elements, preserving the expanded/collapsed state of event details.
+- **SPIFFE/SPIRE for workload identity**: every agent pod gets a unique JWT-SVID (`spiffe://cluster.local/...`) via the CSI driver — no shared secrets or static API keys.
+- **A per-pod sidecar owns token exchange**: the `agent-sidecar` turns the SVID into scoped OAuth tokens and serves them at `:8089`, so agent code stays free of identity plumbing and works the same in Go or TypeScript.
+- **IdentityServer as the OAuth 2.0 authority**: the sidecar uses the SVID as a `client_assertion` (RFC 7523 JWT Bearer) to obtain a scoped access token, validated against SPIRE's JWKS endpoint.
+- **SpiceDB for authorisation**: the registry writes the agent's relationships on registration (a `tenant:T#agent@agent:X` relation when tenanted, none when global). The sample API checks `work_on` permission before serving requests.
+- **Tenancy from presence**: an agent is tenanted iff a tenant id is present; the same code path serves global agents by simply omitting the tenant segment, header, and relations.
+- **Append-only, filterable event log**: lifecycle events flow into the registry's in-memory store. The dashboard appends new events to the DOM without replacing existing rows (preserving expanded/collapsed state) and filters them per-agent by category (heartbeat hidden by default).

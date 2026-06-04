@@ -1,0 +1,85 @@
+# Spawnly architecture — source for docs/architecture.svg
+# Regenerate with:  d2 docs/architecture.d2 docs/architecture.svg
+#
+# Key point this diagram gets right (the old ASCII one did not): the agent
+# container does NOT do the SVID/token dance itself — the agent-sidecar fetches
+# the JWT-SVID and exchanges it for an OAuth token, and the agent asks the
+# sidecar for scoped tokens over :8089 via the SDK's TokenClient.
+
+direction: down
+
+dashboard: "Dashboard\nbrowser SPA · :8090" {
+  shape: rectangle
+}
+
+k8s: "Kubernetes (Kind)" {
+  style.stroke-dash: 4
+  style.font-size: 20
+
+  orchestrator: "Orchestrator\n:8080\nspawn / list / chat" {
+    shape: rectangle
+  }
+  operator: "Operator\ncontroller-runtime" {
+    shape: rectangle
+  }
+  crd: "AgentWorkload\nCRD" {
+    shape: page
+  }
+  registry: "Registry\n:8080\nevents · templates" {
+    shape: rectangle
+  }
+  spicedb: "SpiceDB\n:50051" {
+    shape: cylinder
+  }
+  idsrv: "IdentityServer\n:5001\nOAuth 2.0 authority" {
+    shape: rectangle
+  }
+  sampleapi: "Sample API\n:8080\n/work · /task" {
+    shape: rectangle
+  }
+
+  pod: "Agent Pod" {
+    style.stroke-dash: 2
+    sidecar: "agent-sidecar\n:8089\nSVID → token" {
+      shape: rectangle
+      style.fill: "#eef6ff"
+    }
+    agent: "agent\nGo worker  or  TS/Flue + LLM" {
+      shape: rectangle
+      style.fill: "#eefcef"
+    }
+  }
+
+  spire: "SPIRE (spire-system)" {
+    style.stroke-dash: 4
+    server: "Server"
+    ds: "Agent DaemonSet"
+    oidc: "OIDC Discovery"
+  }
+
+  # ---- control plane: spawn → CRD → pod ----
+  orchestrator -> crd: "(1) create"
+  crd -> operator: "(2) watched"
+  operator -> registry: "GetTemplate"
+  operator -> pod: "(3) create Pod\n(+ Service if long-lived)"
+
+  # ---- identity: sidecar owns the SVID/token exchange ----
+  spire.ds -> pod.sidecar: "(4) JWT-SVID\nvia CSI volume"
+  pod.sidecar -> idsrv: "(5) SVID assertion →\naccess_token"
+  idsrv -> spire.oidc: "validate (JWKS)"
+  pod.agent -> pod.sidecar: "(6) GET /token\n(SDK TokenClient)"
+
+  # ---- agent work: register, authorize, call API ----
+  pod.agent -> registry: "(7) self-register\n+ lifecycle events"
+  registry -> spicedb: "(8) write relations\n(omitted if global)"
+  pod.agent -> sampleapi: "(9) Bearer token →\n/work, /task"
+  sampleapi -> spicedb: "work_on check"
+
+  # ---- chat path (long-lived agents only) ----
+  orchestrator -> pod: "chat: POST /agents/chat/:session" {
+    style.stroke: "#7b5cff"
+    style.stroke-dash: 3
+  }
+}
+
+dashboard -> k8s.orchestrator: "spawn / list / chat"
