@@ -114,7 +114,7 @@ definition tenant {
 `TokenClient`) for a token carrying the scope the API requires:
 
 ```ts
-import { TokenClient } from '@agent-platform/sdk';
+import { TokenClient } from '@spawnly/sdk';
 
 const tokens = new TokenClient();
 const accessToken = await tokens.getToken('sample-api-a:read');

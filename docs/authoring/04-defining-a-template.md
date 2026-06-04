@@ -247,7 +247,7 @@ What the platform expects of a template's `image`:
 
 - Built from a [`Dockerfile`](../../Dockerfile) target and loaded into Kind
   (`make kind-load`).
-- Node agents bundle the compiled `@agent-platform/sdk` from the `build-sdk`
+- Node agents bundle the compiled `@spawnly/sdk` from the `build-sdk`
   stage (see the `weather-monitor` / `parent-agent` / `child-agent` stages).
 - **Long-lived** agents must listen on **port 8080** — that's the `targetPort`
   of the generated `<AGENT_ID>-svc` Service.

@@ -53,7 +53,7 @@ FROM gcr.io/distroless/static-debian12 AS agent-sidecar
 COPY --from=build-agent-sidecar /bin/agent-sidecar /
 ENTRYPOINT ["/agent-sidecar"]
 
-# Shared SDK build — compiles @agent-platform/sdk from source so the dist is
+# Shared SDK build — compiles @spawnly/sdk from source so the dist is
 # reproducible (agents/*/dist is gitignored). Consumed by every node agent image.
 FROM node:22-alpine AS build-sdk
 WORKDIR /sdk
@@ -76,8 +76,8 @@ FROM node:22-slim AS weather-monitor
 WORKDIR /app
 COPY --from=build-weather-monitor-node /app/dist ./dist
 COPY --from=build-weather-monitor-node /app/node_modules ./node_modules
-COPY agents/sdk/package.json ./node_modules/@agent-platform/sdk/package.json
-COPY --from=build-sdk /sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
+COPY agents/sdk/package.json ./node_modules/@spawnly/sdk/package.json
+COPY --from=build-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
 ENV PORT=8080
 EXPOSE 8080
 CMD ["node", "dist/server.mjs"]
@@ -97,8 +97,8 @@ FROM node:22-slim AS child-agent
 WORKDIR /app
 COPY --from=build-child-agent-node /app/dist ./dist
 COPY --from=build-child-agent-node /app/node_modules ./node_modules
-COPY agents/sdk/package.json ./node_modules/@agent-platform/sdk/package.json
-COPY --from=build-sdk /sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
+COPY agents/sdk/package.json ./node_modules/@spawnly/sdk/package.json
+COPY --from=build-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
 EXPOSE 8080
 CMD ["node", "dist/index.js"]
 
@@ -117,8 +117,8 @@ FROM node:22-slim AS parent-agent
 WORKDIR /app
 COPY --from=build-parent-agent-node /app/dist ./dist
 COPY --from=build-parent-agent-node /app/node_modules ./node_modules
-COPY agents/sdk/package.json ./node_modules/@agent-platform/sdk/package.json
-COPY --from=build-sdk /sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
+COPY agents/sdk/package.json ./node_modules/@spawnly/sdk/package.json
+COPY --from=build-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
 CMD ["node", "dist/index.js"]
 
 # Currency-converter Node.js/Flue build
@@ -136,8 +136,8 @@ FROM node:22-slim AS currency-converter
 WORKDIR /app
 COPY --from=build-currency-converter-node /app/dist ./dist
 COPY --from=build-currency-converter-node /app/node_modules ./node_modules
-COPY agents/sdk/package.json ./node_modules/@agent-platform/sdk/package.json
-COPY --from=build-sdk /sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
+COPY agents/sdk/package.json ./node_modules/@spawnly/sdk/package.json
+COPY --from=build-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
 EXPOSE 8080
 CMD ["node", "dist/index.js"]
 
@@ -156,8 +156,8 @@ FROM node:22-slim AS trip-planner
 WORKDIR /app
 COPY --from=build-trip-planner-node /app/dist ./dist
 COPY --from=build-trip-planner-node /app/node_modules ./node_modules
-COPY agents/sdk/package.json ./node_modules/@agent-platform/sdk/package.json
-COPY --from=build-sdk /sdk/dist/ ./node_modules/@agent-platform/sdk/dist/
+COPY agents/sdk/package.json ./node_modules/@spawnly/sdk/package.json
+COPY --from=build-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
 CMD ["node", "dist/index.js"]
 
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build-identity-server

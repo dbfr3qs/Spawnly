@@ -6,7 +6,7 @@ import {
   resolveModel,
 } from "@flue/runtime/internal";
 import { local } from "@flue/runtime/node";
-import { postEvent, instrumentFlue, promptTimeoutSignal } from "@agent-platform/sdk";
+import { postEvent, instrumentFlue, promptTimeoutSignal } from "@spawnly/sdk";
 
 export const triggers = { webhook: true };
 

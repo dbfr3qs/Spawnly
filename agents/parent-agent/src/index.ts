@@ -8,7 +8,7 @@ import {
   resolveModel,
 } from '@flue/runtime/internal';
 import { local } from '@flue/runtime/node';
-import { postEvent, instrumentFlue, promptTimeoutSignal, TokenClient, tenantHeader } from '@agent-platform/sdk';
+import { postEvent, instrumentFlue, promptTimeoutSignal, TokenClient, tenantHeader } from '@spawnly/sdk';
 
 const agentId       = process.env.AGENT_ID        ?? 'unknown';
 const registryUrl    = process.env.REGISTRY_URL    ?? 'http://registry:8080';
@@ -29,7 +29,7 @@ const DELEGATION_METADATA_KEY = 'delegationToken';
 configureProvider(aiProvider, { apiKey: aiApiKey });
 
 // Sidecar token client (handles the SVID-not-ready retry and the three /token
-// modes). See @agent-platform/sdk.
+// modes). See @spawnly/sdk.
 const tokens = new TokenClient(sidecarUrl);
 
 // The delegation token minted in main() and passed to the child via A2A.

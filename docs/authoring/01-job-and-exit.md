@@ -29,7 +29,7 @@ beginning and end.
 A single `main()` that runs top to bottom and then returns. No server, no loop.
 
 ```ts
-import { postEvent, TokenClient } from '@agent-platform/sdk';
+import { postEvent, TokenClient } from '@spawnly/sdk';
 
 const agentId     = process.env.AGENT_ID     ?? 'unknown';
 const registryUrl = process.env.REGISTRY_URL ?? 'http://registry:8080';

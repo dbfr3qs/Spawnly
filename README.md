@@ -7,7 +7,7 @@ Each agent pod gets a unique SPIFFE identity (JWT-SVID) issued by SPIRE at start
 Two agent flavours run on the same platform contract:
 
 - **A Go worker** (`cmd/agent/`) — the minimal short-lived reference workload.
-- **TypeScript / [Flue](https://www.npmjs.com/package/@flue/runtime) agents** (`agents/`) — built on the `@agent-platform/sdk`. These can chat over an LLM (OpenAI or Anthropic), call tools, and orchestrate child agents over A2A.
+- **TypeScript / [Flue](https://www.npmjs.com/package/@flue/runtime) agents** (`agents/`) — built on the `@spawnly/sdk`. These can chat over an LLM (OpenAI or Anthropic), call tools, and orchestrate child agents over A2A.
 
 ---
 
@@ -88,7 +88,7 @@ Every directory, by language and purpose:
 | `cmd/agent-sidecar/` | Go | Per-pod native sidecar (`:8089`). Fetches the JWT-SVID, exchanges it for scoped OAuth tokens, and serves `/token` to the agent |
 | `cmd/sample-api/` | Go | Protected HTTP API (`GET /work`, `POST /task`). Validates OAuth 2.0 Bearer tokens and a SpiceDB `work_on` check. Deployed as `sample-api`, `sample-api-a`, `sample-api-b`, and `sample-api-global` (the last with `REQUIRE_TENANT=false`) |
 | `cmd/dashboard/` | Go + HTML | Web UI. Polls agents and events, chats with long-lived agents, filters events per-agent; proxies all requests to the orchestrator |
-| `agents/` | TypeScript | Flue agents on the `@agent-platform/sdk`: `weather-monitor` (chat + tool calls), `currency-converter`, `trip-planner`, `parent-agent`, `child-agent`, `global-worker`, and `sdk/` (the SDK itself) |
+| `agents/` | TypeScript | Flue agents on the `@spawnly/sdk`: `weather-monitor` (chat + tool calls), `currency-converter`, `trip-planner`, `parent-agent`, `child-agent`, `global-worker`, and `sdk/` (the SDK itself) |
 | `identityserver/` | C# (.NET) | Duende IdentityServer. Issues OAuth 2.0 access tokens; authenticates the sidecar via JWT-SVID `client_assertion` |
 | `internal/events/` | Go | Shared lifecycle event types and HTTP client used by all Go services |
 | `internal/operator/` | Go | Reconciler logic (separated from `cmd/operator/` for testability) |

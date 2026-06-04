@@ -34,7 +34,7 @@ Your code never speaks to SPIRE or IdentityServer directly. To call a protected
 API you ask the sidecar for a scoped token via the SDK's `TokenClient`:
 
 ```ts
-import { TokenClient } from '@agent-platform/sdk';
+import { TokenClient } from '@spawnly/sdk';
 
 const tokens = new TokenClient(); // defaults to http://localhost:8089
 const accessToken = await tokens.getToken('sample-api-a:read');
@@ -66,7 +66,7 @@ Read them with `process.env`:
 
 ## The SDK
 
-Shared helpers live in [`@agent-platform/sdk`](../../agents/sdk/src/index.ts). The
+Shared helpers live in [`@spawnly/sdk`](../../agents/sdk/src/index.ts). The
 ones you will use:
 
 - **`TokenClient`** — wraps the sidecar's `/token` endpoint (the platform's
@@ -99,7 +99,7 @@ the scenario is `runtimeSpec.lifecycle` in the template** (see below).
 
 ### 1. Write the agent under `agents/<name>/`
 
-A TypeScript project depending on `@agent-platform/sdk` and `@flue/runtime`.
+A TypeScript project depending on `@spawnly/sdk` and `@flue/runtime`.
 Use one of the reference agents as a starting skeleton:
 
 | Scenario | Reference agent | Shape |
