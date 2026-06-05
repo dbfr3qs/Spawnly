@@ -47,8 +47,6 @@ The diagram shows the full flow for a single agent — spawn request → CRD →
 
 ![Spawnly architecture](docs/architecture.svg)
 
-> Source: [`docs/architecture.d2`](docs/architecture.d2). Regenerate with `d2 docs/architecture.d2 docs/architecture.svg`.
-
 **The key thing the sidecar does:** the agent container never performs the SVID/registration/token dance itself. The `agent-sidecar` fetches the JWT-SVID from SPIRE, **self-registers the agent** with the agent registry (SVID as Bearer), exchanges the SVID at IdentityServer for a scoped access token, and exposes a local `/token` endpoint (`:8089`). The agent asks the sidecar for tokens via the SDK's `TokenClient`. This keeps agent code framework- and language-agnostic.
 
 IdentityServer doesn't mint a token blindly: during the grant it **looks up the agent registry to confirm the agent exists and is `active`** (`AgentRegistryValidator`), so a deregistered or unknown agent can't obtain credentials.
@@ -310,5 +308,5 @@ make kind-load
 - **A per-pod sidecar owns registration and token exchange**: the `agent-sidecar` self-registers the agent with the agent registry and turns the SVID into scoped OAuth tokens served at `:8089`, so agent code stays free of identity plumbing and works the same in Go or TypeScript.
 - **IdentityServer as the OAuth 2.0 authority**: the sidecar uses the SVID as a `client_assertion` (RFC 7523 JWT Bearer) to obtain a scoped access token, validated against SPIRE's JWKS endpoint — and IdentityServer additionally checks the agent registry that the agent is `active` before issuing.
 - **SpiceDB for authorisation**: the registry writes the agent's relationships on registration (a `tenant:T#agent@agent:X` relation when tenanted, none when global). The sample API checks `work_on` permission before serving requests.
-- **Tenancy from presence**: an agent is tenanted iff a tenant id is present; the same code path serves global agents by simply omitting the tenant segment, header, and relations.
+- **Tenancy from presence**: an agent is tenanted if a tenant id is present; the same code path serves global agents by simply omitting the tenant segment, header, and relations.
 - **Append-only, filterable event log**: lifecycle events flow into the registry's in-memory store. The dashboard appends new events to the DOM without replacing existing rows (preserving expanded/collapsed state) and filters them per-agent by category (heartbeat hidden by default).
