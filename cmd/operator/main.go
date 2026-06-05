@@ -14,10 +14,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	agentv1alpha1 "github.com/agent-platform/poc/api/v1alpha1"
-	"github.com/agent-platform/poc/internal/events"
-	"github.com/agent-platform/poc/internal/operator"
-	"github.com/agent-platform/poc/internal/registry"
+	agentv1alpha1 "github.com/spawnly/poc/api/v1alpha1"
+	"github.com/spawnly/poc/internal/events"
+	"github.com/spawnly/poc/internal/operator"
+	"github.com/spawnly/poc/internal/registry"
 )
 
 var (

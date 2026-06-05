@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/agent-platform/poc/internal/registry"
+	"github.com/spawnly/poc/internal/registry"
 )
 
 func TestHTTPClientGetTemplate(t *testing.T) {

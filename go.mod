@@ -1,4 +1,4 @@
-module github.com/agent-platform/poc
+module github.com/spawnly/poc
 
 go 1.25.0
 

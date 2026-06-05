@@ -13,10 +13,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/agent-platform/poc/internal/events"
-	"github.com/agent-platform/poc/internal/registry"
-	"github.com/agent-platform/poc/internal/spicedb"
-	"github.com/agent-platform/poc/internal/spiffe"
+	"github.com/spawnly/poc/internal/events"
+	"github.com/spawnly/poc/internal/registry"
+	"github.com/spawnly/poc/internal/spicedb"
+	"github.com/spawnly/poc/internal/spiffe"
 )
 
 type store struct {

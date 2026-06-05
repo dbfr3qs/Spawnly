@@ -20,9 +20,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	agentv1alpha1 "github.com/agent-platform/poc/api/v1alpha1"
-	"github.com/agent-platform/poc/internal/events"
-	"github.com/agent-platform/poc/internal/registry"
+	agentv1alpha1 "github.com/spawnly/poc/api/v1alpha1"
+	"github.com/spawnly/poc/internal/events"
+	"github.com/spawnly/poc/internal/registry"
 )
 
 const finalizer = "agent-platform.io/cleanup"

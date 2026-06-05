@@ -18,8 +18,8 @@ import (
 	"github.com/spiffe/go-spiffe/v2/svid/jwtsvid"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
 
-	"github.com/agent-platform/poc/internal/events"
-	"github.com/agent-platform/poc/internal/registry"
+	"github.com/spawnly/poc/internal/events"
+	"github.com/spawnly/poc/internal/registry"
 )
 
 type config struct {

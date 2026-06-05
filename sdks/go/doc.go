@@ -2,7 +2,7 @@
 //
 // It is a per-language adapter over the platform's NEUTRAL HTTP contract and
 // nothing more. It depends only on the Go standard library and never imports
-// any platform package (e.g. github.com/agent-platform/poc) — dependencies
+// any platform package (e.g. github.com/spawnly/poc) — dependencies
 // point one way, from this adapter toward the neutral contract, never the
 // reverse. The few wire shapes it needs (the token response and the event
 // envelope) are replicated locally rather than imported.
