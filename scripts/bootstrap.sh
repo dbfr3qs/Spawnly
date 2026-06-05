@@ -54,14 +54,31 @@ fi
 # ── Images ───────────────────────────────────────────────────────────────────
 
 echo "==> Building Docker images..."
+# --load forces Buildx to place the result in the local Docker image store. Some
+# setups default to a docker-container builder that only writes to its own build
+# cache, so a plain `docker build` "succeeds" but the tag never lands locally and
+# `kind load docker-image` later fails with "not present locally". After each
+# build we assert the tag is actually present, so a silent miss fails loudly here
+# with a fix hint rather than at the load step.
+build_image() {
+  local target="$1" tag="$2"
+  docker build --load --target "$target" -t "$tag" .
+  if ! docker image inspect "$tag" >/dev/null 2>&1; then
+    echo "ERROR: '$tag' built but not found in the local Docker image store." >&2
+    echo "       Your active Buildx builder likely doesn't load into the image store." >&2
+    echo "       Fix: docker buildx use desktop-linux   (or: docker buildx use default)" >&2
+    exit 1
+  fi
+}
+
 for svc in operator orchestrator registry sample-api go-worker dashboard child-agent parent-agent; do
-  docker build --target "$svc" -t "agent-$svc:$IMAGE_TAG" .
+  build_image "$svc" "agent-$svc:$IMAGE_TAG"
 done
 # agent-sidecar is special: its stage is `agent-sidecar` and the operator
 # references the image as `agent-sidecar:latest`, not `agent-agent-sidecar`.
-docker build --target agent-sidecar -t "agent-sidecar:$IMAGE_TAG" .
-docker build --target identity-server -t agent-identity-server:$IMAGE_TAG .
-docker build --target weather-monitor -t "agent-weather-monitor:$IMAGE_TAG" .
+build_image agent-sidecar "agent-sidecar:$IMAGE_TAG"
+build_image identity-server "agent-identity-server:$IMAGE_TAG"
+build_image weather-monitor "agent-weather-monitor:$IMAGE_TAG"
 
 echo "==> Loading images into Kind..."
 for svc in operator orchestrator registry sample-api go-worker dashboard identity-server child-agent parent-agent; do
