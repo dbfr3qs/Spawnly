@@ -131,6 +131,9 @@ kubectl apply -f deploy/manifests/spicedb.yaml
 kubectl apply -f deploy/manifests/registry.yaml
 kubectl apply -f deploy/manifests/identityserver.yaml
 kubectl apply -f deploy/manifests/sample-api.yaml
+kubectl apply -f deploy/manifests/sample-api-a.yaml
+kubectl apply -f deploy/manifests/sample-api-b.yaml
+kubectl apply -f deploy/manifests/sample-api-global.yaml
 kubectl apply -f deploy/manifests/operator.yaml
 kubectl apply -f deploy/manifests/orchestrator.yaml
 kubectl apply -f deploy/manifests/dashboard.yaml
@@ -140,6 +143,9 @@ kubectl wait --for=condition=ready pod -l app=spicedb --timeout=120s
 kubectl wait --for=condition=available deployment/registry --timeout=120s
 kubectl wait --for=condition=available deployment/identity-server --timeout=120s
 kubectl wait --for=condition=available deployment/sample-api --timeout=120s
+kubectl wait --for=condition=available deployment/sample-api-a --timeout=120s
+kubectl wait --for=condition=available deployment/sample-api-b --timeout=120s
+kubectl wait --for=condition=available deployment/sample-api-global --timeout=120s
 kubectl wait --for=condition=available deployment/agent-operator --timeout=120s
 kubectl wait --for=condition=available deployment/orchestrator --timeout=120s
 kubectl wait --for=condition=available deployment/dashboard --timeout=120s
