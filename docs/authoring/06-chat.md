@@ -104,7 +104,7 @@ reply as `{ response }`.
 ## Non-Flue agents
 
 A non-Flue agent must implement `POST /agents/chat/:sessionId` itself. Note that
-the Go worker ([`cmd/agent`](../../cmd/agent)) is short-lived and serves no chat
+the Go worker ([`agents/go-worker`](../../agents/go-worker)) is short-lived and serves no chat
 route, and the A2A agents (e.g. `currency-converter`) serve JSON-RPC at `/`
 rather than the chat path. So **chat currently works against the Flue agents
 only**; any other long-lived agent would need to add the endpoint.

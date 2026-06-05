@@ -3,16 +3,16 @@
 # Run after redeploying the registry (which resets its in-memory store).
 #
 # Templates are co-located with their agents as `template.json` files
-# (agents/<type>/template.json, plus cmd/agent/template.json for the worker).
+# (agents/<type>/template.json, including the worker at agents/go-worker/).
 # To add a new agent type, drop a template.json next to it — no edits here.
 set -euo pipefail
 
 # Resolve globs relative to the repo root regardless of where we're invoked from.
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-# Discover every co-located template. The globs are depth-bounded
-# (agents/<type>/ and cmd/agent/) so node_modules/dist can't match.
-templates=(agents/*/template.json cmd/agent/template.json)
+# Discover every co-located template. The glob is depth-bounded
+# (agents/<type>/) so node_modules/dist can't match.
+templates=(agents/*/template.json)
 
 # Filter to files that actually exist (an unmatched glob stays literal).
 found=()

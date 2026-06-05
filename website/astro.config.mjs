@@ -38,14 +38,6 @@ export default defineConfig({
             { slug: 'authoring/06-chat' },
           ],
         },
-        {
-          label: 'Design notes',
-          items: [
-            { slug: 'delegation-design' },
-            { slug: 'delegation-implementation-plan' },
-            { slug: 'design-spawn-time-child-spawn-policy' },
-          ],
-        },
       ],
     }),
   ],

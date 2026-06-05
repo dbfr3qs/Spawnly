@@ -1,5 +1,9 @@
 FROM golang:1.25-alpine AS builder
 WORKDIR /app
+# GOWORK=off keeps the platform service builds (operator, orchestrator,
+# registry, sample-api, dashboard, agent-sidecar) in pure root-module mode,
+# unaffected by the go.work file that `COPY . .` pulls into the image.
+ENV GOWORK=off
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
@@ -16,8 +20,19 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/registry ./cmd/registry
 FROM builder AS build-sample-api
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/sample-api ./cmd/sample-api
 
-FROM builder AS build-agent
-RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/agent ./cmd/agent
+# go-worker is a separate Go module (github.com/spawnly/go-worker) with a
+# replace directive pointing at ../../sdks/go, so it builds in module mode
+# from its own checkout rather than the root builder stage.
+FROM golang:1.25-alpine AS build-go-worker
+WORKDIR /src
+COPY sdks/go/ ./sdks/go/
+COPY agents/go-worker/ ./agents/go-worker/
+WORKDIR /src/agents/go-worker
+RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/go-worker .
+
+FROM gcr.io/distroless/static-debian12 AS go-worker
+COPY --from=build-go-worker /bin/go-worker /
+ENTRYPOINT ["/go-worker"]
 
 FROM gcr.io/distroless/static-debian12 AS operator
 COPY --from=build-operator /bin/operator /
@@ -35,10 +50,6 @@ FROM gcr.io/distroless/static-debian12 AS sample-api
 COPY --from=build-sample-api /bin/sample-api /
 ENTRYPOINT ["/sample-api"]
 
-FROM gcr.io/distroless/static-debian12 AS agent
-COPY --from=build-agent /bin/agent /
-ENTRYPOINT ["/agent"]
-
 FROM builder AS build-dashboard
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/dashboard ./cmd/dashboard
 
@@ -55,16 +66,18 @@ ENTRYPOINT ["/agent-sidecar"]
 
 # Shared SDK build — compiles @spawnly/sdk from source so the dist is
 # reproducible (agents/*/dist is gitignored). Consumed by every node agent image.
-FROM node:22-alpine AS build-sdk
+FROM node:22-alpine AS build-ts-sdk
 WORKDIR /sdk
-COPY agents/sdk/package.json agents/sdk/tsconfig.json ./
-COPY agents/sdk/src ./src
+COPY sdks/typescript/package.json sdks/typescript/tsconfig.json ./
+COPY sdks/typescript/src ./src
 RUN npm install --no-audit --no-fund && npm run build
 
 # Weather-monitor Node.js/Flue build
 FROM node:22-alpine AS build-weather-monitor-node
-WORKDIR /app
-COPY agents/sdk/ /sdk/
+# WORKDIR mirrors the host layout (agents/<name> two levels below sdks/typescript)
+# so the lockfile's file:../../sdks/typescript link resolves identically here.
+WORKDIR /src/agents/app
+COPY sdks/typescript/ /src/sdks/typescript/
 COPY agents/weather-monitor/package*.json ./
 RUN npm ci
 COPY agents/weather-monitor/.flue ./.flue
@@ -74,18 +87,20 @@ RUN npm run build
 # Final weather-monitor image
 FROM node:22-slim AS weather-monitor
 WORKDIR /app
-COPY --from=build-weather-monitor-node /app/dist ./dist
-COPY --from=build-weather-monitor-node /app/node_modules ./node_modules
-COPY agents/sdk/package.json ./node_modules/@spawnly/sdk/package.json
-COPY --from=build-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
+COPY --from=build-weather-monitor-node /src/agents/app/dist ./dist
+COPY --from=build-weather-monitor-node /src/agents/app/node_modules ./node_modules
+COPY sdks/typescript/package.json ./node_modules/@spawnly/sdk/package.json
+COPY --from=build-ts-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
 ENV PORT=8080
 EXPOSE 8080
 CMD ["node", "dist/server.mjs"]
 
 # Child-agent Node.js/Flue build
 FROM node:22-alpine AS build-child-agent-node
-WORKDIR /app
-COPY agents/sdk/ /sdk/
+# WORKDIR mirrors the host layout (agents/<name> two levels below sdks/typescript)
+# so the lockfile's file:../../sdks/typescript link resolves identically here.
+WORKDIR /src/agents/app
+COPY sdks/typescript/ /src/sdks/typescript/
 COPY agents/child-agent/package*.json ./
 RUN npm ci
 COPY agents/child-agent/src ./src
@@ -95,17 +110,19 @@ RUN npm run build
 # Final child-agent image
 FROM node:22-slim AS child-agent
 WORKDIR /app
-COPY --from=build-child-agent-node /app/dist ./dist
-COPY --from=build-child-agent-node /app/node_modules ./node_modules
-COPY agents/sdk/package.json ./node_modules/@spawnly/sdk/package.json
-COPY --from=build-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
+COPY --from=build-child-agent-node /src/agents/app/dist ./dist
+COPY --from=build-child-agent-node /src/agents/app/node_modules ./node_modules
+COPY sdks/typescript/package.json ./node_modules/@spawnly/sdk/package.json
+COPY --from=build-ts-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
 EXPOSE 8080
 CMD ["node", "dist/index.js"]
 
 # Parent-agent Node.js/Flue build
 FROM node:22-alpine AS build-parent-agent-node
-WORKDIR /app
-COPY agents/sdk/ /sdk/
+# WORKDIR mirrors the host layout (agents/<name> two levels below sdks/typescript)
+# so the lockfile's file:../../sdks/typescript link resolves identically here.
+WORKDIR /src/agents/app
+COPY sdks/typescript/ /src/sdks/typescript/
 COPY agents/parent-agent/package*.json ./
 RUN npm ci
 COPY agents/parent-agent/src ./src
@@ -115,16 +132,18 @@ RUN npm run build
 # Final parent-agent image
 FROM node:22-slim AS parent-agent
 WORKDIR /app
-COPY --from=build-parent-agent-node /app/dist ./dist
-COPY --from=build-parent-agent-node /app/node_modules ./node_modules
-COPY agents/sdk/package.json ./node_modules/@spawnly/sdk/package.json
-COPY --from=build-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
+COPY --from=build-parent-agent-node /src/agents/app/dist ./dist
+COPY --from=build-parent-agent-node /src/agents/app/node_modules ./node_modules
+COPY sdks/typescript/package.json ./node_modules/@spawnly/sdk/package.json
+COPY --from=build-ts-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
 CMD ["node", "dist/index.js"]
 
 # Currency-converter Node.js/Flue build
 FROM node:22-alpine AS build-currency-converter-node
-WORKDIR /app
-COPY agents/sdk/ /sdk/
+# WORKDIR mirrors the host layout (agents/<name> two levels below sdks/typescript)
+# so the lockfile's file:../../sdks/typescript link resolves identically here.
+WORKDIR /src/agents/app
+COPY sdks/typescript/ /src/sdks/typescript/
 COPY agents/currency-converter/package*.json ./
 RUN npm ci
 COPY agents/currency-converter/src ./src
@@ -134,17 +153,19 @@ RUN npm run build
 # Final currency-converter image
 FROM node:22-slim AS currency-converter
 WORKDIR /app
-COPY --from=build-currency-converter-node /app/dist ./dist
-COPY --from=build-currency-converter-node /app/node_modules ./node_modules
-COPY agents/sdk/package.json ./node_modules/@spawnly/sdk/package.json
-COPY --from=build-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
+COPY --from=build-currency-converter-node /src/agents/app/dist ./dist
+COPY --from=build-currency-converter-node /src/agents/app/node_modules ./node_modules
+COPY sdks/typescript/package.json ./node_modules/@spawnly/sdk/package.json
+COPY --from=build-ts-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
 EXPOSE 8080
 CMD ["node", "dist/index.js"]
 
 # Trip-planner Node.js/Flue build
 FROM node:22-alpine AS build-trip-planner-node
-WORKDIR /app
-COPY agents/sdk/ /sdk/
+# WORKDIR mirrors the host layout (agents/<name> two levels below sdks/typescript)
+# so the lockfile's file:../../sdks/typescript link resolves identically here.
+WORKDIR /src/agents/app
+COPY sdks/typescript/ /src/sdks/typescript/
 COPY agents/trip-planner/package*.json ./
 RUN npm ci
 COPY agents/trip-planner/src ./src
@@ -154,10 +175,10 @@ RUN npm run build
 # Final trip-planner image
 FROM node:22-slim AS trip-planner
 WORKDIR /app
-COPY --from=build-trip-planner-node /app/dist ./dist
-COPY --from=build-trip-planner-node /app/node_modules ./node_modules
-COPY agents/sdk/package.json ./node_modules/@spawnly/sdk/package.json
-COPY --from=build-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
+COPY --from=build-trip-planner-node /src/agents/app/dist ./dist
+COPY --from=build-trip-planner-node /src/agents/app/node_modules ./node_modules
+COPY sdks/typescript/package.json ./node_modules/@spawnly/sdk/package.json
+COPY --from=build-ts-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
 CMD ["node", "dist/index.js"]
 
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build-identity-server

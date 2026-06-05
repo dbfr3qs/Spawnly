@@ -2,9 +2,12 @@
 MODULE        := github.com/agent-platform/poc
 KIND_CLUSTER  := agent-platform
 IMAGE_TAG     := latest
-GO_SERVICES   := operator orchestrator registry sample-api agent agent-sidecar dashboard
+GO_SERVICES   := operator orchestrator registry sample-api agent-sidecar dashboard
+# Separate-module Go agents: their own go.mod (not the root module), so they
+# build via `cd agents/<name> && go build .` and map to image agent-<name>.
+GO_MODULE_AGENTS := go-worker
 NODE_AGENTS   := child-agent parent-agent currency-converter trip-planner
-SERVICES      := $(GO_SERVICES) $(NODE_AGENTS)
+SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS)
 
 .PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward redeploy-% reload-% reload-sidecar logs-% reseed
 
@@ -12,6 +15,10 @@ build:
 	@for svc in $(GO_SERVICES); do \
 		echo "Building $$svc..."; \
 		go build -o bin/$$svc ./cmd/$$svc; \
+	done
+	@for svc in $(GO_MODULE_AGENTS); do \
+		echo "Building $$svc..."; \
+		(cd agents/$$svc && go build -o ../../bin/$$svc .); \
 	done
 
 test:

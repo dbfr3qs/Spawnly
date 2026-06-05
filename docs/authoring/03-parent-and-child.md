@@ -12,9 +12,6 @@ description: Agent-to-agent orchestration over A2A, with delegated and attenuate
 > **Reference implementations:** [`agents/parent-agent`](../../agents/parent-agent)
 > and [`agents/child-agent`](../../agents/child-agent), whose templates live beside
 > them as `template.json` (seeded by [`scripts/seed.sh`](../../scripts/seed.sh)).
->
-> **Background:** [delegation-design.md](../delegation-design.md) explains the
-> RFC 8693 token-exchange model this scenario relies on.
 
 ## The personalities
 
@@ -248,8 +245,7 @@ the scope-flow fields:
    a token-exchange, the orchestrator checks the parent template's
    `allowedChildTypes` at spawn time and rejects (`403`) a child type the parent
    doesn't list — so a parent that hands off to a child must declare it, exactly
-   as the delegation flow already does. See
-   [Design note: spawn-time child-spawn policy](../design-spawn-time-child-spawn-policy.md).
+   as the delegation flow already does.
 
 ## What this scenario teaches
 

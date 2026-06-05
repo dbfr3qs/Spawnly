@@ -18,7 +18,7 @@ func workerTemplate() registry.AgentTemplate {
 	return registry.AgentTemplate{
 		AgentType: "worker", Version: "1.0.0", Status: "active",
 		Runtime: registry.RuntimeSpec{
-			Image:     "agent-agent:latest",
+			Image:     "agent-go-worker:latest",
 			Resources: registry.ResourceLimits{CPULimit: "500m", MemoryLimit: "256Mi"},
 		},
 		AuthZ: registry.AuthZSpec{SpiceDBRelations: []registry.SpiceDBRelationTemplate{
@@ -47,7 +47,7 @@ func TestTemplateCRUD(t *testing.T) {
 	}
 	var got registry.AgentTemplate
 	json.NewDecoder(rec2.Body).Decode(&got)
-	if got.Runtime.Image != "agent-agent:latest" {
+	if got.Runtime.Image != "agent-go-worker:latest" {
 		t.Fatalf("unexpected image: %q", got.Runtime.Image)
 	}
 }
@@ -57,7 +57,7 @@ func TestTemplateCRUD(t *testing.T) {
 func globalRelationTemplate() registry.AgentTemplate {
 	return registry.AgentTemplate{
 		AgentType: "worker", Version: "1.0.0", Status: "active",
-		Runtime: registry.RuntimeSpec{Image: "agent-agent:latest"},
+		Runtime: registry.RuntimeSpec{Image: "agent-go-worker:latest"},
 		AuthZ: registry.AuthZSpec{SpiceDBRelations: []registry.SpiceDBRelationTemplate{
 			{Resource: "tenant:{{tenant_id}}", Relation: "agent", Subject: "agent:{{agent_id}}"},
 			{Resource: "platform:global", Relation: "agent", Subject: "agent:{{agent_id}}"},

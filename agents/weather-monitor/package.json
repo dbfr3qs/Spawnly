@@ -8,7 +8,7 @@
     "dev": "flue dev --target node"
   },
   "dependencies": {
-    "@spawnly/sdk": "file:../sdk",
+    "@spawnly/sdk": "file:../../sdks/typescript",
     "@flue/runtime": "^0.7.0",
     "@flue/cli": "^0.7.0"
   }

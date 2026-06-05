@@ -13,6 +13,8 @@ vendor/
 # Node
 agents/*/node_modules/
 agents/*/dist/
+sdks/*/node_modules/
+sdks/*/dist/
 
 # .NET build output
 identityserver/bin/

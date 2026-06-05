@@ -14,7 +14,7 @@ import (
 func TestHTTPClientGetTemplate(t *testing.T) {
 	tpl := registry.AgentTemplate{
 		AgentType: "worker",
-		Runtime:   registry.RuntimeSpec{Image: "agent-agent:latest"},
+		Runtime:   registry.RuntimeSpec{Image: "agent-go-worker:latest"},
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/templates/worker" {
@@ -31,8 +31,8 @@ func TestHTTPClientGetTemplate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTemplate: %v", err)
 	}
-	if got.Runtime.Image != "agent-agent:latest" {
-		t.Errorf("got image %q, want %q", got.Runtime.Image, "agent-agent:latest")
+	if got.Runtime.Image != "agent-go-worker:latest" {
+		t.Errorf("got image %q, want %q", got.Runtime.Image, "agent-go-worker:latest")
 	}
 }
 

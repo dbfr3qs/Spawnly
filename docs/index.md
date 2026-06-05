@@ -26,9 +26,3 @@ reference on templates and policy.
 - **[Defining a Template](/authoring/04-defining-a-template)** — the full `AgentTemplate` schema, field by field.
 - **[Defining Policy](/authoring/05-defining-policy)** — an agent's own authority and parent→child delegation.
 - **[Chatting with a Long-Lived Agent](/authoring/06-chat)** — how the dashboard chat interface works and the `/agents/chat/:sessionId` contract.
-
-## Design notes
-
-- **[Delegation design (RFC 8693)](/delegation-design)** — the trust model and locked decisions behind token-exchange delegation.
-- **[Delegation implementation plan](/delegation-implementation-plan)** — how the delegation milestones were executed.
-- **[Spawn-time child-spawn policy](/design-spawn-time-child-spawn-policy)** — governing the parent→child edge independently of scope delegation.

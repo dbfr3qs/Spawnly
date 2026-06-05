@@ -142,7 +142,7 @@ Full treatment in [05 — Defining Policy](05-defining-policy.md#part-2--delegat
 
 The registry stores templates in memory. Save your template as a `template.json`
 **next to your agent** (`agents/report-builder/template.json`, or
-`cmd/agent/template.json` for the Go worker) — [`scripts/seed.sh`](../../scripts/seed.sh)
+`agents/go-worker/template.json` for the Go worker) — [`scripts/seed.sh`](../../scripts/seed.sh)
 discovers every co-located `template.json` and POSTs it, so it survives a registry
 restart. Seed with:
 

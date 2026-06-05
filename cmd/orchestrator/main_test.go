@@ -53,7 +53,7 @@ func defaultMockRegistry(t *testing.T) *httptest.Server {
 			}
 		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/templates/"):
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"agentType":"worker","version":"1.0.0","status":"active","meta":{"displayName":"Worker","description":"Test"},"runtimeSpec":{"image":"agent-agent:latest","lifecycle":"","resources":{"cpuLimits":"","memoryLimits":""},"envDefaults":{}},"authzTemplate":{"spiceDbRelations":[]}}`))
+			w.Write([]byte(`{"agentType":"worker","version":"1.0.0","status":"active","meta":{"displayName":"Worker","description":"Test"},"runtimeSpec":{"image":"agent-go-worker:latest","lifecycle":"","resources":{"cpuLimits":"","memoryLimits":""},"envDefaults":{}},"authzTemplate":{"spiceDbRelations":[]}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -214,7 +214,7 @@ func mockRegistryWithTemplate(t *testing.T, requiresTenant bool) *httptest.Serve
 				Version:        "1.0.0",
 				Status:         "active",
 				Meta:           registry.TemplateMeta{DisplayName: "Worker", Description: "Test"},
-				Runtime:        registry.RuntimeSpec{Image: "agent-agent:latest", EnvDefaults: map[string]string{}},
+				Runtime:        registry.RuntimeSpec{Image: "agent-go-worker:latest", EnvDefaults: map[string]string{}},
 				AuthZ:          registry.AuthZSpec{SpiceDBRelations: []registry.SpiceDBRelationTemplate{}},
 				RequiresTenant: requiresTenant,
 			}

@@ -6,8 +6,8 @@ Each agent pod gets a unique SPIFFE identity (JWT-SVID) issued by SPIRE at start
 
 Two agent flavours run on the same platform contract:
 
-- **A Go worker** (`cmd/agent/`) — the minimal short-lived reference workload.
-- **TypeScript / [Flue](https://www.npmjs.com/package/@flue/runtime) agents** (`agents/`) — built on the `@spawnly/sdk`. These can chat over an LLM (OpenAI or Anthropic), call tools, and orchestrate child agents over A2A.
+- **A Go worker** (`agents/go-worker/`) — the minimal short-lived reference workload, built on the Go SDK (`github.com/spawnly/sdk-go`).
+- **TypeScript / [Flue](https://www.npmjs.com/package/@flue/runtime) agents** (`agents/`) — built on the `@spawnly/sdk` (which lives in `sdks/typescript/`). These can chat over an LLM (OpenAI or Anthropic), call tools, and orchestrate child agents over A2A.
 
 ---
 
@@ -86,11 +86,12 @@ Every directory, by language and purpose:
 | `cmd/orchestrator/` | Go | REST API. Accepts `POST /spawn`, creates `AgentWorkload` CRDs, proxies agent/event queries and chat messages to agents/registry |
 | `cmd/operator/` | Go | Kubernetes controller (controller-runtime). Watches `AgentWorkload` CRDs and manages the agent Pod (and Service, for long-lived agents) lifecycle |
 | `cmd/registry/` | Go | In-memory agent and template store. Accepts self-registration, persists lifecycle events, writes SpiceDB relationships |
-| `cmd/agent/` | Go | Minimal short-lived reference workload. Gets a token from the sidecar, calls the sample API, emits events (the sidecar handles registration) |
 | `cmd/agent-sidecar/` | Go | Per-pod native sidecar (`:8089`). Fetches the JWT-SVID, exchanges it for scoped OAuth tokens, and serves `/token` to the agent |
 | `cmd/sample-api/` | Go | Protected HTTP API (`GET /work`, `POST /task`). Validates OAuth 2.0 Bearer tokens and a SpiceDB `work_on` check. Deployed as `sample-api`, `sample-api-a`, `sample-api-b`, and `sample-api-global` (the last with `REQUIRE_TENANT=false`) |
 | `cmd/dashboard/` | Go + HTML | Web UI. Polls agents and events, chats with long-lived agents, filters events per-agent; proxies all requests to the orchestrator |
-| `agents/` | TypeScript | Flue agents on the `@spawnly/sdk`: `weather-monitor` (chat + tool calls), `currency-converter`, `trip-planner`, `parent-agent`, `child-agent`, `global-worker`, and `sdk/` (the SDK itself) |
+| `agents/` | TypeScript + Go | Agent workloads. TypeScript/Flue agents on the `@spawnly/sdk`: `weather-monitor` (chat + tool calls), `currency-converter`, `trip-planner`, `parent-agent`, `child-agent`, `global-worker`; plus the Go `go-worker` (minimal short-lived reference workload, on `github.com/spawnly/sdk-go`) |
+| `sdks/typescript/` | TypeScript | The `@spawnly/sdk` package — token/HTTP/event helpers consumed by the Flue agents |
+| `sdks/go/` | Go | The `github.com/spawnly/sdk-go` module — the same token/HTTP/event helpers for Go agents like `go-worker` |
 | `identityserver/` | C# (.NET) | Duende IdentityServer. Issues OAuth 2.0 access tokens; authenticates the sidecar via JWT-SVID `client_assertion` |
 | `internal/events/` | Go | Shared lifecycle event types and HTTP client used by all Go services |
 | `internal/operator/` | Go | Reconciler logic (separated from `cmd/operator/` for testability) |

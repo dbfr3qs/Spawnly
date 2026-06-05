@@ -7,11 +7,6 @@ description: An agent's own authority (authzTemplate + scopes) and parent→chil
 
 > **Prerequisite:** [04 — Defining a Template](04-defining-a-template.md). Policy
 > lives in two template blocks: `authzTemplate` and `delegation`.
->
-> **Conceptual background:** [delegation-design.md](../delegation-design.md) is
-> the design note — the *why*, the trust model, and the locked/deferred
-> decisions. This guide is the operational *how*: what to write and what each
-> component does with it. Read the design note for rationale; read this to ship.
 
 There are **two distinct policy systems** on the platform, and the first job of
 this guide is to keep them separate in your head:
@@ -266,14 +261,12 @@ about why the platform refuses this.
 The takeaway: model *different* authority as the child's **own** authority (its
 template + own ceiling) and reserve delegation for *narrowing* a slice of the
 user's authority. Keep using token-exchange for the `act` chain it produces — just
-bound the result by the subject. Full design rationale:
-[delegation-design.md](../delegation-design.md#no-inheritance--explicit-attenuation).
+bound the result by the subject.
 
 ### Revocation / suspension
 
 Suspending one agent revokes it **and its entire subtree**, enforced in three
-layers (see [delegation-design.md](../delegation-design.md#revocation--pause) for
-the rationale):
+layers:
 
 | Concern | Mechanism | Latency |
 |---------|-----------|---------|
@@ -378,9 +371,8 @@ the query params; the SDK's `TokenClient` is the typed wrapper over each:
 
 ### Status callouts
 
-- ⚠️ Suspension/revocation reflects the **M3** implementation; the broader model
-  (and deferred items like real user authentication and `may_act`) is described
-  in [delegation-design.md](../delegation-design.md#deferred--revisit-later).
+- ⚠️ Suspension/revocation reflects the **M3** implementation; deferred items
+  like real user authentication and `may_act` are not yet enforced.
 - ⚠️ Like all registry state, suspension is **in-memory** — a registry restart
   resets agent records (templates must be re-seeded; see
   [04 — status callouts](04-defining-a-template.md#status-callouts)).

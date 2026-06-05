@@ -66,7 +66,7 @@ Read them with `process.env`:
 
 ## The SDK
 
-Shared helpers live in [`@spawnly/sdk`](../../agents/sdk/src/index.ts). The
+Shared helpers live in [`@spawnly/sdk`](../../sdks/typescript/src/index.ts). The
 ones you will use:
 
 - **`TokenClient`** — wraps the sidecar's `/token` endpoint (the platform's
@@ -104,7 +104,7 @@ Use one of the reference agents as a starting skeleton:
 
 | Scenario | Reference agent | Shape |
 |----------|-----------------|-------|
-| Job-and-exit | [`cmd/agent`](../../cmd/agent) / `worker` | `main()` runs, then the process exits |
+| Job-and-exit | [`agents/go-worker`](../../agents/go-worker) / `worker` | `main()` runs, then the process exits |
 | Loop-until-stopped | [`agents/weather-monitor`](../../agents/weather-monitor) | `setInterval` / loop until terminated |
 | Parent → child | [`agents/parent-agent`](../../agents/parent-agent) + [`agents/child-agent`](../../agents/child-agent) | parent orchestrates; child is an A2A server |
 
