@@ -28,13 +28,28 @@ else
   kind create cluster --name "$KIND_CLUSTER" --config deploy/kind/cluster.yaml
 fi
 
-echo "==> Connecting devcontainer to Kind network..."
-CONTAINER_ID=$(cat /etc/hostname)
-docker network connect kind "$CONTAINER_ID" 2>/dev/null || true
-# Point kubectl at the control plane container IP (127.0.0.1 is unreachable inside a devcontainer)
-CONTROL_PLANE_IP=$(docker inspect "${KIND_CLUSTER}-control-plane" \
-  --format '{{(index .NetworkSettings.Networks "kind").IPAddress}}')
-kubectl config set-cluster "kind-${KIND_CLUSTER}" --server="https://${CONTROL_PLANE_IP}:6443"
+# Inside a devcontainer, 127.0.0.1 can't reach the Kind control plane, so we join
+# Kind's docker network and point kubectl at the control-plane container IP. On a
+# native host (macOS/Linux) Kind's default 127.0.0.1 kubeconfig already works, so
+# we skip this entirely. Override detection with BOOTSTRAP_IN_CONTAINER=1|0.
+IN_CONTAINER="${BOOTSTRAP_IN_CONTAINER:-}"
+if [ -z "$IN_CONTAINER" ]; then
+  if [ -f /.dockerenv ]; then IN_CONTAINER=1; else IN_CONTAINER=0; fi
+fi
+
+if [ "$IN_CONTAINER" = "1" ]; then
+  echo "==> Connecting devcontainer to Kind network..."
+  CONTAINER_ID=$(cat /etc/hostname)
+  docker network connect kind "$CONTAINER_ID" 2>/dev/null || true
+  # Point kubectl at the control plane container IP (127.0.0.1 is unreachable inside a devcontainer)
+  CONTROL_PLANE_IP=$(docker inspect "${KIND_CLUSTER}-control-plane" \
+    --format '{{(index .NetworkSettings.Networks "kind").IPAddress}}')
+  kubectl config set-cluster "kind-${KIND_CLUSTER}" --server="https://${CONTROL_PLANE_IP}:6443"
+else
+  echo "==> Native host detected — using Kind's default kubeconfig (127.0.0.1)."
+  # Self-correct a kubeconfig left pointing at a container IP from a previous in-container run.
+  kind export kubeconfig --name "$KIND_CLUSTER" >/dev/null 2>&1 || true
+fi
 
 # ── Images ───────────────────────────────────────────────────────────────────
 

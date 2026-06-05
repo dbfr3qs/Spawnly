@@ -1,6 +1,6 @@
 # Spawnly
 
-A proof-of-concept platform for running AI agents on Kubernetes with cryptographic identity, fine-grained authorisation, and full lifecycle observability. Agents may be **short-lived** (do one job and exit) or **long-lived** (serve until deleted — including chat).
+A proof-of-concept platform for running AI agents on Kubernetes with cryptographic identity, fine-grained authorisation, and full lifecycle observability. Agents may be **short-lived** (do one job and exit) or **long-lived** (serve until deleted — including chat). This project is aimed at those who are interested in running agents within an enterprize environment, or who just want to run agents in isolated container based environments on their own machines.
 
 Each agent pod gets a unique SPIFFE identity (JWT-SVID) issued by SPIRE at start. A per-pod **sidecar** uses that identity to register the agent with the **agent registry** and to obtain scoped OAuth 2.0 access tokens; the agent then calls protected APIs and emits structured lifecycle events throughout — all visible in a real-time web dashboard.
 
@@ -120,6 +120,12 @@ Every directory, by language and purpose:
 - .NET 8 SDK (for IdentityServer local builds only; not required for Docker/Kind)
 
 > If you are using the included devcontainer, all of these are pre-installed.
+
+`make bootstrap` runs both inside the devcontainer and natively on a macOS/Linux host — it
+auto-detects which (via `/.dockerenv`) and only does the devcontainer-specific Kind network wiring
+when needed. For a native run, install the tools above on your PATH first (on macOS:
+`brew install kind kubectl helm jq` plus Docker Desktop). If detection ever guesses wrong, force it
+with `BOOTSTRAP_IN_CONTAINER=1` (container) or `BOOTSTRAP_IN_CONTAINER=0` (host).
 
 To use the LLM-backed agents, copy `.env.example` to `.env` and set `AI_PROVIDER` (`openai` or `anthropic`) and `AI_API_KEY`. `make bootstrap` loads these into the `ai-provider` Secret.
 
