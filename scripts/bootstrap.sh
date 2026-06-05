@@ -39,7 +39,7 @@ kubectl config set-cluster "kind-${KIND_CLUSTER}" --server="https://${CONTROL_PL
 # ── Images ───────────────────────────────────────────────────────────────────
 
 echo "==> Building Docker images..."
-for svc in operator orchestrator registry sample-api agent dashboard child-agent parent-agent; do
+for svc in operator orchestrator registry sample-api go-worker dashboard child-agent parent-agent; do
   docker build --target "$svc" -t "agent-$svc:$IMAGE_TAG" .
 done
 # agent-sidecar is special: its stage is `agent-sidecar` and the operator
@@ -49,7 +49,7 @@ docker build --target identity-server -t agent-identity-server:$IMAGE_TAG .
 docker build --target weather-monitor -t "agent-weather-monitor:$IMAGE_TAG" .
 
 echo "==> Loading images into Kind..."
-for svc in operator orchestrator registry sample-api agent dashboard identity-server child-agent parent-agent; do
+for svc in operator orchestrator registry sample-api go-worker dashboard identity-server child-agent parent-agent; do
   kind load docker-image "agent-$svc:$IMAGE_TAG" --name "$KIND_CLUSTER"
 done
 kind load docker-image "agent-sidecar:$IMAGE_TAG" --name "$KIND_CLUSTER"
