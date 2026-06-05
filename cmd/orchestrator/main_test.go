@@ -18,9 +18,9 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentv1alpha1 "github.com/spawnly/poc/api/v1alpha1"
-	"github.com/spawnly/poc/internal/registry"
-	"github.com/spawnly/poc/internal/spicedb"
+	agentv1alpha1 "github.com/spawnly/platform/api/v1alpha1"
+	"github.com/spawnly/platform/internal/registry"
+	"github.com/spawnly/platform/internal/spicedb"
 )
 
 func newScheme() *runtime.Scheme {

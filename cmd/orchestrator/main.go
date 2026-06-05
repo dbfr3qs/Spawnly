@@ -26,10 +26,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentv1alpha1 "github.com/spawnly/poc/api/v1alpha1"
-	"github.com/spawnly/poc/internal/events"
-	"github.com/spawnly/poc/internal/registry"
-	"github.com/spawnly/poc/internal/spicedb"
+	agentv1alpha1 "github.com/spawnly/platform/api/v1alpha1"
+	"github.com/spawnly/platform/internal/events"
+	"github.com/spawnly/platform/internal/registry"
+	"github.com/spawnly/platform/internal/spicedb"
 )
 
 type SpawnRequest struct {

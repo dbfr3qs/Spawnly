@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/spawnly/poc/internal/spicedb"
+	"github.com/spawnly/platform/internal/spicedb"
 )
 
 func TestMockWriteCheckDelete(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/spawnly/poc/internal/events"
+	"github.com/spawnly/platform/internal/events"
 )
 
 type Client interface {

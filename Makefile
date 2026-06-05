@@ -1,5 +1,5 @@
 # Makefile
-MODULE        := github.com/spawnly/poc
+MODULE        := github.com/spawnly/platform
 KIND_CLUSTER  := agent-platform
 IMAGE_TAG     := latest
 GO_SERVICES   := operator orchestrator registry sample-api agent-sidecar dashboard

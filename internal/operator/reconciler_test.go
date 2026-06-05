@@ -13,10 +13,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentv1alpha1 "github.com/spawnly/poc/api/v1alpha1"
-	"github.com/spawnly/poc/internal/events"
-	"github.com/spawnly/poc/internal/operator"
-	"github.com/spawnly/poc/internal/registry"
+	agentv1alpha1 "github.com/spawnly/platform/api/v1alpha1"
+	"github.com/spawnly/platform/internal/events"
+	"github.com/spawnly/platform/internal/operator"
+	"github.com/spawnly/platform/internal/registry"
 )
 
 func buildScheme(t *testing.T) *runtime.Scheme {

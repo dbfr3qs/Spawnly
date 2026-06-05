@@ -1,4 +1,4 @@
-module github.com/spawnly/poc
+module github.com/spawnly/platform
 
 go 1.25.0
 

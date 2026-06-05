@@ -10,8 +10,8 @@ import (
 	"path"
 	"strings"
 
-	"github.com/spawnly/poc/internal/spicedb"
-	"github.com/spawnly/poc/internal/tokenvalidator"
+	"github.com/spawnly/platform/internal/spicedb"
+	"github.com/spawnly/platform/internal/tokenvalidator"
 )
 
 // apiConfig parameterizes a sample-api instance.

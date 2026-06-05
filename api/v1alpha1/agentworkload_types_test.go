@@ -6,7 +6,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/spawnly/poc/api/v1alpha1"
+	"github.com/spawnly/platform/api/v1alpha1"
 )
 
 func TestAgentWorkloadRoundtrip(t *testing.T) {

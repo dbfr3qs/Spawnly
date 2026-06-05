@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spawnly/poc/internal/spicedb"
-	"github.com/spawnly/poc/internal/tokenvalidator"
+	"github.com/spawnly/platform/internal/spicedb"
+	"github.com/spawnly/platform/internal/tokenvalidator"
 )
 
 const testAudience = "sample-api-a"
