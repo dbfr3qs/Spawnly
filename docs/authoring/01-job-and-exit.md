@@ -74,6 +74,20 @@ main().catch(async (err) => {
 });
 ```
 
+The snippet above is TypeScript for readability, but the **deployed `worker`
+reference is Go**: [`agents/go-worker/main.go`](../../agents/go-worker/main.go)
+runs the same token → protected-call shape on the Go SDK
+(`github.com/spawnly/sdk-go`). Its `AuthenticatedClient` attaches the `Bearer`
+token and `X-Tenant-ID` for you, so the core is just:
+
+```go
+tc := spawnly.NewTokenClient()
+client := spawnly.NewAuthenticatedClient(sampleAPIURL, scope, tc, spawnly.WithTenantID(tenantID))
+
+// Authorization + X-Tenant-ID are injected by the client; relative path resolves against sampleAPIURL.
+resp, err := client.Post(ctx, "/task", body)
+```
+
 The same `TokenClient` + protected-call + `postEvent` sequence is the deterministic
 `callApiADirect()` step in
 [`agents/parent-agent/src/index.ts`](../../agents/parent-agent/src/index.ts) — the

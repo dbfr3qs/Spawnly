@@ -86,6 +86,12 @@ ones you will use:
   framework-agnostic vocabulary. Call it once after `createFlueContext`.
 - **`promptTimeoutSignal(ms)`** — an `AbortSignal` to bound an LLM prompt.
 
+The same neutral contract is available in **Go** for non-Flue workloads:
+[`sdks/go`](../../sdks/go) (`github.com/spawnly/sdk-go`) mirrors `TokenClient`,
+an authenticated HTTP client, the tenant-header helper, and `postEvent` — minus
+the Flue-specific `instrumentFlue` / `promptTimeoutSignal` (Go uses `context`
+deadlines instead). The Go [`worker`](../../agents/go-worker) is built on it.
+
 Keep the dependency direction in mind: the SDK stays framework-agnostic and
 depends on the platform's neutral contract, never the reverse. Don't pull
 platform internals into agent code; lean on the SDK and the env contract above.
@@ -99,7 +105,9 @@ the scenario is `runtimeSpec.lifecycle` in the template** (see below).
 
 ### 1. Write the agent under `agents/<name>/`
 
-A TypeScript project depending on `@spawnly/sdk` and `@flue/runtime`.
+A TypeScript project depending on `@spawnly/sdk` and `@flue/runtime` — or, for a
+non-Flue workload, a Go module depending on `github.com/spawnly/sdk-go` (the
+[`go-worker`](../../agents/go-worker) is the Go reference).
 Use one of the reference agents as a starting skeleton:
 
 | Scenario | Reference agent | Shape |
@@ -113,7 +121,8 @@ Use one of the reference agents as a starting skeleton:
 Add a multi-stage block to the [`Dockerfile`](../../Dockerfile) following the
 `build-<name>-node` → final `agent-<name>` pattern used by `weather-monitor`,
 `parent-agent`, and `child-agent`. Every Node agent image copies the compiled
-shared SDK from the `build-sdk` stage.
+shared SDK from the `build-ts-sdk` stage. (The Go `go-worker` follows a parallel
+`build-go-worker` → `go-worker` stage pattern instead, building its own module.)
 
 ### 3. Build and load the image into Kind
 
