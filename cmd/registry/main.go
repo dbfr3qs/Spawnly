@@ -183,10 +183,20 @@ func referencesTenant(rel registry.SpiceDBRelationTemplate) bool {
 
 // revokeNode is the per-agent core of revocation, shared by the cascading revoke
 // endpoint: drop the agent's SpiceDB authorization and mark the record "revoked"
-// so any permission check denies in real time and IdentityServer (which mints
-// only for "active" agents) won't refresh its tokens. The pod is left running —
-// revocation is authority-only and reversible via resumeNode.
-func revokeNode(ctx context.Context, s *store, sdb spicedb.Client, id string) {
+// so any permission check denies in real time. The pod is left running —
+// revocation is authority-only and reversible via resumeNode. Real-time denial
+// comes from the resource's SpiceDB check; a short token lifetime bounds how long
+// an already-minted token survives (client-credentials agents can still mint, but
+// every call is re-checked against the dropped relation).
+//
+// It is a no-op (returns false) for any agent not currently "active", so a
+// cascade never clobbers a descendant that already exited (completed/failed/
+// killed) — that node keeps its terminal status and resumeNode won't resurrect
+// it. This also makes revoke idempotent.
+func revokeNode(ctx context.Context, s *store, sdb spicedb.Client, id string) bool {
+	if s.getAgent(id).Status != "active" {
+		return false
+	}
 	s.updateAgent(id, "revoked")
 	if err := sdb.DeleteAgentRelationships(ctx, id); err != nil {
 		log.Printf("spicedb cleanup error for %s: %v", id, err)
@@ -196,6 +206,7 @@ func revokeNode(ctx context.Context, s *store, sdb spicedb.Client, id string) {
 		Type:    "agent_revoked",
 		Payload: mustMarshal(map[string]string{"agentId": id}),
 	})
+	return true
 }
 
 // resumeNode reverses revokeNode: re-derive the agent's SpiceDB relations from
@@ -436,22 +447,26 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 
 	// Revoke is the cascading revocation action: revoke the named agent AND its
 	// entire descendant subtree (everything it spawned, transitively). For each
-	// node it drops the SpiceDB authorization and marks the record "revoked", so
-	// permission checks deny in real time and IdentityServer won't refresh its
-	// tokens. Pods are left running — revocation is authority-only and reversible
-	// via /resume. Ancestors and siblings are untouched. Revoking a leaf agent
-	// (no descendants) is simply the single-agent case.
+	// active node it drops the SpiceDB authorization and marks the record
+	// "revoked", so permission checks deny in real time. Pods are left running —
+	// revocation is authority-only and reversible via /resume. Ancestors and
+	// siblings are untouched, as are descendants that already exited (their
+	// terminal status is preserved). The response lists only the nodes actually
+	// revoked. Revoking a leaf agent (no descendants) is the single-agent case.
 	mux.HandleFunc("POST /v1/agents/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
 		subtree := s.subtree(r.PathValue("id"))
 		if subtree == nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
+		revoked := []string{}
 		for _, id := range subtree {
-			revokeNode(r.Context(), s, sdb, id)
+			if revokeNode(r.Context(), s, sdb, id) {
+				revoked = append(revoked, id)
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"revoked": subtree})
+		json.NewEncoder(w).Encode(map[string]any{"revoked": revoked})
 	})
 
 	// Resume reverses a revoke across the same subtree: for the named agent and

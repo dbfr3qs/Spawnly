@@ -95,7 +95,7 @@ func authorize(w http.ResponseWriter, r *http.Request, sdb spicedb.Client, valid
 
 // authorizeChain returns ok=true only if every agent in the delegation chain
 // currently holds work_on on the tenant. On the first member that does not, it
-// returns that member's id and ok=false (cascade denial for a suspended ancestor).
+// returns that member's id and ok=false (cascade denial for a revoked ancestor).
 func authorizeChain(ctx context.Context, sdb spicedb.Client, tenantID string, chain []string) (deniedMember string, ok bool, err error) {
 	for _, spiffeID := range chain {
 		id := path.Base(spiffeID)

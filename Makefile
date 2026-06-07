@@ -136,10 +136,10 @@ kubeconfig:
 	fi
 
 # dash — one command to (re)connect and open the dashboard: repair the
-# kubeconfig, then port-forward in a loop so it survives brief drops.
-dash: kubeconfig
-	@echo "Dashboard → http://localhost:8090  (Ctrl+C to stop)"
-	@while true; do kubectl port-forward svc/dashboard 8090:8080; sleep 1; done
+# kubeconfig, then reuse the port-forward target's loop so it survives brief
+# drops. Run sequentially (do not invoke with -j): kubeconfig must finish before
+# port-forward starts.
+dash: kubeconfig port-forward
 
 bootstrap:
 	./scripts/bootstrap.sh

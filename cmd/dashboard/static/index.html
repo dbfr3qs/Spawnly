@@ -1056,7 +1056,9 @@
   // Renders direct children under their parent card, then recurses so a chain of
   // arbitrary depth (e.g. root → A → B → C) nests correctly.
 
-  function renderSubtree(parentId, childMap) {
+  function renderSubtree(parentId, childMap, seen = new Set()) {
+    if (seen.has(parentId)) return; // guard against a malformed parent cycle
+    seen.add(parentId);
     const children = childMap.get(parentId) || [];
     if (children.length === 0) return;
     const parentCard = document.getElementById(`card-${parentId}`);
@@ -1077,7 +1079,7 @@
       } else {
         updateCardActions(child);
       }
-      renderSubtree(child.agentId, childMap);
+      renderSubtree(child.agentId, childMap, seen);
     }
   }
 

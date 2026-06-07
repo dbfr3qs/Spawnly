@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/spawnly/platform/internal/events"
@@ -741,5 +742,66 @@ func TestRevokeResume_Cascade(t *testing.T) {
 	}
 	if has("b") {
 		t.Fatal("b: failed agent must not get its tuple back")
+	}
+}
+
+// TestRevokeCascade_PreservesTerminalDescendant verifies that a descendant which
+// already exited BEFORE the cascade keeps its terminal status: revoke must not
+// clobber it to "revoked" (which would let a later resume resurrect it), and it
+// must not appear in the revoked list.
+func TestRevokeCascade_PreservesTerminalDescendant(t *testing.T) {
+	s := newStore()
+	s.putTemplate(registry.AgentTemplate{
+		AgentType: "worker",
+		AuthZ: registry.AuthZSpec{SpiceDBRelations: []registry.SpiceDBRelationTemplate{
+			{Resource: "tenant:{{tenant_id}}", Relation: "agent", Subject: "agent:{{agent_id}}"},
+		}},
+	})
+	sdb := spicedb.NewMock()
+
+	// Chain root -> a -> c, where c has already completed before the revoke.
+	for _, n := range []struct{ id, parent, status string }{
+		{"root", "", "active"}, {"a", "root", "active"}, {"c", "a", "completed"},
+	} {
+		s.registerAgent(registry.AgentRecord{AgentID: n.id, AgentType: "worker", TenantID: "tenant-1", Status: n.status, ParentID: n.parent})
+		if n.status == "active" {
+			sdb.WriteRelationship(t.Context(), "tenant:tenant-1", "agent", "agent:"+n.id)
+		}
+	}
+	mux := buildMux(s, sdb, &spiffe.MockSVIDValidator{})
+	has := func(id string) bool {
+		ok, _ := sdb.CheckPermission(t.Context(), "tenant:tenant-1", "work_on", "agent:"+id)
+		return ok
+	}
+
+	// Revoke root: only root and a are active, so only they are revoked. c stays
+	// completed and is absent from the revoked list.
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/root/revoke", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d, want 200", rec.Code)
+	}
+	var body struct {
+		Revoked []string `json:"revoked"`
+	}
+	json.NewDecoder(rec.Body).Decode(&body)
+	if got := strings.Join(body.Revoked, ","); got != "root,a" {
+		t.Fatalf("revoked list = %q, want \"root,a\" (terminal c excluded)", got)
+	}
+	if s.getAgent("c").Status != "completed" {
+		t.Fatalf("c: terminal status clobbered, got %q", s.getAgent("c").Status)
+	}
+
+	// Resume root must not resurrect the completed node.
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/agents/root/resume", nil))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("resume: got %d, want 200", rec2.Code)
+	}
+	if s.getAgent("c").Status != "completed" {
+		t.Fatalf("c: resume resurrected a completed agent, got %q", s.getAgent("c").Status)
+	}
+	if has("c") {
+		t.Fatal("c: completed agent must not have a SpiceDB tuple")
 	}
 }
