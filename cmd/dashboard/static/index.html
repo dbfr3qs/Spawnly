@@ -149,9 +149,9 @@
 
     .agent-row {
       display: grid;
-      grid-template-columns: minmax(200px,1fr) 120px 110px 130px minmax(0,auto);
+      grid-template-columns: minmax(130px,1fr) 108px 96px 100px auto;
       align-items: center;
-      gap: 16px;
+      gap: 12px;
       padding: 14px 18px;
     }
 
@@ -167,19 +167,24 @@
     .agent-meta {
       color: var(--text-dim);
       font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
+    /* Actions stay on a single line (side by side); the agent-id column and the
+       data columns shrink/ellipsis first so the buttons always fit inline. */
     .agent-actions {
       display: flex;
-      gap: 8px;
+      gap: 6px;
       justify-content: flex-end;
-      flex-wrap: wrap;
-      row-gap: 6px;
+      flex-wrap: nowrap;
+      white-space: nowrap;
     }
     /* Uniform, compact sizing for in-row action buttons (Events, Chat, Revoke/
        Resume, Kill, Dismiss) so they line up evenly and never overflow the card.
        Scoped here so header/modal buttons keep their default size. */
-    .agent-actions .btn { padding: 6px 12px; }
+    .agent-actions .btn { padding: 6px 11px; }
 
     /* ── Badges ── */
     .badge {
@@ -681,7 +686,7 @@
     .child-card:last-child { margin-bottom: 0; }
     .child-card .agent-row {
       padding: 10px 14px;
-      grid-template-columns: minmax(160px,1fr) 100px 90px minmax(0,auto);
+      grid-template-columns: minmax(120px,1fr) 100px 88px auto;
     }
 
     /* ── Scrollbar ── */
