@@ -163,6 +163,40 @@ func TestSpawnPolicy(t *testing.T) {
 	}
 }
 
+// TestSpawnPolicy_MaxDepth verifies a positive template maxDepth caps total
+// chain length: a self-spawning agent type may grow the chain up to maxDepth
+// agents, and the spawn that would exceed it is denied.
+func TestSpawnPolicy_MaxDepth(t *testing.T) {
+	s := newStore()
+	s.putTemplate(registry.AgentTemplate{
+		AgentType: "chain-worker", Version: "1.0.0", Status: "active",
+		Delegation: registry.DelegationPolicy{AllowedChildTypes: []string{"chain-worker"}, MaxDepth: 4},
+	})
+	// Chain of 4: root (depth 1) -> a (2) -> b (3) -> c (4).
+	for _, n := range []struct{ id, parent string }{{"root", ""}, {"a", "root"}, {"b", "a"}, {"c", "b"}} {
+		s.registerAgent(registry.AgentRecord{AgentID: n.id, AgentType: "chain-worker", TenantID: "tenant-1", ParentID: n.parent})
+	}
+	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+
+	check := func(parentID string) registry.SpawnDecision {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/spawn-policy?parentId="+parentID+"&childType=chain-worker", nil))
+		var d registry.SpawnDecision
+		json.NewDecoder(rec.Body).Decode(&d)
+		return d
+	}
+
+	// b is at depth 3; its child would be depth 4 == maxDepth -> allowed.
+	if d := check("b"); !d.Allowed {
+		t.Fatalf("depth 4 should be allowed, got %+v", d)
+	}
+	// c is at depth 4; its child would be depth 5 > maxDepth -> denied.
+	if d := check("c"); d.Allowed {
+		t.Fatalf("depth 5 should be denied by maxDepth, got %+v", d)
+	}
+}
+
 func TestAgentSelfRegistration(t *testing.T) {
 	s := newStore()
 	s.putTemplate(workerTemplate())
@@ -572,7 +606,7 @@ func TestSelfRegistrationEmitsEvents(t *testing.T) {
 	}
 }
 
-func TestSuspendResume_AuthZ(t *testing.T) {
+func TestRevokeResume_AuthZ(t *testing.T) {
 	s := newStore()
 	s.putTemplate(registry.AgentTemplate{
 		AgentType: "worker",
@@ -586,17 +620,17 @@ func TestSuspendResume_AuthZ(t *testing.T) {
 	validator := &spiffe.MockSVIDValidator{}
 	mux := buildMux(s, sdb, validator)
 
-	// suspend: status -> suspended, tuple removed
+	// revoke: status -> revoked, tuple removed
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/agent-test/suspend", nil))
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/agent-test/revoke", nil))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("suspend: got %d, want 200", rec.Code)
+		t.Fatalf("revoke: got %d, want 200", rec.Code)
 	}
-	if s.getAgent("agent-test").Status != "suspended" {
-		t.Fatal("status not suspended")
+	if s.getAgent("agent-test").Status != "revoked" {
+		t.Fatal("status not revoked")
 	}
 	if ok, _ := sdb.CheckPermission(t.Context(), "tenant:tenant-1", "work_on", "agent:agent-test"); ok {
-		t.Fatal("expected SpiceDB tuple removed on suspend")
+		t.Fatal("expected SpiceDB tuple removed on revoke")
 	}
 
 	// resume: status -> active, tuple restored from template
@@ -612,17 +646,100 @@ func TestSuspendResume_AuthZ(t *testing.T) {
 		t.Fatal("expected SpiceDB tuple restored on resume")
 	}
 
-	// resume of a non-suspended agent -> 409
+	// resume of an already-active agent -> 200, no-op (empty resumed list)
 	rec3 := httptest.NewRecorder()
 	mux.ServeHTTP(rec3, httptest.NewRequest("POST", "/v1/agents/agent-test/resume", nil))
-	if rec3.Code != http.StatusConflict {
-		t.Fatalf("resume non-suspended: got %d, want 409", rec3.Code)
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("resume already-active: got %d, want 200", rec3.Code)
+	}
+	var body struct {
+		Resumed []string `json:"resumed"`
+	}
+	json.NewDecoder(rec3.Body).Decode(&body)
+	if len(body.Resumed) != 0 {
+		t.Fatalf("resume already-active should be a no-op, resumed %v", body.Resumed)
 	}
 
-	// suspend unknown agent -> 404
+	// revoke unknown agent -> 404
 	rec4 := httptest.NewRecorder()
-	mux.ServeHTTP(rec4, httptest.NewRequest("POST", "/v1/agents/nope/suspend", nil))
+	mux.ServeHTTP(rec4, httptest.NewRequest("POST", "/v1/agents/nope/revoke", nil))
 	if rec4.Code != http.StatusNotFound {
-		t.Fatalf("suspend unknown: got %d, want 404", rec4.Code)
+		t.Fatalf("revoke unknown: got %d, want 404", rec4.Code)
+	}
+}
+
+// TestRevokeResume_Cascade verifies that revoking a mid-chain agent cascades to
+// its whole descendant subtree while leaving ancestors and unrelated agents
+// untouched, and that resume restores exactly that subtree.
+func TestRevokeResume_Cascade(t *testing.T) {
+	s := newStore()
+	s.putTemplate(registry.AgentTemplate{
+		AgentType: "worker",
+		AuthZ: registry.AuthZSpec{SpiceDBRelations: []registry.SpiceDBRelationTemplate{
+			{Resource: "tenant:{{tenant_id}}", Relation: "agent", Subject: "agent:{{agent_id}}"},
+		}},
+	})
+	sdb := spicedb.NewMock()
+
+	// Chain: root -> a -> b -> c (4 deep). Plus an unrelated top-level agent.
+	chain := []struct{ id, parent string }{
+		{"root", ""}, {"a", "root"}, {"b", "a"}, {"c", "b"}, {"other", ""},
+	}
+	for _, n := range chain {
+		s.registerAgent(registry.AgentRecord{AgentID: n.id, AgentType: "worker", TenantID: "tenant-1", Status: "active", ParentID: n.parent})
+		sdb.WriteRelationship(t.Context(), "tenant:tenant-1", "agent", "agent:"+n.id)
+	}
+	mux := buildMux(s, sdb, &spiffe.MockSVIDValidator{})
+
+	has := func(id string) bool {
+		ok, _ := sdb.CheckPermission(t.Context(), "tenant:tenant-1", "work_on", "agent:"+id)
+		return ok
+	}
+
+	// Revoke "a": expect a, b, c revoked; root and other untouched.
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/a/revoke", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d, want 200", rec.Code)
+	}
+	for _, id := range []string{"a", "b", "c"} {
+		if s.getAgent(id).Status != "revoked" {
+			t.Fatalf("%s: expected status revoked, got %q", id, s.getAgent(id).Status)
+		}
+		if has(id) {
+			t.Fatalf("%s: expected SpiceDB tuple removed", id)
+		}
+	}
+	for _, id := range []string{"root", "other"} {
+		if s.getAgent(id).Status != "active" {
+			t.Fatalf("%s: expected untouched (active), got %q", id, s.getAgent(id).Status)
+		}
+		if !has(id) {
+			t.Fatalf("%s: expected SpiceDB tuple intact", id)
+		}
+	}
+
+	// A node that exited independently must not be resurrected by resume.
+	s.updateAgent("b", "failed")
+
+	// Resume "a": a and c restored; b stays failed (and gets no tuple back).
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/agents/a/resume", nil))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("resume: got %d, want 200", rec2.Code)
+	}
+	for _, id := range []string{"a", "c"} {
+		if s.getAgent(id).Status != "active" {
+			t.Fatalf("%s: expected active after resume, got %q", id, s.getAgent(id).Status)
+		}
+		if !has(id) {
+			t.Fatalf("%s: expected SpiceDB tuple restored", id)
+		}
+	}
+	if s.getAgent("b").Status != "failed" {
+		t.Fatalf("b: resume must not resurrect a failed agent, got %q", s.getAgent("b").Status)
+	}
+	if has("b") {
+		t.Fatal("b: failed agent must not get its tuple back")
 	}
 }

@@ -416,6 +416,37 @@ func TestListAgentsProxiesToRegistry(t *testing.T) {
 	}
 }
 
+// TestRevokeResumeProxyToRegistry asserts the orchestrator forwards revoke/resume
+// to the registry under the matching path and relays its status and JSON body.
+func TestRevokeResumeProxyToRegistry(t *testing.T) {
+	var gotPaths []string
+	mockReg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPaths = append(gotPaths, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"revoked":["a1","a2"]}`))
+	}))
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	sdb := spicedb.NewMock()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+
+	for _, action := range []string{"revoke", "resume"} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/a1/"+action, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: got %d, want 200", action, rec.Code)
+		}
+		want := "POST /v1/agents/a1/" + action
+		if len(gotPaths) == 0 || gotPaths[len(gotPaths)-1] != want {
+			t.Fatalf("%s: registry saw %v, want last %q", action, gotPaths, want)
+		}
+		if !strings.Contains(rec.Body.String(), `"revoked"`) {
+			t.Fatalf("%s: body not relayed, got %q", action, rec.Body.String())
+		}
+	}
+}
+
 func TestDeleteAgent_NotFound(t *testing.T) {
 	mockReg := defaultMockRegistry(t)
 	defer mockReg.Close()

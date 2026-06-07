@@ -6,7 +6,7 @@ GO_SERVICES   := operator orchestrator registry sample-api agent-sidecar dashboa
 # Separate-module Go agents: their own go.mod (not the root module), so they
 # build via `cd agents/<name> && go build .` and map to image agent-<name>.
 GO_MODULE_AGENTS := go-worker
-NODE_AGENTS   := child-agent parent-agent currency-converter trip-planner
+NODE_AGENTS   := child-agent parent-agent currency-converter trip-planner chain-worker
 SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS)
 
 .PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward redeploy-% reload-% reload-sidecar logs-% reseed
