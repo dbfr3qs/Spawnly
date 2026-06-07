@@ -149,7 +149,7 @@
 
     .agent-row {
       display: grid;
-      grid-template-columns: minmax(200px,1fr) 120px 110px 130px auto;
+      grid-template-columns: minmax(200px,1fr) 120px 110px 130px minmax(0,auto);
       align-items: center;
       gap: 16px;
       padding: 14px 18px;
@@ -173,7 +173,13 @@
       display: flex;
       gap: 8px;
       justify-content: flex-end;
+      flex-wrap: wrap;
+      row-gap: 6px;
     }
+    /* Uniform, compact sizing for in-row action buttons (Events, Chat, Revoke/
+       Resume, Kill, Dismiss) so they line up evenly and never overflow the card.
+       Scoped here so header/modal buttons keep their default size. */
+    .agent-actions .btn { padding: 6px 12px; }
 
     /* ── Badges ── */
     .badge {
@@ -675,7 +681,7 @@
     .child-card:last-child { margin-bottom: 0; }
     .child-card .agent-row {
       padding: 10px 14px;
-      grid-template-columns: minmax(160px,1fr) 100px 90px auto;
+      grid-template-columns: minmax(160px,1fr) 100px 90px minmax(0,auto);
     }
 
     /* ── Scrollbar ── */
