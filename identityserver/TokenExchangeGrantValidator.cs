@@ -206,7 +206,7 @@ public class TokenExchangeGrantValidator : IExtensionGrantValidator
         //     Every agent in the delegation chain must currently be active. The chain is the new
         //     actor (childAgentId, doing this exchange) plus every actor already named in the
         //     subject_token's act chain. If ANY of them is missing from the registry or not in
-        //     status "active" (e.g. suspended/failed/completed), reject the exchange — this stops
+        //     status "active" (e.g. revoked/failed/completed), reject the exchange — this stops
         //     any new or refreshed delegation routed through a revoked agent, whether it is the
         //     immediate delegator or an ancestor.
         var chainAgentIds = new HashSet<string> { childAgentId };

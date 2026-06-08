@@ -154,5 +154,26 @@ public static class Config
                     "sample-api-b:read",
                 },
             },
+            new Client
+            {
+                // Long-lived self-spawning worker used to demonstrate cascading
+                // revocation across an agent chain. Each link calls sample-api-a
+                // with its OWN client-credentials token, so revoking a node (and
+                // its subtree) denies each one independently on its next call.
+                ClientId = "chain-worker",
+                AllowedGrantTypes = GrantTypes.ClientCredentials,
+                RequireClientSecret = true,
+                ClientSecrets = { new Secret("placeholder".Sha256()) },
+                AlwaysSendClientClaims = true,
+                ClientClaimsPrefix = "",
+                // Short token lifetime so a revoked link cannot keep using an
+                // in-flight token long after its authorization is dropped (the
+                // resource also denies in real time via the SpiceDB check).
+                AccessTokenLifetime = 120,
+                AllowedScopes =
+                {
+                    "sample-api-a:read",
+                },
+            },
         };
 }

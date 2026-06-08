@@ -181,6 +181,27 @@ COPY sdks/typescript/package.json ./node_modules/@spawnly/sdk/package.json
 COPY --from=build-ts-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
 CMD ["node", "dist/index.js"]
 
+# Chain-worker Node.js build (deterministic loop — no Flue/LLM)
+FROM node:22-alpine AS build-chain-worker-node
+# WORKDIR mirrors the host layout (agents/<name> two levels below sdks/typescript)
+# so the lockfile's file:../../sdks/typescript link resolves identically here.
+WORKDIR /src/agents/app
+COPY sdks/typescript/ /src/sdks/typescript/
+COPY agents/chain-worker/package*.json ./
+RUN npm ci
+COPY agents/chain-worker/src ./src
+COPY agents/chain-worker/tsconfig.json ./tsconfig.json
+RUN npm run build
+
+# Final chain-worker image
+FROM node:22-slim AS chain-worker
+WORKDIR /app
+COPY --from=build-chain-worker-node /src/agents/app/dist ./dist
+COPY --from=build-chain-worker-node /src/agents/app/node_modules ./node_modules
+COPY sdks/typescript/package.json ./node_modules/@spawnly/sdk/package.json
+COPY --from=build-ts-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
+CMD ["node", "dist/index.js"]
+
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build-identity-server
 WORKDIR /src
 COPY identityserver/ .

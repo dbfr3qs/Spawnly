@@ -97,6 +97,15 @@ func main() {
 		id := r.PathValue("id")
 		proxy("POST", orchestratorURL+"/v1/agents/"+id+"/dismiss")(w, r)
 	})
+	// revoke/resume cascade an authorization change down the agent's subtree.
+	mux.HandleFunc("POST /api/agents/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		proxy("POST", orchestratorURL+"/v1/agents/"+id+"/revoke")(w, r)
+	})
+	mux.HandleFunc("POST /api/agents/{id}/resume", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		proxy("POST", orchestratorURL+"/v1/agents/"+id+"/resume")(w, r)
+	})
 	mux.HandleFunc("GET /api/templates", proxy("GET", orchestratorURL+"/v1/templates"))
 
 	port := os.Getenv("PORT")

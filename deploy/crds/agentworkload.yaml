@@ -36,6 +36,8 @@ spec:
                   enum: [short-lived, long-lived]
                 task:
                   type: string
+                parentId:
+                  type: string
             status:
               type: object
               properties:

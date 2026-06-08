@@ -97,6 +97,10 @@
 
     .btn-dismiss  { background: rgba(255,255,255,.06); color: var(--text-dim); padding: 4px 10px; font-size: 13px; }
 
+    /* Revoke = authority-only, cascades to the subtree (amber). Resume restores it (green). */
+    .btn-revoke   { background: rgba(243,156,18,.18); color: #f39c12; border: 1px solid rgba(243,156,18,.4); }
+    .btn-resume   { background: rgba(39,174,96,.2); color: #2ecc71; border: 1px solid rgba(39,174,96,.4); }
+
     /* ── Main content ── */
     main {
       max-width: 1100px;
@@ -145,9 +149,9 @@
 
     .agent-row {
       display: grid;
-      grid-template-columns: minmax(200px,1fr) 120px 110px 130px auto;
+      grid-template-columns: minmax(130px,1fr) 108px 96px 100px auto;
       align-items: center;
-      gap: 16px;
+      gap: 12px;
       padding: 14px 18px;
     }
 
@@ -163,13 +167,24 @@
     .agent-meta {
       color: var(--text-dim);
       font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
+    /* Actions stay on a single line (side by side); the agent-id column and the
+       data columns shrink/ellipsis first so the buttons always fit inline. */
     .agent-actions {
       display: flex;
-      gap: 8px;
+      gap: 6px;
       justify-content: flex-end;
+      flex-wrap: nowrap;
+      white-space: nowrap;
     }
+    /* Uniform, compact sizing for in-row action buttons (Events, Chat, Revoke/
+       Resume, Kill, Dismiss) so they line up evenly and never overflow the card.
+       Scoped here so header/modal buttons keep their default size. */
+    .agent-actions .btn { padding: 6px 11px; }
 
     /* ── Badges ── */
     .badge {
@@ -187,6 +202,7 @@
     .badge-completed { background: rgba(41,128,185,.2); color: #5dade2; border: 1px solid rgba(41,128,185,.4); }
     .badge-failed    { background: rgba(192,57,43,.2);  color: #e74c3c; border: 1px solid rgba(192,57,43,.4); }
     .badge-pending   { background: rgba(93,109,126,.2); color: #95a5a6; border: 1px solid rgba(93,109,126,.4); }
+    .badge-revoked   { background: rgba(243,156,18,.2); color: #f39c12; border: 1px solid rgba(243,156,18,.4); }
 
     .src-badge {
       display: inline-block;
@@ -670,7 +686,7 @@
     .child-card:last-child { margin-bottom: 0; }
     .child-card .agent-row {
       padding: 10px 14px;
-      grid-template-columns: minmax(160px,1fr) 100px 90px auto;
+      grid-template-columns: minmax(120px,1fr) 100px 88px auto;
     }
 
     /* ── Scrollbar ── */
@@ -836,6 +852,18 @@
     if (!r.ok) throw new Error(await r.text());
   }
 
+  async function revokeAgent(id) {
+    const r = await fetch(`/api/agents/${id}/revoke`, { method: 'POST' });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json().catch(() => ({}));
+  }
+
+  async function resumeAgent(id) {
+    const r = await fetch(`/api/agents/${id}/resume`, { method: 'POST' });
+    if (!r.ok) throw new Error(await r.text());
+    return r.json().catch(() => ({}));
+  }
+
   async function fetchTemplates() {
     try { const r = await fetch('/api/templates'); return r.ok ? r.json() : []; }
     catch { return []; }
@@ -855,7 +883,7 @@
 
   function statusBadge(status) {
     const s = (status || 'pending').toLowerCase();
-    const cls = {active:'badge-active', completed:'badge-completed', failed:'badge-failed'}[s] || 'badge-pending';
+    const cls = {active:'badge-active', completed:'badge-completed', failed:'badge-failed', revoked:'badge-revoked'}[s] || 'badge-pending';
     return `<span class="badge ${cls}">${s}</span>`;
   }
 
@@ -884,9 +912,11 @@
       case 'tool_end':   return 'evt-tool';
       case 'model_turn': return 'evt-model';
       case 'thinking':   return 'evt-thinking';
-      case 'error':      return 'evt-error';
+      case 'error':
+      case 'work_denied': return 'evt-error';
       case 'run_start':
-      case 'run_end':    return 'evt-run';
+      case 'run_end':
+      case 'work_ok':    return 'evt-run';
       case 'compaction': return 'evt-compact';
       case 'log':        return 'evt-log';
       case 'heartbeat':  return 'evt-system';
@@ -908,6 +938,8 @@
       case 'model_turn': return '🧠';
       case 'thinking':   return '💭';
       case 'error':      return '⚠';
+      case 'work_denied': return '⛔';
+      case 'work_ok':    return '✓';
       case 'run_start':  return '▶';
       case 'run_end':    return '■';
       case 'compaction': return '🗜';
@@ -949,13 +981,62 @@
     }
   }
 
-  // ── Build a child agent card (no kill button, no chat) ──────────────────
+  // ── Shared action buttons (top-level and child cards alike) ──────────────
+  // Revoke/Resume cascade an authorization change down the agent's whole
+  // subtree; Kill tears down just this pod; Dismiss clears a terminal card.
+  // A "revoked" agent is still alive (its pod runs, getting denied) so it keeps
+  // its Kill button and is NOT treated as terminal.
+
+  function isAlive(status)   { const s = (status||'').toLowerCase(); return s === 'active' || s === 'revoked'; }
+  function revokeState(status) {
+    const s = (status||'').toLowerCase();
+    return s === 'active' ? 'revoke' : s === 'revoked' ? 'resume' : '';
+  }
+  function revokeBtnHtml(id, state) {
+    if (state === 'revoke') return `<button class="btn btn-revoke" onclick="handleRevoke('${id}')">Revoke</button>`;
+    if (state === 'resume') return `<button class="btn btn-resume" onclick="handleResume('${id}')">Resume</button>`;
+    return '';
+  }
+  function actionButtonsHtml(a) {
+    return `
+      <span id="revokewrap-${a.agentId}" data-state="${revokeState(a.status)}">${revokeBtnHtml(a.agentId, revokeState(a.status))}</span>
+      <span id="killwrap-${a.agentId}">${isAlive(a.status) ? `<button class="btn btn-danger" onclick="handleKill('${a.agentId}')">Kill</button>` : ''}</span>
+      <span id="dismisswrap-${a.agentId}">${isTerminalStatus(a.status) ? `<button class="btn btn-dismiss" onclick="handleDismiss('${a.agentId}')">✕</button>` : ''}</span>`;
+  }
+
+  // Surgically refresh the status badge and action buttons on an existing card.
+  function updateCardActions(a) {
+    const sw = document.querySelector(`#card-${CSS.escape(a.agentId)} .status-wrap`);
+    if (sw && sw.innerHTML !== statusBadge(a.status)) sw.innerHTML = statusBadge(a.status);
+
+    const rw = document.getElementById(`revokewrap-${a.agentId}`);
+    if (rw) {
+      const want = revokeState(a.status);
+      if (rw.getAttribute('data-state') !== want) {
+        rw.setAttribute('data-state', want);
+        rw.innerHTML = revokeBtnHtml(a.agentId, want);
+      }
+    }
+    const kw = document.getElementById(`killwrap-${a.agentId}`);
+    if (kw) {
+      const has = !!kw.querySelector('button');
+      if (isAlive(a.status) && !has) kw.innerHTML = `<button class="btn btn-danger" onclick="handleKill('${a.agentId}')">Kill</button>`;
+      else if (!isAlive(a.status) && has) kw.innerHTML = '';
+    }
+    const dw = document.getElementById(`dismisswrap-${a.agentId}`);
+    if (dw) {
+      const has = !!dw.querySelector('button');
+      if (isTerminalStatus(a.status) && !has) dw.innerHTML = `<button class="btn btn-dismiss" onclick="handleDismiss('${a.agentId}')">✕</button>`;
+      else if (!isTerminalStatus(a.status) && has) dw.innerHTML = '';
+    }
+  }
+
+  // ── Build a child agent card (nested, with the shared action buttons) ────
 
   function buildChildCard(a) {
     const card = document.createElement('div');
     card.className = 'child-card';
     card.id = `card-${a.agentId}`;
-    const isTerminal = ['completed','failed','killed'].includes((a.status||'').toLowerCase());
     card.innerHTML = `
       <div class="agent-row">
         <span class="agent-id">${escHtml(a.agentId)}</span>
@@ -965,18 +1046,21 @@
           <span class="agent-stale" data-agent="${a.agentId}" id="stale-${a.agentId}"></span>
           <button class="btn btn-events" id="evtbtn-${a.agentId}"
                   onclick="toggleEvents('${a.agentId}')">▼ Events</button>
-          <span id="dismisswrap-${a.agentId}">
-            ${isTerminal ? `<button class="btn btn-dismiss" onclick="handleDismiss('${a.agentId}')">✕</button>` : ''}
-          </span>
+          ${actionButtonsHtml(a)}
         </div>
       </div>`;
     return card;
   }
 
-  // ── Insert/update children inside a parent card ──────────────────────────
+  // ── Recursively insert/update a node's descendant subtree ─────────────────
+  // Renders direct children under their parent card, then recurses so a chain of
+  // arbitrary depth (e.g. root → A → B → C) nests correctly.
 
-  function updateChildrenSection(parentId, childAgents) {
-    if (childAgents.length === 0) return;
+  function renderSubtree(parentId, childMap, seen = new Set()) {
+    if (seen.has(parentId)) return; // guard against a malformed parent cycle
+    seen.add(parentId);
+    const children = childMap.get(parentId) || [];
+    if (children.length === 0) return;
     const parentCard = document.getElementById(`card-${parentId}`);
     if (!parentCard) return;
 
@@ -989,33 +1073,22 @@
       parentCard.appendChild(section);
     }
 
-    for (const child of childAgents) {
-      const existing = document.getElementById(`card-${child.agentId}`);
-      if (!existing) {
+    for (const child of children) {
+      if (!document.getElementById(`card-${child.agentId}`)) {
         section.appendChild(buildChildCard(child));
       } else {
-        const sw = existing.querySelector('.status-wrap');
-        if (sw) sw.innerHTML = statusBadge(child.status);
-        const dw = document.getElementById(`dismisswrap-${child.agentId}`);
-        if (dw) {
-          const isTerminal = ['completed','failed','killed'].includes((child.status||'').toLowerCase());
-          const hasDismiss = !!dw.querySelector('button');
-          if (isTerminal && !hasDismiss)
-            dw.innerHTML = `<button class="btn btn-dismiss" onclick="handleDismiss('${child.agentId}')">✕</button>`;
-          else if (!isTerminal && hasDismiss)
-            dw.innerHTML = '';
-        }
+        updateCardActions(child);
       }
+      renderSubtree(child.agentId, childMap, seen);
     }
   }
 
-  // ── Build a fresh agent card element (first appearance only) ─────────────
+  // ── Build a fresh top-level agent card (first appearance only) ───────────
 
   function buildCard(a) {
     const card = document.createElement('div');
     card.className = 'agent-card';
     card.id = `card-${a.agentId}`;
-    const isActive = (a.status || '').toLowerCase() === 'active';
     card.innerHTML = `
       <div class="agent-row">
         <span class="agent-id">${escHtml(a.agentId)}</span>
@@ -1027,18 +1100,13 @@
           <button class="btn btn-events" id="evtbtn-${a.agentId}"
                   onclick="toggleEvents('${a.agentId}')">▼ Events</button>
           ${a.lifecycle === 'long-lived' && a.supportsChat ? `<button class="btn btn-chat" id="chatbtn-${a.agentId}" onclick="toggleChat('${a.agentId}')">💬 Chat</button>` : ''}
-          <span id="killwrap-${a.agentId}">
-            ${isActive ? `<button class="btn btn-danger" onclick="handleKill('${a.agentId}')">Kill</button>` : ''}
-          </span>
-          <span id="dismisswrap-${a.agentId}">
-            ${['completed','failed','killed'].includes((a.status||'').toLowerCase()) ? `<button class="btn btn-dismiss" onclick="handleDismiss('${a.agentId}')">✕</button>` : ''}
-          </span>
+          ${actionButtonsHtml(a)}
         </div>
       </div>`;
     return card;
   }
 
-  // ── Surgical agent list update — top-level agents only, children nested ──
+  // ── Surgical agent list update — top-level cards, subtrees nested ────────
 
   function updateAgentList(agents) {
     const list    = document.getElementById('agent-list');
@@ -1070,33 +1138,12 @@
     if (empty) list.innerHTML = '';
 
     for (const a of topLevel) {
-      const existing = document.getElementById(`card-${a.agentId}`);
-      if (!existing) {
+      if (!document.getElementById(`card-${a.agentId}`)) {
         list.appendChild(buildCard(a));
       } else {
-        const sw = existing.querySelector('.status-wrap');
-        if (sw && sw.innerHTML !== statusBadge(a.status)) sw.innerHTML = statusBadge(a.status);
-
-        const kw = document.getElementById(`killwrap-${a.agentId}`);
-        if (kw) {
-          const isActive  = (a.status || '').toLowerCase() === 'active';
-          const hasButton = !!kw.querySelector('button');
-          if (isActive && !hasButton)
-            kw.innerHTML = `<button class="btn btn-danger" onclick="handleKill('${a.agentId}')">Kill</button>`;
-          else if (!isActive && hasButton)
-            kw.innerHTML = '';
-        }
-        const dw = document.getElementById(`dismisswrap-${a.agentId}`);
-        if (dw) {
-          const isTerminal = ['completed','failed','killed'].includes((a.status||'').toLowerCase());
-          const hasDismiss = !!dw.querySelector('button');
-          if (isTerminal && !hasDismiss)
-            dw.innerHTML = `<button class="btn btn-dismiss" onclick="handleDismiss('${a.agentId}')">✕</button>`;
-          else if (!isTerminal && hasDismiss)
-            dw.innerHTML = '';
-        }
+        updateCardActions(a);
       }
-      updateChildrenSection(a.agentId, childMap.get(a.agentId) || []);
+      renderSubtree(a.agentId, childMap);
     }
   }
 
@@ -1571,6 +1618,34 @@
       const card = document.getElementById(`card-${agentId}`);
       if (card) card.remove();
       showToast(`Agent ${agentId.slice(0,8)}… dismissed`);
+    } catch (e) {
+      showToast(`Error: ${e.message}`, true);
+    }
+  }
+
+  // Revoke cascades to the agent's whole descendant subtree: each becomes
+  // "revoked" (its SpiceDB authorization dropped) while its pod keeps running,
+  // so on its next loop tick the protected API denies it (403). The next poll
+  // refreshes the badges/buttons for every affected node.
+  async function handleRevoke(agentId) {
+    try {
+      const res = await revokeAgent(agentId);
+      const n = Array.isArray(res.revoked) ? res.revoked.length : 1;
+      showToast(`Revoked ${n} agent${n !== 1 ? 's' : ''} (subtree of ${agentId.slice(0,8)}…)`);
+      await poll();
+    } catch (e) {
+      showToast(`Error: ${e.message}`, true);
+    }
+  }
+
+  // Resume reverses a revoke across the same subtree: authorization is restored
+  // and the agents start passing again on their next tick.
+  async function handleResume(agentId) {
+    try {
+      const res = await resumeAgent(agentId);
+      const n = Array.isArray(res.resumed) ? res.resumed.length : 0;
+      showToast(`Resumed ${n} agent${n !== 1 ? 's' : ''} (subtree of ${agentId.slice(0,8)}…)`);
+      await poll();
     } catch (e) {
       showToast(`Error: ${e.message}`, true);
     }

@@ -404,6 +404,31 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		w.WriteHeader(resp.StatusCode)
 	})
 
+	// revoke/resume are cascading authorization actions owned by the registry (it
+	// holds agent lineage). The orchestrator forwards them and relays the
+	// registry's status and JSON body (the list of affected agent ids).
+	forwardToRegistry := func(suffix string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			id := r.PathValue("id")
+			req2, err := http.NewRequestWithContext(r.Context(), "POST", registryURL+"/v1/agents/"+id+suffix, nil)
+			if err != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			resp, err := http.DefaultClient.Do(req2)
+			if err != nil {
+				http.Error(w, "registry unavailable", http.StatusBadGateway)
+				return
+			}
+			defer resp.Body.Close()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(resp.StatusCode)
+			io.Copy(w, resp.Body)
+		}
+	}
+	mux.HandleFunc("POST /v1/agents/{id}/revoke", forwardToRegistry("/revoke"))
+	mux.HandleFunc("POST /v1/agents/{id}/resume", forwardToRegistry("/resume"))
+
 	mux.HandleFunc("GET /v1/templates", func(w http.ResponseWriter, r *http.Request) {
 		req2, err := http.NewRequestWithContext(r.Context(), "GET", registryURL+"/v1/templates", nil)
 		if err != nil {

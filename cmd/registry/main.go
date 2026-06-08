@@ -112,6 +112,58 @@ func (s *store) updateAgent(id, status string) bool {
 	return true
 }
 
+// subtree returns the agent id plus every descendant reachable through ParentID
+// edges (everything the agent spawned, transitively), root first followed by a
+// breadth-first walk. It is the set a cascading revoke/resume operates on.
+// Returns nil if the id is unknown.
+func (s *store) subtree(id string) []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.agents[id]; !ok {
+		return nil
+	}
+	children := map[string][]string{}
+	for cid, rec := range s.agents {
+		if rec.ParentID != "" {
+			children[rec.ParentID] = append(children[rec.ParentID], cid)
+		}
+	}
+	out := []string{}
+	seen := map[string]bool{}
+	queue := []string{id}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if seen[cur] {
+			continue // cycle guard
+		}
+		seen[cur] = true
+		out = append(out, cur)
+		queue = append(queue, children[cur]...)
+	}
+	return out
+}
+
+// depth returns how many agents are in the lineage from id up to the root,
+// counting id itself: a top-level agent is depth 1, its child depth 2, and so
+// on. Used to enforce a template's maxDepth at spawn time. Unknown ids are 0.
+func (s *store) depth(id string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	d := 0
+	seen := map[string]bool{}
+	for cur := id; cur != "" && !seen[cur]; {
+		rec, ok := s.agents[cur]
+		if !ok {
+			break
+		}
+		seen[cur] = true // cycle guard
+		d++
+		cur = rec.ParentID
+	}
+	return d
+}
+
 func mustMarshal(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
@@ -127,6 +179,69 @@ func substitute(tmpl, agentID, tenantID string) string {
 // write a malformed "tenant:" tuple.
 func referencesTenant(rel registry.SpiceDBRelationTemplate) bool {
 	return strings.Contains(rel.Resource, "{{tenant_id}}") || strings.Contains(rel.Subject, "{{tenant_id}}")
+}
+
+// revokeNode is the per-agent core of revocation, shared by the cascading revoke
+// endpoint: drop the agent's SpiceDB authorization and mark the record "revoked"
+// so any permission check denies in real time. The pod is left running —
+// revocation is authority-only and reversible via resumeNode. Real-time denial
+// comes from the resource's SpiceDB check; a short token lifetime bounds how long
+// an already-minted token survives (client-credentials agents can still mint, but
+// every call is re-checked against the dropped relation).
+//
+// It is a no-op (returns false) for any agent not currently "active", so a
+// cascade never clobbers a descendant that already exited (completed/failed/
+// killed) — that node keeps its terminal status and resumeNode won't resurrect
+// it. This also makes revoke idempotent.
+func revokeNode(ctx context.Context, s *store, sdb spicedb.Client, id string) bool {
+	if s.getAgent(id).Status != "active" {
+		return false
+	}
+	s.updateAgent(id, "revoked")
+	if err := sdb.DeleteAgentRelationships(ctx, id); err != nil {
+		log.Printf("spicedb cleanup error for %s: %v", id, err)
+	}
+	s.appendEvent(id, events.Event{
+		Source:  events.SourceRegistry,
+		Type:    "agent_revoked",
+		Payload: mustMarshal(map[string]string{"agentId": id}),
+	})
+	return true
+}
+
+// resumeNode reverses revokeNode: re-derive the agent's SpiceDB relations from
+// its template (identical logic to registration) and mark it active again. It is
+// a no-op (returns false) for any agent not currently "revoked", so resuming a
+// subtree never resurrects a node that exited or was killed on its own.
+func resumeNode(ctx context.Context, s *store, sdb spicedb.Client, id string) bool {
+	rec := s.getAgent(id)
+	if rec.Status != "revoked" {
+		return false
+	}
+	tpl, ok := s.getTemplate(rec.AgentType)
+	if !ok {
+		log.Printf("resume: unknown agent type %q for %s", rec.AgentType, id)
+		return false
+	}
+	s.updateAgent(id, "active")
+	for _, rel := range tpl.AuthZ.SpiceDBRelations {
+		// Global (tenant-less) agents must not produce a malformed "tenant:"
+		// tuple, so skip any relation referencing {{tenant_id}}.
+		if rec.TenantID == "" && referencesTenant(rel) {
+			continue
+		}
+		res := substitute(rel.Resource, id, rec.TenantID)
+		sub := substitute(rel.Subject, id, rec.TenantID)
+		if err := sdb.WriteRelationship(ctx, res, rel.Relation, sub); err != nil {
+			log.Printf("spicedb resume write error for %s: %v", id, err)
+		}
+	}
+	s.appendEvent(id, events.Event{
+		Source:  events.SourceRegistry,
+		Type:    "agent_resumed",
+		Payload: mustMarshal(map[string]string{"agentId": id}),
+	})
+	return true
 }
 
 func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *http.ServeMux {
@@ -330,66 +445,50 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	// Suspend is the revocation primitive: drop the agent's SpiceDB authorization
-	// so any check for it (or for a delegation chain that includes it) denies, and
-	// mark the record "suspended" so the registry's own logic stops treating it as
-	// active (e.g. IsActive, exchange chain checks).
-	mux.HandleFunc("POST /v1/agents/{id}/suspend", func(w http.ResponseWriter, r *http.Request) {
-		agentID := r.PathValue("id")
-		rec := s.getAgent(agentID)
-		if rec.AgentID == "" {
+	// Revoke is the cascading revocation action: revoke the named agent AND its
+	// entire descendant subtree (everything it spawned, transitively). For each
+	// active node it drops the SpiceDB authorization and marks the record
+	// "revoked", so permission checks deny in real time. Pods are left running —
+	// revocation is authority-only and reversible via /resume. Ancestors and
+	// siblings are untouched, as are descendants that already exited (their
+	// terminal status is preserved). The response lists only the nodes actually
+	// revoked. Revoking a leaf agent (no descendants) is the single-agent case.
+	mux.HandleFunc("POST /v1/agents/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
+		subtree := s.subtree(r.PathValue("id"))
+		if subtree == nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		s.updateAgent(agentID, "suspended")
-		if err := sdb.DeleteAgentRelationships(r.Context(), agentID); err != nil {
-			log.Printf("spicedb cleanup error for %s: %v", agentID, err)
+		revoked := []string{}
+		for _, id := range subtree {
+			if revokeNode(r.Context(), s, sdb, id) {
+				revoked = append(revoked, id)
+			}
 		}
-		s.appendEvent(agentID, events.Event{
-			Source:  events.SourceRegistry,
-			Type:    "agent_suspended",
-			Payload: mustMarshal(map[string]string{"agentId": agentID}),
-		})
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"revoked": revoked})
 	})
 
-	// Resume reverses a suspend: re-derive the agent's SpiceDB relations from its
-	// template (identical logic to registration) and mark the record active again.
+	// Resume reverses a revoke across the same subtree: for the named agent and
+	// each descendant currently "revoked", re-derive its SpiceDB relations from
+	// the template and mark it active. Nodes that aren't revoked (e.g.
+	// completed/failed/killed) are skipped, so resume never resurrects an agent
+	// that exited on its own. Idempotent: resuming an already-active subtree is a
+	// no-op that returns an empty list.
 	mux.HandleFunc("POST /v1/agents/{id}/resume", func(w http.ResponseWriter, r *http.Request) {
-		agentID := r.PathValue("id")
-		rec := s.getAgent(agentID)
-		if rec.AgentID == "" {
+		subtree := s.subtree(r.PathValue("id"))
+		if subtree == nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		if rec.Status != "suspended" {
-			http.Error(w, "agent is not suspended", http.StatusConflict)
-			return
-		}
-		tpl, ok := s.getTemplate(rec.AgentType)
-		if !ok {
-			http.Error(w, "unknown agent type", http.StatusBadRequest)
-			return
-		}
-		s.updateAgent(agentID, "active")
-		for _, rel := range tpl.AuthZ.SpiceDBRelations {
-			// Global (tenant-less) agents must not produce a malformed
-			// "tenant:" tuple, so skip any relation referencing {{tenant_id}}.
-			if rec.TenantID == "" && referencesTenant(rel) {
-				continue
-			}
-			res := substitute(rel.Resource, agentID, rec.TenantID)
-			sub := substitute(rel.Subject, agentID, rec.TenantID)
-			if err := sdb.WriteRelationship(r.Context(), res, rel.Relation, sub); err != nil {
-				log.Printf("spicedb resume write error for %s: %v", agentID, err)
+		resumed := []string{}
+		for _, id := range subtree {
+			if resumeNode(r.Context(), s, sdb, id) {
+				resumed = append(resumed, id)
 			}
 		}
-		s.appendEvent(agentID, events.Event{
-			Source:  events.SourceRegistry,
-			Type:    "agent_resumed",
-			Payload: mustMarshal(map[string]string{"agentId": agentID}),
-		})
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"resumed": resumed})
 	})
 
 	// Delegation policy decision for parentType delegating to childType.
@@ -428,9 +527,11 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 
 	// Spawn-policy decision: may the agent identified by parentId spawn a child of
 	// childType? Resolves parentId -> agentType -> template in-process and checks
-	// the parent template's allowedChildTypes. Deny-by-default: a parent whose
-	// template lists no (or no matching) child types may spawn none. The
-	// orchestrator calls this at spawn time when a parentId is present.
+	// the parent template's allowedChildTypes (deny-by-default: a parent whose
+	// template lists no matching child types may spawn none) and its maxDepth (a
+	// positive maxDepth caps total chain length, so the deepest agent cannot keep
+	// spawning). The orchestrator calls this at spawn time when a parentId is
+	// present.
 	mux.HandleFunc("GET /v1/spawn-policy", func(w http.ResponseWriter, r *http.Request) {
 		parentID := r.URL.Query().Get("parentId")
 		childType := r.URL.Query().Get("childType")
@@ -455,6 +556,16 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 			}
 			if !resp.Allowed {
 				resp.Reason = fmt.Sprintf("%s may not spawn %s", rec.AgentType, childType)
+				break
+			}
+			// Depth cap: the child would sit one level below the parent. A
+			// positive maxDepth bounds total chain length (maxDepth == 0 means
+			// unset / no limit, matching the delegation-policy default).
+			if max := tpl.Delegation.MaxDepth; max > 0 {
+				if childDepth := s.depth(parentID) + 1; childDepth > max {
+					resp.Allowed = false
+					resp.Reason = fmt.Sprintf("max delegation depth %d reached", max)
+				}
 			}
 		}
 

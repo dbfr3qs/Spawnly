@@ -6,10 +6,10 @@ GO_SERVICES   := operator orchestrator registry sample-api agent-sidecar dashboa
 # Separate-module Go agents: their own go.mod (not the root module), so they
 # build via `cd agents/<name> && go build .` and map to image agent-<name>.
 GO_MODULE_AGENTS := go-worker
-NODE_AGENTS   := child-agent parent-agent currency-converter trip-planner
+NODE_AGENTS   := child-agent parent-agent currency-converter trip-planner chain-worker
 SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS)
 
-.PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward redeploy-% reload-% reload-sidecar logs-% reseed
+.PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed
 
 build:
 	@for svc in $(GO_SERVICES); do \
@@ -119,6 +119,27 @@ reseed:
 port-forward:
 	@echo "Dashboard → http://localhost:8090  (Ctrl+C to stop)"
 	@while true; do kubectl port-forward svc/dashboard 8090:8080; sleep 1; done
+
+# kubeconfig — repair the kubeconfig after a Docker/Kind restart. Restores the
+# cluster CA and, inside a devcontainer (where 127.0.0.1 can't reach Kind),
+# re-points kubectl at the control-plane container's current IP (which drifts
+# across restarts). On a native host it just resets Kind's default kubeconfig.
+kubeconfig:
+	@kind export kubeconfig --name $(KIND_CLUSTER) >/dev/null 2>&1 || { echo "Kind cluster '$(KIND_CLUSTER)' not found — run 'make bootstrap'"; exit 1; }
+	@if [ -f /.dockerenv ]; then \
+	  docker network connect kind "$$(cat /etc/hostname)" 2>/dev/null || true; \
+	  CPIP=$$(docker inspect $(KIND_CLUSTER)-control-plane --format '{{(index .NetworkSettings.Networks "kind").IPAddress}}'); \
+	  kubectl config set-cluster kind-$(KIND_CLUSTER) --server="https://$$CPIP:6443" >/dev/null; \
+	  echo "kubeconfig → control-plane $$CPIP (devcontainer)"; \
+	else \
+	  echo "kubeconfig → Kind default (native host)"; \
+	fi
+
+# dash — one command to (re)connect and open the dashboard: repair the
+# kubeconfig, then reuse the port-forward target's loop so it survives brief
+# drops. Run sequentially (do not invoke with -j): kubeconfig must finish before
+# port-forward starts.
+dash: kubeconfig port-forward
 
 bootstrap:
 	./scripts/bootstrap.sh
