@@ -64,6 +64,8 @@ As an agent moves through its life — spawned, given an identity, doing work, e
 | Operator      | `pod_created`               | Operator reconciles the CRD, fetches the template, creates the Pod   |
 | Registry      | `registry_record_created`   | Sidecar self-registers the agent via `POST /v1/agents` (SVID as Bearer token) |
 | Registry      | `spicedb_relations_written` | Registry writes the agent's SpiceDB relations (omitted if global)    |
+| Registry      | `agent_revoked`             | Agent (and each active descendant) revoked: SpiceDB relations dropped, status → `revoked` |
+| Registry      | `agent_resumed`             | Revocation reversed: relations re-derived from the template, status → `active`            |
 
 **Agent activity events** (the neutral, framework-agnostic vocabulary forwarded by the SDK's `instrumentFlue`, plus sidecar/agent startup):
 
@@ -86,8 +88,8 @@ Every directory, by language and purpose:
 | `cmd/registry/` | Go | In-memory agent and template store. Accepts self-registration, persists lifecycle events, writes SpiceDB relationships |
 | `cmd/agent-sidecar/` | Go | Per-pod native sidecar (`:8089`). Fetches the JWT-SVID, exchanges it for scoped OAuth tokens, and serves `/token` to the agent |
 | `cmd/sample-api/` | Go | Protected HTTP API (`GET /work`, `POST /task`). Validates OAuth 2.0 Bearer tokens and a SpiceDB `work_on` check. Deployed as `sample-api`, `sample-api-a`, `sample-api-b`, and `sample-api-global` (the last with `REQUIRE_TENANT=false`) |
-| `cmd/dashboard/` | Go + HTML | Web UI. Polls agents and events, chats with long-lived agents, filters events per-agent; proxies all requests to the orchestrator |
-| `agents/` | TypeScript + Go | Agent workloads. TypeScript/Flue agents on the `@spawnly/sdk`: `weather-monitor` (chat + tool calls), `currency-converter`, `trip-planner`, `parent-agent`, `child-agent`, `global-worker`; plus the Go `go-worker` (minimal short-lived reference workload, on `github.com/spawnly/sdk-go`) |
+| `cmd/dashboard/` | Go + HTML | Web UI. Polls agents and events, chats with long-lived agents, kills/revokes/resumes agents (revoke cascades to the descendant subtree), renders parent→child chains as a nested tree, filters events per-agent; proxies all requests to the orchestrator |
+| `agents/` | TypeScript + Go | Agent workloads. TypeScript/Flue agents on the `@spawnly/sdk`: `weather-monitor` (chat + tool calls), `currency-converter`, `trip-planner`, `parent-agent`, `child-agent`, `global-worker`, `chain-worker` (deterministic, no-LLM self-spawning looping worker that demonstrates cascading revocation); plus the Go `go-worker` (minimal short-lived reference workload, on `github.com/spawnly/sdk-go`) |
 | `sdks/typescript/` | TypeScript | The `@spawnly/sdk` package — token/HTTP/event helpers consumed by the Flue agents |
 | `sdks/go/` | Go | The `github.com/spawnly/sdk-go` module — the same token/HTTP/event helpers for Go agents like `go-worker` |
 | `identityserver/` | C# (.NET) | Duende IdentityServer. Issues OAuth 2.0 access tokens; authenticates the sidecar via JWT-SVID `client_assertion` |
@@ -161,6 +163,8 @@ This will:
 - Print the lifecycle event timeline
 
 Open `http://localhost:8090` to watch events, spin up agents, and chat with long-lived ones in real time — as in the [dashboard screenshot](#lifecycle-events) above.
+
+**Reconnecting later?** If you just want the dashboard back — e.g. after a Docker/Kind restart drops the connection — run `make dash`. It repairs the kubeconfig (the control-plane container's IP can drift across restarts) and port-forwards the dashboard to `localhost:8090`, without re-running the bootstrap.
 
 ---
 
@@ -261,10 +265,18 @@ curl http://localhost:8080/v1/agents | jq
 curl http://localhost:8080/v1/agents/<workloadName>/events | jq
 ```
 
-### Delete (kill) an agent
+### Kill, revoke, or resume an agent
 
 ```bash
+# Kill — delete a single agent's pod; does NOT affect the rest of its chain
 curl -X DELETE http://localhost:8080/v1/agents/<workloadName>
+
+# Revoke — drop authorization for an agent AND its entire descendant subtree.
+# Pods stay alive, but their next protected call returns 403. Reversible.
+curl -X POST http://localhost:8080/v1/agents/<workloadName>/revoke
+
+# Resume — restore authorization across the same subtree
+curl -X POST http://localhost:8080/v1/agents/<workloadName>/resume
 ```
 
 ### View service logs

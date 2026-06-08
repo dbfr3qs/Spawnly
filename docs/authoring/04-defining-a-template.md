@@ -195,7 +195,7 @@ That's the whole loop: define → register → spawn → observe.
 | `authzTemplate.spiceDbRelations[]` | list | — | `{resource, relation, subject}` with `{{tenant_id}}`/`{{agent_id}}`. |
 | `delegation.allowedChildTypes[]` | list | — | Child types this type may spawn/delegate to. |
 | `delegation.grantableScopes[]` | list | — | Scope ceiling this type may pass down. |
-| `delegation.maxDepth` | int | — | Max delegation chain depth (`0` = unbounded check skipped). |
+| `delegation.maxDepth` | int | — | Max chain length / delegation depth; enforced at `/spawn` (chain length) and at token-exchange (delegation depth). `0` = unbounded check skipped. |
 
 ### Who consumes each field
 
@@ -209,7 +209,8 @@ The template is read by four components at different moments — a template is n
 | `runtimeSpec.image`, `resources`, `envDefaults` | **Operator** | At pod build ([reconciler.go:224](../../internal/operator/reconciler.go#L224)). |
 | `authzTemplate.spiceDbRelations` | **Registry** → SpiceDB | At agent self-registration (relations projected into SpiceDB). |
 | `delegation.allowedChildTypes` | **Orchestrator** (via registry `/v1/spawn-policy`) | At `/spawn`, when a `parentId` is present (deny-by-default). |
-| `delegation` (`grantableScopes`, `maxDepth`) | **IdentityServer** (via registry `/v1/delegation-policy`) | At token-exchange. |
+| `delegation.maxDepth` | **Orchestrator** (via `/v1/spawn-policy`) + **IdentityServer** (via `/v1/delegation-policy`) | At `/spawn` (caps total chain length) and at token-exchange (caps delegation depth). |
+| `delegation.grantableScopes` | **IdentityServer** (via registry `/v1/delegation-policy`) | At token-exchange. |
 
 ### Substitution tokens
 
