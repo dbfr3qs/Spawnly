@@ -13,6 +13,12 @@ description: A long-lived agent that loops on a queue until deleted — lifecycl
 > (seeded by [`scripts/seed.sh`](../../scripts/seed.sh)). It is a long-lived agent that
 > beats on an interval; the Queue Worker is the same lifecycle with real
 > per-iteration work.
+>
+> **See also:** [`agents/chain-worker`](../../agents/chain-worker) is a deterministic
+> (no-LLM) agent in exactly this shape — it calls `sample-api-a` every few seconds
+> and emits `work_ok`/`work_denied`. It additionally self-spawns one child of its
+> own type ([Scenario 3](03-parent-and-child.md)) up to its template's `maxDepth`,
+> and is the workload behind the [cascading revocation walkthrough](05-defining-policy.md#revocation-revoke--resume).
 
 ## The personality
 

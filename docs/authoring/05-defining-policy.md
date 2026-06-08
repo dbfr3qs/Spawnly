@@ -35,10 +35,10 @@ points and moments. This map is the orientation for everything below:
   │  Registry   │◀──────────────────────────────┐ GET /v1/delegation-policy
   │  templates  │                                │ GET /v1/agents/{id}/chain
   │  + records  │                                │
-  │  + suspend  │──┐                             │
+  │  + revoke   │──┐                             │
   └─────────────┘  │ on self-register: project   │
                    │ authzTemplate relations;    │
-                   │ on suspend: drop relations  │
+                   │ on revoke: drop relations   │
                    ▼                             │
   ┌─────────────┐                       ┌────────┴─────────┐
   │   SpiceDB   │                       │  IdentityServer  │
@@ -47,7 +47,7 @@ points and moments. This map is the orientation for everything below:
   └──────┬──────┘                       │   grantable (∩)  │
          │ per-request check            │   maxDepth       │
          │                              │   act-chain +    │
-         ▼                              │   suspension     │
+         ▼                              │   revocation     │
   ┌─────────────┐   Bearer token        └────────┬─────────┘
   │  Sample API │◀───────────────┐    issues attenuated token
   │ (resource   │                │       (scope ⊆ ceiling, act)
@@ -71,8 +71,8 @@ points and moments. This map is the orientation for everything below:
 | requested `scope` | agent code | (carried in token) | IdentityServer (issue); Sample API (validate) | per token request / per call |
 | `delegation.allowedChildTypes` | parent template | Registry | IdentityServer via `/v1/delegation-policy` | at token-exchange |
 | `delegation.grantableScopes` | parent template | Registry | IdentityServer (attenuation ∩) | at token-exchange |
-| `delegation.maxDepth` | parent template | Registry (+ chain) | IdentityServer | at token-exchange |
-| suspension state | operator (`/suspend`) | Registry → SpiceDB | IS (chain check); SpiceDB (per-call) | at exchange + per protected call |
+| `delegation.maxDepth` | parent template | Registry (+ chain) | Orchestrator (`/v1/spawn-policy`); IdentityServer | at `/spawn` (chain length) + token-exchange (delegation depth) |
+| revocation state | operator/UI (`/revoke`, `/resume`) | Registry → SpiceDB | IS (chain check); SpiceDB (per-call) | at `/revoke` + per protected call |
 
 ---
 
@@ -213,7 +213,7 @@ rejects the exchange unless **all** of these hold:
    `grantableScopes`.
 5. **Depth.** `subject act-chain depth + 1 ≤ maxDepth`.
 6. **Whole chain active.** The child *and every actor named in the subject's `act`
-   chain* must be `active` in the registry — any `suspended`/`failed`/`completed`
+   chain* must be `active` in the registry — any `revoked`/`failed`/`completed`
    member rejects the exchange.
 
 Gates 2 and 4 together are the attenuation rule:
@@ -263,27 +263,44 @@ template + own ceiling) and reserve delegation for *narrowing* a slice of the
 user's authority. Keep using token-exchange for the `act` chain it produces — just
 bound the result by the subject.
 
-### Revocation / suspension
+### Revocation (revoke / resume)
 
-Suspending one agent revokes it **and its entire subtree**, enforced in three
-layers:
+`revoke` cuts off an agent's authority **and its entire descendant subtree** —
+everything it spawned, transitively — in real time, while leaving the pods
+running. It is authority-only (not a kill) and reversible with `resume`. This is
+distinct from `DELETE /v1/agents/{id}`, which tears down a single pod and does
+*not* cascade.
+
+Revoke walks the subtree (via `parentId` lineage) and, for each node that is
+currently `active`, drops its SpiceDB relations and sets its status to `revoked`.
+Ancestors and siblings are untouched, and descendants that already exited
+(`completed`/`failed`/`killed`) keep their terminal status — so a cascade never
+clobbers a node that finished on its own, and revoke is idempotent.
+
+Because each node's **own** relations are dropped (not just an ancestor's), a
+revoked agent is denied even when it acts alone — and the act-chain check
+(gate 6) additionally denies anyone delegating *through* a revoked ancestor. The
+effect is enforced in three layers:
 
 | Concern | Mechanism | Latency |
 |---------|-----------|---------|
-| New / refreshed tokens through a suspended agent | IS chain-active check (gate 6) | Instant |
-| In-flight token on a protected call | SpiceDB drop on suspend → resource-server `work_on` fails on that hop | Instant (next call) |
+| New / refreshed tokens through a revoked agent | IS chain-active check (gate 6) | Instant |
+| In-flight token on a protected call | SpiceDB drop on revoke → resource-server `work_on` fails on that hop | Instant (next call) |
 | In-flight token on any other path | Short token TTL (120s) | ≤ one TTL |
 
-Operations:
+Operations (the response lists exactly the nodes that changed):
 
 ```bash
-curl -sf -X POST http://localhost:8080/v1/agents/<id>/suspend   # status=suspended, drop SpiceDB relations
-curl -sf -X POST http://localhost:8080/v1/agents/<id>/resume    # re-derive relations from template, status=active
+curl -sf -X POST http://localhost:8080/v1/agents/<id>/revoke   # {"revoked":[...]}  — subtree → status=revoked, relations dropped
+curl -sf -X POST http://localhost:8080/v1/agents/<id>/resume   # {"resumed":[...]}  — re-derive relations from template, status=active
 ```
 
-`suspend` sets the record to `suspended` and calls `DeleteAgentRelationships`;
-`resume` re-writes the template's relations and restores `active`
-([cmd/registry/main.go:326](../../cmd/registry/main.go#L326)).
+`revoke` ([cmd/registry/main.go:456](../../cmd/registry/main.go#L456)) applies
+`revokeNode` over the subtree — `DeleteAgentRelationships` + status `revoked`;
+`resume` ([cmd/registry/main.go:478](../../cmd/registry/main.go#L478)) applies
+`resumeNode`, re-writing each revoked node's template relations and restoring
+`active`. Each emits an `agent_revoked` / `agent_resumed` lifecycle event per
+node.
 
 ---
 
