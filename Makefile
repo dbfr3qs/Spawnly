@@ -13,7 +13,7 @@ NODE_AGENTS   := child-agent parent-agent currency-converter trip-planner chain-
 EXTRA_AGENTS  := identity-server weather-monitor
 SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS) $(EXTRA_AGENTS)
 
-.PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed print-%
+.PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed print-% e2e-setup e2e
 
 # print-<VAR> — echo a make variable so shell scripts can read the authoritative
 # lists instead of re-declaring them. e.g. `make -s print-SERVICES`.
@@ -151,3 +151,14 @@ bootstrap:
 
 demo:
 	./scripts/demo.sh
+
+# e2e-setup — one-time install of Playwright and its Chromium browser for the
+# dashboard UI test suite. Run after `make bootstrap`.
+e2e-setup:
+	cd e2e && npm install && npx playwright install --with-deps chromium
+
+# e2e — run the browser-based dashboard tests. Assumes a bootstrapped cluster
+# (make bootstrap) and ANTHROPIC_API_KEY in .env. Playwright owns the dashboard
+# port-forward (see e2e/playwright.config.ts → scripts/e2e.sh).
+e2e:
+	cd e2e && npm test

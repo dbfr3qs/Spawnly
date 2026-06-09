@@ -1,0 +1,13 @@
+{
+  "name": "dashboard-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Browser-based E2E tests for the Spawnly dashboard UI",
+  "scripts": {
+    "test": "playwright test",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}
