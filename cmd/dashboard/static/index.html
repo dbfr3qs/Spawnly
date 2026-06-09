@@ -884,7 +884,7 @@
   function statusBadge(status) {
     const s = (status || 'pending').toLowerCase();
     const cls = {active:'badge-active', completed:'badge-completed', failed:'badge-failed', revoked:'badge-revoked'}[s] || 'badge-pending';
-    return `<span class="badge ${cls}">${s}</span>`;
+    return `<span class="badge ${cls}" data-testid="status">${s}</span>`;
   }
 
   function sourceBadge(source) {
@@ -993,14 +993,14 @@
     return s === 'active' ? 'revoke' : s === 'revoked' ? 'resume' : '';
   }
   function revokeBtnHtml(id, state) {
-    if (state === 'revoke') return `<button class="btn btn-revoke" onclick="handleRevoke('${id}')">Revoke</button>`;
-    if (state === 'resume') return `<button class="btn btn-resume" onclick="handleResume('${id}')">Resume</button>`;
+    if (state === 'revoke') return `<button class="btn btn-revoke" data-testid="revoke" onclick="handleRevoke('${id}')">Revoke</button>`;
+    if (state === 'resume') return `<button class="btn btn-resume" data-testid="resume" onclick="handleResume('${id}')">Resume</button>`;
     return '';
   }
   function actionButtonsHtml(a) {
     return `
       <span id="revokewrap-${a.agentId}" data-state="${revokeState(a.status)}">${revokeBtnHtml(a.agentId, revokeState(a.status))}</span>
-      <span id="killwrap-${a.agentId}">${isAlive(a.status) ? `<button class="btn btn-danger" onclick="handleKill('${a.agentId}')">Kill</button>` : ''}</span>
+      <span id="killwrap-${a.agentId}">${isAlive(a.status) ? `<button class="btn btn-danger" data-testid="kill" onclick="handleKill('${a.agentId}')">Kill</button>` : ''}</span>
       <span id="dismisswrap-${a.agentId}">${isTerminalStatus(a.status) ? `<button class="btn btn-dismiss" onclick="handleDismiss('${a.agentId}')">✕</button>` : ''}</span>`;
   }
 
@@ -1020,7 +1020,7 @@
     const kw = document.getElementById(`killwrap-${a.agentId}`);
     if (kw) {
       const has = !!kw.querySelector('button');
-      if (isAlive(a.status) && !has) kw.innerHTML = `<button class="btn btn-danger" onclick="handleKill('${a.agentId}')">Kill</button>`;
+      if (isAlive(a.status) && !has) kw.innerHTML = `<button class="btn btn-danger" data-testid="kill" onclick="handleKill('${a.agentId}')">Kill</button>`;
       else if (!isAlive(a.status) && has) kw.innerHTML = '';
     }
     const dw = document.getElementById(`dismisswrap-${a.agentId}`);
@@ -1189,6 +1189,9 @@
       // append-only renderedEventCount invariant holds. Filtering is purely
       // visual (toggle .evt-hidden), applied below.
       item.dataset.evtCat = eventCategory(e.type);
+      // Stable hook for E2E tests — assert on the neutral event type directly
+      // rather than the icon/CSS class.
+      item.dataset.eventType = e.type || '';
       item.innerHTML = `<details>
         <summary>
           <span class="event-icon">${escHtml(icon)}</span>

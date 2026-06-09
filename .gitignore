@@ -16,6 +16,11 @@ agents/*/dist/
 sdks/*/node_modules/
 sdks/*/dist/
 
+# E2E (Playwright)
+e2e/node_modules/
+e2e/test-results/
+e2e/playwright-report/
+
 # .NET build output
 identityserver/bin/
 identityserver/obj/
