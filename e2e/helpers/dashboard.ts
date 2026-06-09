@@ -65,6 +65,57 @@ export async function listAgents(page: Page): Promise<AgentSummary[]> {
   return resp.json();
 }
 
+// Send one chat message to a long-lived agent and return its reply text. Opens
+// the chat panel only if it isn't already open (so repeated calls don't toggle
+// it shut), and waits for a NEW agent bubble to appear — counting the existing
+// non-typing replies first, then waiting for the count to grow — so a second
+// prompt never matches the first prompt's stale reply.
+//
+// Just after an agent reaches `active` (registered) there is a brief window
+// where its HTTP listener / Service endpoint isn't routable yet, so the
+// orchestrator returns and the dashboard renders a persistent
+// "[Error: agent unreachable]" bubble that never self-heals. This is more
+// likely for heavier agents (e.g. pi-worker's large module graph slows its cold
+// start). To stay robust we treat that specific error as a readiness signal and
+// re-send after a short backoff, up to `timeout`. Any other error bubble fails
+// immediately (it's a real error, not warm-up).
+export async function chat(
+  page: Page,
+  agentId: string,
+  message: string,
+  timeout = 150_000,
+): Promise<string> {
+  const input = page.locator(`[id="chatinput-${agentId}"]`);
+  if (!(await input.isVisible().catch(() => false))) {
+    await page.locator(`[id="chatbtn-${agentId}"]`).click();
+    await expect(input).toBeVisible({ timeout: 60_000 });
+  }
+
+  // The typing bubble shares .chat-msg.agent — exclude it to count real replies.
+  const replies = page.locator(`[id="chatlog-${agentId}"] .chat-msg.agent:not(.typing)`);
+  const deadline = Date.now() + timeout;
+  let attempt = 0;
+
+  while (true) {
+    const before = await replies.count();
+    await input.fill(message);
+    await input.press('Enter');
+    await expect(replies).toHaveCount(before + 1, { timeout });
+
+    const reply = replies.nth(before);
+    const text = (await reply.textContent())?.trim() ?? '';
+
+    if (/^\[Error: agent unreachable/.test(text) && Date.now() < deadline) {
+      attempt++;
+      await page.waitForTimeout(5_000); // warm-up backoff, then re-send
+      continue;
+    }
+
+    expect(text, `agent ${agentId} reply was an error after ${attempt} retr${attempt === 1 ? 'y' : 'ies'}`).not.toMatch(/^\[Error:/);
+    return text;
+  }
+}
+
 function childrenOf(agents: AgentSummary[]): Map<string, AgentSummary[]> {
   const m = new Map<string, AgentSummary[]>();
   for (const a of agents) {

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { spawn, waitForStatus } from '../helpers/dashboard';
+import { spawn, waitForStatus, chat } from '../helpers/dashboard';
 import { killTrees } from '../helpers/cleanup';
 
 // Scenario 3 — chat. Spawn the weather-monitor (long-lived, supportsChat), open
@@ -22,22 +22,10 @@ test.describe('weather-monitor', () => {
     // endpoint can reach a ready pod.
     await waitForStatus(page, id, 'active');
 
-    const chatBtn = page.locator(`[id="chatbtn-${id}"]`);
-    await expect(chatBtn).toBeVisible({ timeout: 60_000 });
-    await chatBtn.click();
-
-    const input = page.locator(`[id="chatinput-${id}"]`);
-    await expect(input).toBeVisible();
-    await input.fill('Hi');
-    await input.press('Enter');
-
-    // The typing bubble shares .chat-msg.agent — exclude it to match the real
-    // reply. LLM latency dominates, so allow a generous window.
-    const reply = page.locator(`[id="chatlog-${id}"] .chat-msg.agent:not(.typing)`).first();
-    await expect(reply).toBeVisible({ timeout: 90_000 });
-    await expect(reply).not.toHaveText(/^\[Error:/);
-
-    const text = (await reply.textContent())?.trim() ?? '';
+    // Send "Hi" and assert a non-empty, non-error reply. chat() opens the panel,
+    // excludes the typing bubble, and retries the transient "agent unreachable"
+    // warm-up window. LLM latency dominates, so allow a generous window.
+    const text = await chat(page, id, 'Hi', 90_000);
     expect(text.length).toBeGreaterThan(0);
   });
 });

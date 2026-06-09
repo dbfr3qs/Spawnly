@@ -68,6 +68,18 @@ public static class Config
             },
             new Client
             {
+                ClientId = "pi-worker",
+                AllowedGrantTypes = GrantTypes.ClientCredentials,
+                RequireClientSecret = true,
+                // Placeholder so Duende's config validator is satisfied;
+                // actual auth is via SpireClientSecretValidator (client_assertion JWT-SVID).
+                ClientSecrets = { new Secret("placeholder".Sha256()) },
+                AlwaysSendClientClaims = true,
+                ClientClaimsPrefix = "",
+                AllowedScopes = { "sample-api-a:read" },
+            },
+            new Client
+            {
                 ClientId = "parent-agent",
                 // Both client_credentials (to mint a root token) and token-exchange
                 // (to delegate to a child / re-exchange).
