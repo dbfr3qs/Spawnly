@@ -7,9 +7,18 @@ GO_SERVICES   := operator orchestrator registry sample-api agent-sidecar dashboa
 # build via `cd agents/<name> && go build .` and map to image agent-<name>.
 GO_MODULE_AGENTS := go-worker
 NODE_AGENTS   := child-agent parent-agent currency-converter trip-planner chain-worker
-SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS)
+# Demo agents built from their own Dockerfile stage. They follow the standard
+# agent-<name> image convention (unlike agent-sidecar), so they need no special
+# casing — they just weren't in any list before.
+EXTRA_AGENTS  := identity-server weather-monitor
+SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS) $(EXTRA_AGENTS)
 
-.PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed
+.PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed print-%
+
+# print-<VAR> — echo a make variable so shell scripts can read the authoritative
+# lists instead of re-declaring them. e.g. `make -s print-SERVICES`.
+print-%:
+	@echo '$($*)'
 
 build:
 	@for svc in $(GO_SERVICES); do \
@@ -33,8 +42,6 @@ docker-build:
 	# references the image as `agent-sidecar:latest`, so the generic agent-<svc>
 	# convention (agent-agent-sidecar) does not apply.
 	docker build --target agent-sidecar -t agent-sidecar:$(IMAGE_TAG) .
-	docker build --target identity-server -t agent-identity-server:$(IMAGE_TAG) .
-	docker build --target weather-monitor -t agent-weather-monitor:$(IMAGE_TAG) .
 
 kind-up:
 	kind create cluster --name $(KIND_CLUSTER) --config deploy/kind/cluster.yaml
@@ -47,8 +54,6 @@ kind-load: docker-build
 		kind load docker-image agent-$$svc:$(IMAGE_TAG) --name $(KIND_CLUSTER); \
 	done
 	kind load docker-image agent-sidecar:$(IMAGE_TAG) --name $(KIND_CLUSTER)
-	kind load docker-image agent-identity-server:$(IMAGE_TAG) --name $(KIND_CLUSTER)
-	kind load docker-image agent-weather-monitor:$(IMAGE_TAG) --name $(KIND_CLUSTER)
 
 spire:
 	helm repo add spiffe https://spiffe.github.io/helm-charts-hardened/ 2>/dev/null || true

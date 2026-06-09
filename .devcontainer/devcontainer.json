@@ -7,6 +7,11 @@
   "containerEnv": {
     "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
   },
+  "forwardPorts": [8090, 8080],
+  "portsAttributes": {
+    "8090": { "label": "dashboard", "onAutoForward": "openBrowser" },
+    "8080": { "label": "orchestrator", "onAutoForward": "silent" }
+  },
   "features": {
     "ghcr.io/devcontainers/features/node:2": {
       "version": "lts"

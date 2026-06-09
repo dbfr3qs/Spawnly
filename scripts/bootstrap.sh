@@ -23,6 +23,13 @@ fi
 
 if kind get clusters 2>/dev/null | grep -q "^${KIND_CLUSTER}$"; then
   echo "==> Kind cluster '${KIND_CLUSTER}' already exists — skipping creation"
+  # ~/.kube/config is not a persisted mount, so a devcontainer reopen/rebuild
+  # wipes it to an empty skeleton (no context → kubectl/helm fall back to
+  # localhost:8080). `kind create cluster` is what normally writes the full
+  # kubeconfig, but we skip creation here, so regenerate it explicitly. The
+  # IN_CONTAINER block below then rewrites the server to the container IP.
+  echo "==> Restoring kubeconfig from existing cluster..."
+  kind export kubeconfig --name "$KIND_CLUSTER"
 else
   echo "==> Creating Kind cluster..."
   kind create cluster --name "$KIND_CLUSTER" --config deploy/kind/cluster.yaml
@@ -71,21 +78,23 @@ build_image() {
   fi
 }
 
-for svc in operator orchestrator registry sample-api go-worker dashboard child-agent parent-agent; do
+# Single source of truth: the Makefile's SERVICES list. Avoids drift between
+# here and the Makefile (which previously left several agents unbuilt here).
+SERVICES="$(make -s -C "$REPO_ROOT" print-SERVICES)"
+for svc in $SERVICES; do
+  # agent-sidecar is special: its stage is `agent-sidecar` and the operator
+  # references the image as `agent-sidecar:latest`, not `agent-agent-sidecar`.
+  [ "$svc" = "agent-sidecar" ] && continue
   build_image "$svc" "agent-$svc:$IMAGE_TAG"
 done
-# agent-sidecar is special: its stage is `agent-sidecar` and the operator
-# references the image as `agent-sidecar:latest`, not `agent-agent-sidecar`.
 build_image agent-sidecar "agent-sidecar:$IMAGE_TAG"
-build_image identity-server "agent-identity-server:$IMAGE_TAG"
-build_image weather-monitor "agent-weather-monitor:$IMAGE_TAG"
 
 echo "==> Loading images into Kind..."
-for svc in operator orchestrator registry sample-api go-worker dashboard identity-server child-agent parent-agent; do
+for svc in $SERVICES; do
+  [ "$svc" = "agent-sidecar" ] && continue
   kind load docker-image "agent-$svc:$IMAGE_TAG" --name "$KIND_CLUSTER"
 done
 kind load docker-image "agent-sidecar:$IMAGE_TAG" --name "$KIND_CLUSTER"
-kind load docker-image "agent-weather-monitor:$IMAGE_TAG" --name "$KIND_CLUSTER"
 
 # ── SPIRE ────────────────────────────────────────────────────────────────────
 
