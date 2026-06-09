@@ -14,7 +14,6 @@
     "resources": {"cpuLimits": "1", "memoryLimits": "512Mi"},
     "envDefaults": {
       "LOG_LEVEL": "info",
-      "AI_PROVIDER": "openai",
       "AI_MODEL": "openai/gpt-4o",
       "SAMPLE_API_URL": "http://sample-api-global",
       "SCOPE": "sample-api-a:read"

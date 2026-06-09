@@ -19,9 +19,9 @@ import { killTrees } from '../helpers/cleanup';
 // so we only pay the cold-start once. Assertions read the event timeline (the
 // API the dashboard polls) so they don't depend on how the LLM phrases replies.
 //
-// Precondition: pi-worker pins AI_PROVIDER=openai, so the cluster's ai-provider
-// Secret must carry a valid OpenAI key (unlike weather-chat, which defaults to
-// Anthropic). See e2e/README.md.
+// Precondition: pi-worker pins AI_MODEL=openai/gpt-4o, so the cluster's
+// ai-provider Secret must carry a valid OpenAI key (unlike weather-chat, which
+// defaults to Anthropic). See e2e/README.md.
 test.describe('pi-worker', () => {
   // Pi's image is large and a coding task runs multiple tool/model turns; give
   // this spec a generous ceiling above the suite default.
