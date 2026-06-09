@@ -19,7 +19,9 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    // headless is Playwright's default, but pin it so a stray HEADED/PWDEBUG
+    // env or future edit can't pop a visible window during a run.
+    { name: 'chromium', use: { ...devices['Desktop Chrome'], headless: true } },
   ],
   webServer: {
     command: 'bash ../scripts/e2e.sh portforward',
