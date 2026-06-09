@@ -129,7 +129,24 @@ when needed. For a native run, install the tools above on your PATH first (on ma
 `brew install kind kubectl helm jq` plus Docker Desktop). If detection ever guesses wrong, force it
 with `BOOTSTRAP_IN_CONTAINER=1` (container) or `BOOTSTRAP_IN_CONTAINER=0` (host).
 
-To use the LLM-backed agents, copy `.env.example` to `.env` and set `AI_PROVIDER` (`openai` or `anthropic`) and `AI_API_KEY`. `make bootstrap` loads these into the `ai-provider` Secret.
+### Provider API keys
+
+The LLM-backed agents need a model provider key. Keys are configured **once, for the whole platform** — you do not set them per agent.
+
+1. Copy the template and fill in your key:
+   ```bash
+   cp .env.example .env
+   ```
+   See [`.env.example`](.env.example) for the full list of variables. The essentials:
+   - `AI_PROVIDER` — `anthropic` (default) or `openai`.
+   - `AI_API_KEY` — the key for that provider. (You may instead use the provider-specific `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.)
+   - `AI_MODEL` *(optional)* — overrides the provider default (`anthropic/claude-sonnet-4-6` or `openai/gpt-4o`).
+
+2. `make bootstrap` reads `.env` and loads these values into a single Kubernetes Secret named `ai-provider`.
+
+3. At spawn time the operator injects that Secret into **every** agent pod as `AI_PROVIDER` / `AI_API_KEY` / `AI_MODEL` — so all agents share the same key, and switching providers is a one-line `.env` change plus a re-bootstrap. An agent template may pin a specific model via its own `envDefaults` (e.g. `pi-worker` pins `AI_MODEL=openai/gpt-4o`), which overrides the Secret's `AI_MODEL` for that agent — so make sure the configured key matches.
+
+`.env` is gitignored; your key never leaves your machine and the cluster's Secret.
 
 ---
 
