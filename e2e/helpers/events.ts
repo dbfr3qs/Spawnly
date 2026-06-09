@@ -65,3 +65,33 @@ export async function waitForEventType(
 export async function expandEvents(page: Page, agentId: string): Promise<void> {
   await page.locator(`[id="evtbtn-${agentId}"]`).click();
 }
+
+// Poll the timeline until a successful `tool_end` for a specific tool appears
+// (payload.toolName === toolName && payload.isError === false), optionally newer
+// than `since`. Used to assert a NAMED tool ran — `waitForEventType` only matches
+// on the neutral `type`, which can't distinguish one tool from another.
+export async function waitForToolEnd(
+  page: Page,
+  agentId: string,
+  toolName: string,
+  opts: WaitEventOpts = {},
+): Promise<void> {
+  const since = opts.since ?? 0;
+  await expect
+    .poll(
+      async () => {
+        const evts = await getEvents(page, agentId);
+        return evts.some((e) => {
+          const p = (e.payload ?? {}) as { toolName?: string; isError?: boolean };
+          return (
+            e.type === 'tool_end' &&
+            p.toolName === toolName &&
+            p.isError === false &&
+            (!since || (e.timestamp ? Date.parse(e.timestamp) : 0) > since)
+          );
+        });
+      },
+      { timeout: opts.timeout ?? 90_000, intervals: [1000, 2000, 3000] },
+    )
+    .toBe(true);
+}

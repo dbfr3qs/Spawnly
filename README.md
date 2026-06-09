@@ -4,10 +4,10 @@ A proof-of-concept platform for running AI agents on Kubernetes with cryptograph
 
 Each agent pod gets a unique SPIFFE identity (JWT-SVID) issued by SPIRE at start. A per-pod **sidecar** uses that identity to register the agent with the **agent registry** and to obtain scoped OAuth 2.0 access tokens; the agent then calls protected APIs and emits structured lifecycle events throughout — all visible in a real-time web dashboard.
 
-Two agent flavours run on the same platform contract:
+Agents run on the same platform contract regardless of language or framework:
 
 - **A Go worker** (`agents/go-worker/`) — the minimal short-lived reference workload, built on the Go SDK (`github.com/spawnly/sdk-go`).
-- **TypeScript / [Flue](https://www.npmjs.com/package/@flue/runtime) agents** (`agents/`) — built on the `@spawnly/sdk` (which lives in `sdks/typescript/`). These can chat over an LLM (OpenAI or Anthropic), call tools, and orchestrate child agents over A2A.
+- **TypeScript agents** (`agents/`) — built on the `@spawnly/sdk` (which lives in `sdks/typescript/`). These can chat over an LLM (OpenAI or Anthropic), call tools, and orchestrate child agents over A2A. Most use the [Flue](https://www.npmjs.com/package/@flue/runtime) runtime; **`pi-worker`** instead embeds the [Pi](https://pi.dev) coding harness (`@earendil-works/pi-coding-agent`) — the first non-Flue agent, and a deliberate proof that the contract is framework-agnostic: its agent code uses only the SDK, and the Pi→event glue lives in the agent, not the platform.
 
 ---
 
@@ -29,7 +29,7 @@ Spawnly is a handful of small, single-purpose services. Before the architecture 
 
 **Agents & the services they call**
 
-- **Agents** — the actual workloads: a minimal Go worker, plus TypeScript/Flue agents that chat over an LLM, call tools, and can spawn child agents.
+- **Agents** — the actual workloads: a minimal Go worker, plus TypeScript agents (Flue- or Pi-based) that chat over an LLM, call tools, and can spawn child agents.
 - **Sample API** — a protected example service that agents call, to demonstrate token-based access and tenant/authorisation checks.
 
 **Observability**
@@ -89,8 +89,8 @@ Every directory, by language and purpose:
 | `cmd/agent-sidecar/` | Go | Per-pod native sidecar (`:8089`). Fetches the JWT-SVID, exchanges it for scoped OAuth tokens, and serves `/token` to the agent |
 | `cmd/sample-api/` | Go | Protected HTTP API (`GET /work`, `POST /task`). Validates OAuth 2.0 Bearer tokens and a SpiceDB `work_on` check. Deployed as `sample-api`, `sample-api-a`, `sample-api-b`, and `sample-api-global` (the last with `REQUIRE_TENANT=false`) |
 | `cmd/dashboard/` | Go + HTML | Web UI. Polls agents and events, chats with long-lived agents, kills/revokes/resumes agents (revoke cascades to the descendant subtree), renders parent→child chains as a nested tree, filters events per-agent; proxies all requests to the orchestrator |
-| `agents/` | TypeScript + Go | Agent workloads. TypeScript/Flue agents on the `@spawnly/sdk`: `weather-monitor` (chat + tool calls), `currency-converter`, `trip-planner`, `parent-agent`, `child-agent`, `global-worker`, `chain-worker` (deterministic, no-LLM self-spawning looping worker that demonstrates cascading revocation); plus the Go `go-worker` (minimal short-lived reference workload, on `github.com/spawnly/sdk-go`) |
-| `sdks/typescript/` | TypeScript | The `@spawnly/sdk` package — token/HTTP/event helpers consumed by the Flue agents |
+| `agents/` | TypeScript + Go | Agent workloads. TypeScript agents on the `@spawnly/sdk`: `weather-monitor` (chat + tool calls), `currency-converter`, `trip-planner`, `parent-agent`, `child-agent`, `global-worker`, `chain-worker` (deterministic, no-LLM self-spawning looping worker that demonstrates cascading revocation) — all on the Flue runtime; plus `pi-worker` (long-lived chat coding agent on the Pi harness — the first non-Flue agent, proving the contract is framework-agnostic); plus the Go `go-worker` (minimal short-lived reference workload, on `github.com/spawnly/sdk-go`) |
+| `sdks/typescript/` | TypeScript | The `@spawnly/sdk` package — token/HTTP/event helpers consumed by the TypeScript agents (Flue and Pi alike) |
 | `sdks/go/` | Go | The `github.com/spawnly/sdk-go` module — the same token/HTTP/event helpers for Go agents like `go-worker` |
 | `identityserver/` | C# (.NET) | Duende IdentityServer. Issues OAuth 2.0 access tokens; authenticates the sidecar via JWT-SVID `client_assertion` |
 | `internal/events/` | Go | Shared lifecycle event types and HTTP client used by all Go services |
@@ -170,7 +170,7 @@ Open `http://localhost:8090` to watch events, spin up agents, and chat with long
 
 ## AI provider & chat
 
-Flue agents read their LLM config from the `ai-provider` Secret, injected by the operator as `AI_PROVIDER` / `AI_API_KEY` / `AI_MODEL`. Both OpenAI (`openai/gpt-4o`, …) and Anthropic (`anthropic/claude-sonnet-4-6`, …) are supported.
+LLM-backed agents read their config from the `ai-provider` Secret, injected by the operator as `AI_PROVIDER` / `AI_API_KEY` / `AI_MODEL`. Both OpenAI (`openai/gpt-4o`, …) and Anthropic (`anthropic/claude-sonnet-4-6`, …) are supported. (`pi-worker` reads the same env and feeds the key to Pi via its `AuthStorage` runtime override.)
 
 **Long-lived agents that declare `supportsChat: true` can be chatted with from the dashboard** (the 💬 Chat button). A message round-trips:
 

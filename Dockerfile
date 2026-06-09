@@ -202,6 +202,40 @@ COPY sdks/typescript/package.json ./node_modules/@spawnly/sdk/package.json
 COPY --from=build-ts-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
 CMD ["node", "dist/index.js"]
 
+# Pi-worker Node build (Pi coding harness — @earendil-works/pi-coding-agent).
+# Built on node:22-slim (Debian, glibc) — same base as the runtime image — so the
+# installed node_modules match the runtime libc (Pi's dep tree is large; this
+# avoids any musl/glibc mismatch from the alpine→slim copy the other agents use).
+# Build toolchain (python3/make/g++) covers any node-gyp dep during npm ci.
+FROM node:22-slim AS build-pi-worker-node
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+# WORKDIR mirrors the host layout (agents/<name> two levels below sdks/typescript)
+# so the lockfile's file:../../sdks/typescript link resolves identically here.
+WORKDIR /src/agents/app
+COPY sdks/typescript/ /src/sdks/typescript/
+COPY agents/pi-worker/package*.json ./
+RUN npm ci
+COPY agents/pi-worker/src ./src
+COPY agents/pi-worker/tsconfig.json ./tsconfig.json
+RUN npm run build
+
+# Final pi-worker image. node:22-slim (not distroless) + git because Pi is a
+# CODING agent: its built-in tools shell out (bash, already in slim) and edit
+# files in a scratch workspace (/work).
+FROM node:22-slim AS pi-worker
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY --from=build-pi-worker-node /src/agents/app/dist ./dist
+COPY --from=build-pi-worker-node /src/agents/app/node_modules ./node_modules
+COPY sdks/typescript/package.json ./node_modules/@spawnly/sdk/package.json
+COPY --from=build-ts-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
+RUN mkdir -p /work
+ENV HOME=/root PI_WORKDIR=/work
+EXPOSE 8080
+CMD ["node", "dist/index.js"]
+
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build-identity-server
 WORKDIR /src
 COPY identityserver/ .

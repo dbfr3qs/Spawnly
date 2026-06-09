@@ -6,7 +6,7 @@ GO_SERVICES   := operator orchestrator registry sample-api agent-sidecar dashboa
 # Separate-module Go agents: their own go.mod (not the root module), so they
 # build via `cd agents/<name> && go build .` and map to image agent-<name>.
 GO_MODULE_AGENTS := go-worker
-NODE_AGENTS   := child-agent parent-agent currency-converter trip-planner chain-worker
+NODE_AGENTS   := child-agent parent-agent currency-converter trip-planner chain-worker pi-worker
 # Demo agents built from their own Dockerfile stage. They follow the standard
 # agent-<name> image convention (unlike agent-sidecar), so they need no special
 # casing — they just weren't in any list before.

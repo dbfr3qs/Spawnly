@@ -12,6 +12,7 @@ chat), asserting on what the UI and the platform actually do.
 | [`tests/global-worker.spec.ts`](tests/global-worker.spec.ts) | Spawn a `global-worker` and confirm it runs to **completion** (fast smoke test, no LLM). |
 | [`tests/chain-worker.spec.ts`](tests/chain-worker.spec.ts) | Spawn a `chain-worker` chain, confirm every node emits `work_ok`, **revoke a random child** and verify its subtree cascades to `work_denied` while ancestors keep passing, then **resume** and verify recovery. |
 | [`tests/weather-chat.spec.ts`](tests/weather-chat.spec.ts) | Spawn the `weather-monitor`, send a chat message, and verify a non-empty reply. |
+| [`tests/pi-worker.spec.ts`](tests/pi-worker.spec.ts) | Spawn the `pi-worker` (first non-Flue agent, Pi coding harness), chat it a **coding task** and assert the neutral `run_start`/`model_turn`/`tool_start`/`tool_end` timeline, then ask it to **call the protected API** and assert a successful `check_protected_api` `tool_end` + `token_issued` (the SPIFFE→OAuth path). **Needs an OpenAI key** — pi-worker pins `AI_PROVIDER=openai`. |
 
 Actions go through the UI; event-state assertions read the timeline API (the
 same data the page polls) so they don't race the UI's re-render loop.
@@ -26,6 +27,8 @@ same data the page polls) so they don't race the UI's re-render loop.
 2. **An AI provider key** for the LLM-backed agents (weather chat). bootstrap
    reads it from the repo-root `.env` (`ANTHROPIC_API_KEY`, or set
    `AI_PROVIDER=openai` + `OPENAI_API_KEY`). See [`.env.example`](../.env.example).
+   The `pi-worker` spec specifically requires an **OpenAI** key (it pins
+   `AI_PROVIDER=openai`); if only an Anthropic key is configured, skip that spec.
 3. **One-time Playwright install** (downloads Chromium):
    ```sh
    make e2e-setup
