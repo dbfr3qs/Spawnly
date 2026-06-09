@@ -4,7 +4,7 @@ import { killTrees } from '../helpers/cleanup';
 
 // Scenario 3 — chat. Spawn the weather-monitor (long-lived, supportsChat), open
 // its chat panel, send "Hi", and verify a non-empty agent reply comes back.
-// Depends on the cluster's configured AI provider (here: OpenAI).
+// Depends on the cluster's configured AI provider (default: Anthropic — see .env).
 test.describe('weather-monitor', () => {
   const spawned: string[] = [];
 

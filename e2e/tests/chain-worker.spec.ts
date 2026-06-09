@@ -33,28 +33,27 @@ test.describe('chain-worker', () => {
     const rootId = await spawn(page, 'chain-worker');
     spawned.push(rootId);
 
-    // Wait for the chain to grow. Each node spawns its child only after it
-    // starts working, so the chain fills in over ~tens of seconds.
+    // Wait for the chain to grow AND settle: poll until the node count is both
+    // ≥3 and unchanged across two consecutive reads. A fixed sleep would race a
+    // child still being scheduled — if one appears under the victim between our
+    // snapshot and the revoke, the platform's cascade would be larger than the
+    // tree we computed and the equality assertion below would flake. `chain`
+    // holds the settled snapshot once the poll passes.
     let chain: AgentSummary[] = [];
+    let prevLen = -1;
     await expect
       .poll(
         async () => {
           const all = await listAgents(page);
           const root = all.find((a) => a.agentId === rootId);
           chain = root ? [root, ...descendants(rootId, all)] : [];
-          return chain.length;
+          const stable = chain.length >= 3 && chain.length === prevLen;
+          prevLen = chain.length;
+          return stable;
         },
         { timeout: 150_000, intervals: [2000, 3000, 5000] },
       )
-      .toBeGreaterThanOrEqual(3);
-
-    // Let any final child settle, then take the chain as-is.
-    await page.waitForTimeout(6000);
-    {
-      const all = await listAgents(page);
-      const root = all.find((a) => a.agentId === rootId)!;
-      chain = [root, ...descendants(rootId, all)];
-    }
+      .toBe(true);
     const chainIds = chain.map((a) => a.agentId);
     console.log(`chain (${chain.length}):`, chainIds.join(' → '));
 
