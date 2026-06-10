@@ -469,3 +469,62 @@ func TestReconcileDeletion_FailedPod_MarksFailed(t *testing.T) {
 		t.Fatalf("expected Fail(crashed-agent), got Completed=%v Failed=%v", reg.Completed, reg.Failed)
 	}
 }
+
+// TestReconcileNew_ConsentRequired_SetsSidecarEnv verifies a consent-gated
+// workload surfaces CONSENT_REQUIRED and the template-declared CONSENT_SCOPES
+// on both containers (sharedEnv), and that an ungated workload carries neither.
+func TestReconcileNew_ConsentRequired_SetsSidecarEnv(t *testing.T) {
+	aw := &agentv1alpha1.AgentWorkload{
+		ObjectMeta: metav1.ObjectMeta{Name: "consent-agent", Namespace: "default"},
+		Spec: agentv1alpha1.AgentWorkloadSpec{
+			AgentType: "worker", UserID: "user-1", TenantID: "tenant-1", Lifecycle: "short-lived",
+			ParentID: "agent-parent", ConsentRequired: true,
+		},
+	}
+
+	s := buildScheme(t)
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(s).WithObjects(aw).WithStatusSubresource(aw).Build()
+
+	tpl := workerTemplate()
+	tpl.OAuthScopes = []string{"openid", "sample-api-b:read"}
+	reg := registry.NewMock(map[string]registry.AgentTemplate{"worker": tpl})
+
+	r := &operator.AgentWorkloadReconciler{
+		Client:       fakeClient,
+		Scheme:       s,
+		Registry:     reg,
+		RegistryURL:  "http://registry:8080",
+		ISTokenURL:   "http://identity-server:8080/connect/token",
+		SampleAPIURL: "http://sample-api:8080",
+		EventsClient: events.NewMock(),
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "consent-agent", Namespace: "default"},
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile (1st): %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("reconcile (2nd): %v", err)
+	}
+
+	var pod corev1.Pod
+	if err := fakeClient.Get(context.Background(), types.NamespacedName{Name: "consent-agent-pod", Namespace: "default"}, &pod); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+
+	for _, c := range pod.Spec.Containers {
+		envMap := map[string]string{}
+		for _, e := range c.Env {
+			envMap[e.Name] = e.Value
+		}
+		if envMap["CONSENT_REQUIRED"] != "true" {
+			t.Errorf("container %s: expected CONSENT_REQUIRED=true, got %q", c.Name, envMap["CONSENT_REQUIRED"])
+		}
+		if envMap["CONSENT_SCOPES"] != "openid sample-api-b:read" {
+			t.Errorf("container %s: expected CONSENT_SCOPES from template oauthScopes, got %q", c.Name, envMap["CONSENT_SCOPES"])
+		}
+	}
+}

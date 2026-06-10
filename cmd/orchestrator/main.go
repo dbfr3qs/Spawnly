@@ -175,6 +175,7 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		// Spawn-time policy: an agent-initiated spawn (parentId present) is allowed
 		// only if the parent template lists this child type in allowedChildTypes
 		// (deny-by-default). Top-level spawns (no parentId) are unconstrained.
+		consentRequired := false
 		if req.ParentID != "" {
 			dec, err := regClient.CheckSpawnPolicy(r.Context(), req.ParentID, req.AgentType)
 			if err != nil {
@@ -197,6 +198,9 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 				http.Error(w, "spawn denied: "+dec.Reason, http.StatusForbidden)
 				return
 			}
+			// The parent template gates this child behind user consent: the
+			// child's sidecar runs a CIBA flow before serving tokens.
+			consentRequired = dec.ConsentRequired
 		}
 
 		// The workload name becomes the pod name and the agent-id label, which SPIRE
@@ -208,12 +212,13 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 				Namespace: "default",
 			},
 			Spec: agentv1alpha1.AgentWorkloadSpec{
-				AgentType: req.AgentType,
-				UserID:    req.UserID,
-				TenantID:  req.TenantID,
-				Lifecycle: lifecycle,
-				Task:      req.Task,
-				ParentID:  req.ParentID,
+				AgentType:       req.AgentType,
+				UserID:          req.UserID,
+				TenantID:        req.TenantID,
+				Lifecycle:       lifecycle,
+				Task:            req.Task,
+				ParentID:        req.ParentID,
+				ConsentRequired: consentRequired,
 			},
 		}
 

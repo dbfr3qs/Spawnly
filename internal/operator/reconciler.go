@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -241,6 +242,16 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 		{Name: "IS_TOKEN_URL", Value: r.ISTokenURL},
 		{Name: "PARENT_ID", Value: aw.Spec.ParentID},
 		{Name: "ORCHESTRATOR_URL", Value: r.OrchestratorURL},
+	}
+	if aw.Spec.ConsentRequired {
+		// The sidecar must complete a CIBA backchannel authentication (approved
+		// by the spawning user, or auto-approved from stored consent) before it
+		// serves tokens. CONSENT_SCOPES is the template-declared scope set the
+		// consent request asks for.
+		sharedEnv = append(sharedEnv,
+			corev1.EnvVar{Name: "CONSENT_REQUIRED", Value: "true"},
+			corev1.EnvVar{Name: "CONSENT_SCOPES", Value: strings.Join(tpl.OAuthScopes, " ")},
+		)
 	}
 
 	agentEnv := append([]corev1.EnvVar{

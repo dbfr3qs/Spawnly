@@ -38,6 +38,8 @@ spec:
                   type: string
                 parentId:
                   type: string
+                consentRequired:
+                  type: boolean
             status:
               type: object
               properties:

@@ -50,3 +50,25 @@ func TestAgentWorkloadRoundtrip(t *testing.T) {
 		t.Errorf("got Lifecycle %q, want %q", got.Spec.Lifecycle, "short-lived")
 	}
 }
+
+// Regression guard for the CRD-pruning class of bug: every spec field must
+// survive a JSON round-trip (and the deploy CRD schema must list it).
+func TestAgentWorkloadRoundtrip_ConsentRequired(t *testing.T) {
+	aw := v1alpha1.AgentWorkload{
+		Spec: v1alpha1.AgentWorkloadSpec{
+			AgentType: "worker", UserID: "user-1", TenantID: "tenant-1",
+			ParentID: "agent-parent", ConsentRequired: true,
+		},
+	}
+	b, err := json.Marshal(aw)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got v1alpha1.AgentWorkload
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !got.Spec.ConsentRequired {
+		t.Error("ConsentRequired lost in round-trip")
+	}
+}

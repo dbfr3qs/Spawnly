@@ -12,6 +12,10 @@ type AgentWorkloadSpec struct {
 	Lifecycle string `json:"lifecycle"` // short-lived | long-lived
 	Task      string `json:"task,omitempty"`
 	ParentID  string `json:"parentId,omitempty"`
+	// ConsentRequired is stamped by the orchestrator when the parent template
+	// gates this child type behind user consent: the sidecar must complete a
+	// CIBA backchannel authentication before serving tokens to the agent.
+	ConsentRequired bool `json:"consentRequired,omitempty"`
 }
 
 type AgentWorkloadStatus struct {
