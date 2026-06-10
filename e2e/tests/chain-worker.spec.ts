@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import { spawn, listAgents, descendants, type AgentSummary } from '../helpers/dashboard';
 import { waitForEventType, newestEventTime } from '../helpers/events';
 import { killTrees } from '../helpers/cleanup';
+import { revokeAllConsents, resolveConsentPrompt } from '../helpers/consent';
 
 // Scenario 2 — cascading revoke/resume across an agent chain.
 //
@@ -30,8 +31,16 @@ test.describe('chain-worker', () => {
     test.setTimeout(300_000);
     await page.goto('/');
 
+    // chain-worker -> chain-worker spawns are consent-gated (CIBA). Start from
+    // a clean slate (consents persist on the shared cluster), then approve the
+    // first link's prompt — that stores a consent for the edge, so every deeper
+    // link auto-approves and the chain grows hands-free from here.
+    await revokeAllConsents(page);
+
     const rootId = await spawn(page, 'chain-worker');
     spawned.push(rootId);
+
+    await resolveConsentPrompt(page, 'approve');
 
     // Wait for the chain to grow AND settle: poll until the node count is both
     // ≥3 and unchanged across two consecutive reads. A fixed sleep would race a

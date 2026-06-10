@@ -40,7 +40,10 @@ export default defineConfig({
         },
         {
           label: 'Under the hood',
-          items: [{ slug: 'internals/token-minting' }],
+          items: [
+            { slug: 'internals/token-minting' },
+            { slug: 'internals/spawn-consent' },
+          ],
         },
       ],
     }),

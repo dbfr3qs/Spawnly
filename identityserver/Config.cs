@@ -223,7 +223,13 @@ public static class Config
                 // with its OWN client-credentials token, so revoking a node (and
                 // its subtree) denies each one independently on its next call.
                 ClientId = "chain-worker",
-                AllowedGrantTypes = GrantTypes.ClientCredentials,
+                AllowedGrantTypes = new List<string>
+                {
+                    GrantType.ClientCredentials,
+                    // CIBA: every spawned link is consent-gated by the parent
+                    // template, so its sidecar runs the backchannel flow.
+                    CibaGrantType,
+                },
                 RequireClientSecret = true,
                 ClientSecrets = { new Secret("placeholder".Sha256()) },
                 AlwaysSendClientClaims = true,
@@ -232,8 +238,12 @@ public static class Config
                 // in-flight token long after its authorization is dropped (the
                 // resource also denies in real time via the SpiceDB check).
                 AccessTokenLifetime = 120,
+                CibaLifetime = 300,
+                PollingInterval = 5,
                 AllowedScopes =
                 {
+                    // openid: CIBA is an OIDC authentication request.
+                    "openid",
                     "sample-api-a:read",
                 },
             },

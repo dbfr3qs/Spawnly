@@ -32,3 +32,4 @@ reference on templates and policy.
 How the platform works beneath the SDK.
 
 - **[How an agent's token is minted](/internals/token-minting)** — a workload's JWT-SVID becomes a scoped access token via `client_credentials`, with `sub = user:<id>` and an `act` actor — the non-exchange path, traced end to end.
+- **[CIBA spawn consent](/internals/spawn-consent)** — putting a human in the loop of a handoff: the child sidecar runs an OpenID backchannel authentication, the user approves on the dashboard, and the granted token *is* the child's user-bound access.

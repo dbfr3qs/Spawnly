@@ -3,9 +3,10 @@
   "version": "1.0.0",
   "status": "active",
   "requiresTenant": true,
+  "oauthScopes": ["openid", "sample-api-a:read"],
   "meta": {
     "displayName": "Chain Worker",
-    "description": "A long-lived worker that spawns one child of its own type (up to maxDepth) and calls the sample API on a loop. Used to demonstrate cascading, real-time permission revocation across an agent chain."
+    "description": "A long-lived worker that spawns one child of its own type (up to maxDepth) and calls the sample API on a loop. Demonstrates cascading real-time revocation across an agent chain, and CIBA spawn consent: the first spawned link prompts the user on the dashboard; later links auto-approve from the stored consent."
   },
   "runtimeSpec": {
     "image": "agent-chain-worker:latest",
@@ -21,5 +22,12 @@
       {"resource": "tenant:{{tenant_id}}", "relation": "agent", "subject": "agent:{{agent_id}}"}
     ]
   },
-  "delegation": {"allowedChildTypes": ["chain-worker"], "grantableScopes": [], "maxDepth": 4}
+  "delegation": {
+    "allowedChildTypes": ["chain-worker"],
+    "grantableScopes": [],
+    "maxDepth": 4,
+    "childPolicies": {
+      "chain-worker": {"requireUserConsent": true, "consentTTL": "720h"}
+    }
+  }
 }
