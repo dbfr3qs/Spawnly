@@ -24,6 +24,9 @@ type store struct {
 	templates map[string]registry.AgentTemplate
 	agents    map[string]registry.AgentRecord
 	events    map[string][]events.Event
+	// consents is keyed by the (user, parentType, childType) edge — one record
+	// per edge, replaced on each fresh grant. See consentKey.
+	consents map[string]registry.ConsentRecord
 }
 
 func newStore() *store {
@@ -31,6 +34,7 @@ func newStore() *store {
 		templates: map[string]registry.AgentTemplate{},
 		agents:    map[string]registry.AgentRecord{},
 		events:    map[string][]events.Event{},
+		consents:  map[string]registry.ConsentRecord{},
 	}
 }
 
@@ -110,6 +114,81 @@ func (s *store) updateAgent(id, status string) bool {
 	r.Status = status
 	s.agents[id] = r
 	return true
+}
+
+func consentKey(userID, parentType, childType string) string {
+	return userID + "|" + parentType + "|" + childType
+}
+
+// upsertConsent stores a fresh grant for its (user, parentType, childType)
+// edge, replacing any previous record (including a revoked one — a new grant
+// is the user re-approving). The record's ID is stable across re-grants.
+func (s *store) upsertConsent(rec registry.ConsentRecord) registry.ConsentRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := consentKey(rec.UserID, rec.ParentType, rec.ChildType)
+	if existing, ok := s.consents[key]; ok {
+		rec.ID = existing.ID
+	} else {
+		rec.ID = fmt.Sprintf("consent-%d", time.Now().UnixNano())
+	}
+	s.consents[key] = rec
+	return rec
+}
+
+func (s *store) findConsent(userID, parentType, childType string) (registry.ConsentRecord, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rec, ok := s.consents[consentKey(userID, parentType, childType)]
+	return rec, ok
+}
+
+// listConsents returns all consent records, or only one user's when userID is
+// non-empty. Revoked records are included (the dashboard shows them as such).
+func (s *store) listConsents(userID string) []registry.ConsentRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := []registry.ConsentRecord{}
+	for _, rec := range s.consents {
+		if userID == "" || rec.UserID == userID {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+func (s *store) revokeConsent(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, rec := range s.consents {
+		if rec.ID == id {
+			rec.Revoked = true
+			s.consents[key] = rec
+			return true
+		}
+	}
+	return false
+}
+
+// consentExpiry derives a fresh consent record's expiry from the parent
+// template's per-child consentTTL. Nil means the consent never expires —
+// also the fallback for an unset or unparsable TTL.
+func (s *store) consentExpiry(parentType, childType string, from time.Time) *time.Time {
+	tpl, ok := s.getTemplate(parentType)
+	if !ok {
+		return nil
+	}
+	cp, ok := tpl.Delegation.ChildPolicies[childType]
+	if !ok || cp.ConsentTTL == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(cp.ConsentTTL)
+	if err != nil {
+		log.Printf("template %s: bad consentTTL %q for child %s: %v", parentType, cp.ConsentTTL, childType, err)
+		return nil
+	}
+	t := from.Add(d)
+	return &t
 }
 
 // subtree returns the agent id plus every descendant reachable through ParentID
@@ -567,10 +646,83 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 					resp.Reason = fmt.Sprintf("max delegation depth %d reached", max)
 				}
 			}
+			// Surface the parent template's per-child consent gate so the
+			// orchestrator can stamp it onto the workload.
+			if resp.Allowed {
+				if cp, ok := tpl.Delegation.ChildPolicies[childType]; ok && cp.RequireUserConsent {
+					resp.ConsentRequired = true
+				}
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
+	})
+
+	// Record a fresh user consent for one spawn edge (called by IdentityServer
+	// when the user approves a CIBA request, or auto-renewed on auto-approval).
+	// The expiry is derived here from the parent template's consentTTL so the
+	// policy lives in one place. Replaces any prior record for the same edge.
+	mux.HandleFunc("POST /v1/consents", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			UserID     string   `json:"userId"`
+			ParentType string   `json:"parentType"`
+			ChildType  string   `json:"childType"`
+			Scopes     []string `json:"scopes"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.UserID == "" || req.ParentType == "" || req.ChildType == "" {
+			http.Error(w, "userId, parentType and childType are required", http.StatusBadRequest)
+			return
+		}
+		if req.Scopes == nil {
+			req.Scopes = []string{}
+		}
+		now := time.Now()
+		rec := s.upsertConsent(registry.ConsentRecord{
+			UserID:     req.UserID,
+			ParentType: req.ParentType,
+			ChildType:  req.ChildType,
+			Scopes:     req.Scopes,
+			GrantedAt:  now,
+			ExpiresAt:  s.consentExpiry(req.ParentType, req.ChildType, now),
+		})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(rec)
+	})
+
+	mux.HandleFunc("GET /v1/consents", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(s.listConsents(r.URL.Query().Get("userId")))
+	})
+
+	// Revoke a stored consent: the next spawn of that edge re-prompts the user.
+	// Live agents are untouched — cascading a revoke of agents spawned under
+	// this consent is a separate, explicit /v1/agents/{id}/revoke call.
+	mux.HandleFunc("POST /v1/consents/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
+		if !s.revokeConsent(r.PathValue("id")) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	// Consent decision for a spawn edge: does a stored consent cover the
+	// requested scopes right now? Always HTTP 200; IdentityServer's CIBA
+	// notification hook calls this to decide auto-approve vs. prompt-the-user.
+	// Scopes repeat: ?scope=a&scope=b.
+	mux.HandleFunc("GET /v1/consents/check", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		decision := registry.ConsentDecision{Granted: false, Reason: "no consent on record"}
+		if rec, ok := s.findConsent(q.Get("userId"), q.Get("parentType"), q.Get("childType")); ok {
+			decision = registry.EvaluateConsent(rec, q["scope"], time.Now())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(decision)
 	})
 
 	// Delegation lineage for an agent: the agent itself up to the root via ParentID.

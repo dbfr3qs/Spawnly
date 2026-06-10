@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spawnly/platform/internal/events"
 	"github.com/spawnly/platform/internal/registry"
@@ -803,5 +804,153 @@ func TestRevokeCascade_PreservesTerminalDescendant(t *testing.T) {
 	}
 	if has("c") {
 		t.Fatal("c: completed agent must not have a SpiceDB tuple")
+	}
+}
+
+// consentParentTemplate gates child-agent spawns behind user consent with a
+// long TTL; ttl is overridable per test.
+func consentParentTemplate(ttl string) registry.AgentTemplate {
+	return registry.AgentTemplate{
+		AgentType: "parent-agent", Version: "1.0.0", Status: "active",
+		Delegation: registry.DelegationPolicy{
+			AllowedChildTypes: []string{"child-agent"},
+			ChildPolicies: map[string]registry.ChildSpawnPolicy{
+				"child-agent": {RequireUserConsent: true, ConsentTTL: ttl},
+			},
+		},
+	}
+}
+
+func TestConsentLifecycle(t *testing.T) {
+	s := newStore()
+	s.putTemplate(consentParentTemplate("720h"))
+	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+
+	check := func(scopes ...string) registry.ConsentDecision {
+		t.Helper()
+		url := "/v1/consents/check?userId=alice&parentType=parent-agent&childType=child-agent"
+		for _, sc := range scopes {
+			url += "&scope=" + sc
+		}
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("GET", url, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("consent check: got %d, want 200", rec.Code)
+		}
+		var d registry.ConsentDecision
+		json.NewDecoder(rec.Body).Decode(&d)
+		return d
+	}
+	grant := func() registry.ConsentRecord {
+		t.Helper()
+		body := `{"userId":"alice","parentType":"parent-agent","childType":"child-agent","scopes":["openid","sample-api-b:read"]}`
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/consents", strings.NewReader(body)))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("record consent: got %d, want 201", rec.Code)
+		}
+		var cr registry.ConsentRecord
+		json.NewDecoder(rec.Body).Decode(&cr)
+		return cr
+	}
+
+	// No consent on record yet.
+	if d := check("openid"); d.Granted {
+		t.Fatalf("expected no consent yet, got %+v", d)
+	}
+
+	cr := grant()
+	if cr.ID == "" || cr.ExpiresAt == nil {
+		t.Fatalf("grant should set id and TTL-derived expiry, got %+v", cr)
+	}
+
+	// Covered scopes pass; escalation re-prompts.
+	if d := check("sample-api-b:read"); !d.Granted {
+		t.Fatalf("expected granted, got %+v", d)
+	}
+	if d := check("sample-api-a:write"); d.Granted {
+		t.Fatalf("expected scope escalation denial, got %+v", d)
+	}
+
+	// Listing is per user.
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/consents?userId=alice", nil))
+	var list []registry.ConsentRecord
+	json.NewDecoder(rec.Body).Decode(&list)
+	if len(list) != 1 {
+		t.Fatalf("expected 1 consent for alice, got %d", len(list))
+	}
+
+	// Revoke forces re-consent; a fresh grant re-approves under the same id.
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/consents/"+cr.ID+"/revoke", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("revoke consent: got %d, want 204", rec.Code)
+	}
+	if d := check("openid"); d.Granted || d.Reason != "consent revoked" {
+		t.Fatalf("expected revoked denial, got %+v", d)
+	}
+	if regrant := grant(); regrant.ID != cr.ID || regrant.Revoked {
+		t.Fatalf("re-grant should reuse id and clear revocation, got %+v", regrant)
+	}
+	if d := check("openid"); !d.Granted {
+		t.Fatalf("expected granted after re-grant, got %+v", d)
+	}
+
+	// Revoking an unknown id is a 404.
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/consents/ghost/revoke", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("revoke unknown: got %d, want 404", rec.Code)
+	}
+}
+
+func TestConsentExpiryDerivedFromTemplateTTL(t *testing.T) {
+	s := newStore()
+	s.putTemplate(consentParentTemplate("1ns"))
+	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+
+	body := `{"userId":"alice","parentType":"parent-agent","childType":"child-agent","scopes":["openid"]}`
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/consents", strings.NewReader(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("record consent: got %d, want 201", rec.Code)
+	}
+
+	time.Sleep(time.Millisecond) // ensure the 1ns TTL has elapsed
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET",
+		"/v1/consents/check?userId=alice&parentType=parent-agent&childType=child-agent&scope=openid", nil))
+	var d registry.ConsentDecision
+	json.NewDecoder(rec.Body).Decode(&d)
+	if d.Granted || d.Reason != "consent expired" {
+		t.Fatalf("expected expired denial, got %+v", d)
+	}
+}
+
+// TestSpawnPolicy_ConsentRequired verifies the per-child consent gate is
+// surfaced on the spawn decision (and only for the flagged child type).
+func TestSpawnPolicy_ConsentRequired(t *testing.T) {
+	s := newStore()
+	tpl := consentParentTemplate("720h")
+	tpl.Delegation.AllowedChildTypes = []string{"child-agent", "other-agent"}
+	s.putTemplate(tpl)
+	s.registerAgent(registry.AgentRecord{AgentID: "parent-1", AgentType: "parent-agent", TenantID: "tenant-1"})
+	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+
+	check := func(childType string) registry.SpawnDecision {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/spawn-policy?parentId=parent-1&childType="+childType, nil))
+		var d registry.SpawnDecision
+		json.NewDecoder(rec.Body).Decode(&d)
+		return d
+	}
+
+	if d := check("child-agent"); !d.Allowed || !d.ConsentRequired {
+		t.Fatalf("expected allowed+consentRequired for flagged child, got %+v", d)
+	}
+	if d := check("other-agent"); !d.Allowed || d.ConsentRequired {
+		t.Fatalf("expected allowed without consent for unflagged child, got %+v", d)
 	}
 }

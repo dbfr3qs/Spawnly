@@ -16,6 +16,11 @@ type AgentTemplate struct {
 	// {{tenant_id}}, so a tenant-less spawn fails fast instead of silently
 	// coming up "global" with no tenant grant.
 	RequiresTenant bool `json:"requiresTenant"`
+	// OAuthScopes declares the OAuth2 scopes this agent type requests at
+	// runtime. When a parent spawns this type behind requireUserConsent, these
+	// are the scopes of the CIBA consent request — and the set a stored
+	// consent is matched against (any scope outside it forces a re-prompt).
+	OAuthScopes []string `json:"oauthScopes,omitempty"`
 }
 
 // DelegationPolicy describes which child agent-types a given agent-type may
@@ -24,6 +29,22 @@ type DelegationPolicy struct {
 	AllowedChildTypes []string `json:"allowedChildTypes"`
 	GrantableScopes   []string `json:"grantableScopes"`
 	MaxDepth          int      `json:"maxDepth"`
+	// ChildPolicies holds per-child-type spawn options, keyed by child
+	// agent-type. A key only has effect if that type is also listed in
+	// AllowedChildTypes (ChildPolicies refines the edge; it never creates one).
+	ChildPolicies map[string]ChildSpawnPolicy `json:"childPolicies,omitempty"`
+}
+
+// ChildSpawnPolicy configures how a parent's spawn of one child type is gated.
+// RequireUserConsent switches on the CIBA flow: at spawn the child's sidecar
+// runs a backchannel authentication request that the spawning user approves on
+// the dashboard — unless a stored consent for the same (user, parentType,
+// childType) edge still covers the requested scopes, in which case it
+// auto-approves. ConsentTTL is a Go duration string ("720h"); empty means a
+// granted consent never expires.
+type ChildSpawnPolicy struct {
+	RequireUserConsent bool   `json:"requireUserConsent"`
+	ConsentTTL         string `json:"consentTTL,omitempty"`
 }
 
 // SpawnDecision is the registry's answer to "may this parent spawn this child
@@ -34,6 +55,10 @@ type DelegationPolicy struct {
 type SpawnDecision struct {
 	Allowed bool   `json:"allowed"`
 	Reason  string `json:"reason"`
+	// ConsentRequired reports that the parent's template gates this child type
+	// behind user consent (CIBA). The orchestrator stamps it onto the workload
+	// so the child's sidecar runs the backchannel flow before serving tokens.
+	ConsentRequired bool `json:"consentRequired,omitempty"`
 }
 
 type TemplateMeta struct {
