@@ -50,6 +50,54 @@ public class AgentRegistryClient
         catch { return null; }
     }
 
+    /// <summary>
+    /// Asks the registry whether a stored consent covers a spawn edge with the
+    /// requested scopes right now. Null only when the registry is unreachable;
+    /// callers must treat that as "not granted" (prompt the user).
+    /// </summary>
+    public async Task<ConsentDecision?> CheckConsent(
+        string userId, string parentType, string childType, IEnumerable<string> scopes)
+    {
+        try
+        {
+            var url = $"{_baseUrl}/v1/consents/check" +
+                      $"?userId={Uri.EscapeDataString(userId)}" +
+                      $"&parentType={Uri.EscapeDataString(parentType)}" +
+                      $"&childType={Uri.EscapeDataString(childType)}" +
+                      string.Concat(scopes.Select(s => $"&scope={Uri.EscapeDataString(s)}"));
+            var resp = await _http.GetAsync(url);
+            if (!resp.IsSuccessStatusCode) return null;
+            return await resp.Content.ReadFromJsonAsync<ConsentDecision>();
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Records a fresh user grant for a spawn edge (called when a CIBA request
+    /// is approved). The registry derives the expiry from the parent template's
+    /// consentTTL and replaces any prior record for the edge.
+    /// </summary>
+    public async Task<bool> RecordConsent(
+        string userId, string parentType, string childType, IEnumerable<string> scopes)
+    {
+        try
+        {
+            var resp = await _http.PostAsJsonAsync($"{_baseUrl}/v1/consents", new
+            {
+                userId,
+                parentType,
+                childType,
+                scopes = scopes.ToArray(),
+            });
+            return resp.IsSuccessStatusCode;
+        }
+        catch { return false; }
+    }
+
+    public record ConsentDecision(
+        [property: JsonPropertyName("granted")] bool Granted,
+        [property: JsonPropertyName("reason")] string? Reason);
+
     // Registry JSON uses camelCase fields: agentId, status, userId, agentType, parentId.
     public record AgentRecord(
         [property: JsonPropertyName("agentId")] string AgentId,

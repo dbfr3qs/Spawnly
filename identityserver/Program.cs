@@ -46,8 +46,18 @@ builder.Services.AddIdentityServer(options =>
     .AddTestUsers(TestUsers.Users)
     .AddCustomTokenRequestValidator<AgentRegistryValidator>()
     .AddExtensionGrantValidator<TokenExchangeGrantValidator>()
-    // CIBA: resolves a backchannel request's login_hint to the approving user.
-    .AddBackchannelAuthenticationUserValidator<CibaUserValidator>();
+    // CIBA: resolves a backchannel request's login_hint to the approving user,
+    // then binds the request to a registry-derived spawn edge.
+    .AddBackchannelAuthenticationUserValidator<CibaUserValidator>()
+    .AddCustomBackchannelAuthenticationRequestValidator<CibaRequestValidator>();
+
+// CIBA consent plumbing: completion (approve/deny + consent recording) and the
+// notification hook that auto-approves from stored consent or leaves the
+// request pending for the dashboard (optionally pinging NOTIFIER_WEBHOOK_URL).
+builder.Services.AddTransient<CibaCompletionService>();
+builder.Services.AddTransient<
+    Duende.IdentityServer.Services.IBackchannelAuthenticationUserNotificationService,
+    CibaConsentNotificationService>();
 
 // Concrete default secret validator — SpireClientSecretValidator delegates to it
 // for non-SPIFFE (normal client_secret) requests, e.g. the dashboard's code flow.
@@ -65,6 +75,10 @@ app.UseRouting();
 app.UseIdentityServer();
 app.UseAuthorization();
 app.MapRazorPages();
+
+// Pending-consent API for the dashboard, authenticated by the user's own
+// IdentityServer session cookie.
+app.MapCibaConsentApi();
 
 // Dev-only CIBA inspection/completion API (curl-driven spike); see DevCibaEndpoints.
 if (Environment.GetEnvironmentVariable("DEV_CIBA_API") == "true")

@@ -23,6 +23,22 @@ public class AgentRegistryValidator : ICustomTokenRequestValidator
     {
         var request = context.Result.ValidatedRequest;
 
+        // CIBA poll: sub is the human (set by the grant itself); add the agent
+        // actor chain from the SVID so resource servers can authorize the agent,
+        // mirroring the client_credentials act shape.
+        if (request.GrantType == Config.CibaGrantType)
+        {
+            var cibaAssertion = request.Raw?.Get("client_assertion");
+            if (cibaAssertion is not null)
+            {
+                var cibaSpiffeId = new JsonWebTokenHandler().ReadJsonWebToken(cibaAssertion).Subject;
+                var cibaActJson = JsonSerializer.Serialize(
+                    new Dictionary<string, string> { ["sub"] = cibaSpiffeId });
+                request.ClientClaims?.Add(new Claim("act", cibaActJson, JsonClaimValueTypes.Json));
+            }
+            return;
+        }
+
         // Only handle the client_credentials path. The token-exchange grant produces
         // its own sub/act via the extension grant validator.
         if (request.GrantType != "client_credentials")
