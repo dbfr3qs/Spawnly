@@ -59,6 +59,20 @@
       gap: 10px;
     }
 
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .logout-form { margin: 0; }
+    .current-user {
+      font-size: 13px;
+      color: rgba(255,255,255,.85);
+    }
+    .current-user::before {
+      content: "👤 ";
+    }
+
     header h1::before {
       content: '';
       display: inline-block;
@@ -699,7 +713,13 @@
 
 <header>
   <h1>Spawnly</h1>
-  <button class="btn btn-primary" id="open-modal-btn">+ New Agent</button>
+  <div class="header-actions">
+    <button class="btn btn-primary" id="open-modal-btn">+ New Agent</button>
+    <span id="current-user" class="current-user"></span>
+    <form method="post" action="/logout" class="logout-form">
+      <button class="btn btn-ghost" type="submit" id="logout-btn">Log out</button>
+    </form>
+  </div>
 </header>
 
 <main>
@@ -719,10 +739,6 @@
       <select id="f-type">
         <option value="worker">worker</option>
       </select>
-    </div>
-    <div class="form-group">
-      <label>User ID</label>
-      <input id="f-user" type="text" value="user-1" placeholder="user-1" />
     </div>
     <div class="form-group">
       <label>Tenant ID</label>
@@ -1671,14 +1687,15 @@
 
   document.getElementById('spawn-btn').addEventListener('click', async () => {
     const agentType = document.getElementById('f-type').value.trim() || 'worker';
-    const userId    = document.getElementById('f-user').value.trim() || 'user-1';
     const tenantId  = document.getElementById('f-tenant').value.trim() || 'tenant-1';
     const task      = document.getElementById('f-task').value.trim();
 
+    // userId is injected server-side from the logged-in session (the browser
+    // cannot set it), so it is intentionally not sent here.
     const btn = document.getElementById('spawn-btn');
     btn.disabled = true; btn.textContent = 'Spawning…';
     try {
-      const result = await spawnAgent({ agentType, userId, tenantId, ...(task && { task }) });
+      const result = await spawnAgent({ agentType, tenantId, ...(task && { task }) });
       showToast(`Spawned: ${result.workloadName || 'agent'}`);
       closeModal();
       document.getElementById('f-task').value = '';
@@ -1722,6 +1739,19 @@
     ).join('');
   });
   document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+  // Show the logged-in user in the header. The page itself is only reachable
+  // with a session (the server redirects to /login otherwise), so this is just
+  // a label; a 401 here means the session lapsed, so bounce to login.
+  (async () => {
+    try {
+      const r = await fetch('/api/me');
+      if (r.status === 401) { window.location = '/login'; return; }
+      if (!r.ok) return;
+      const { user } = await r.json();
+      if (user) document.getElementById('current-user').textContent = user;
+    } catch (_) {}
+  })();
 </script>
 </body>
 </html>

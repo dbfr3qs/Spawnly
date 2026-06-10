@@ -181,6 +181,8 @@ This will:
 
 Open `http://localhost:8090` to watch events, spin up agents, and chat with long-lived ones in real time — as in the [dashboard screenshot](#lifecycle-events) above.
 
+**Logging in.** The dashboard now requires a human login over OIDC. Visiting it without a session redirects to the IdentityServer login page; sign in with the seeded demo user **`alice` / `alice`**. The logged-in identity becomes the `userId` on every agent you spawn (so the agent's access token carries `sub=user:alice`) — the spawn form no longer takes a free-text user. The **Log out** button in the header ends both the dashboard session and the IdentityServer session. This is the machine-vs-human split: agents authenticate with SPIFFE JWT-SVIDs, while a person logs in with a username/password.
+
 **Reconnecting later?** If you just want the dashboard back — e.g. after a Docker/Kind restart drops the connection — run `make dash`. It repairs the kubeconfig (the control-plane container's IP can drift across restarts) and port-forwards the dashboard to `localhost:8090`, without re-running the bootstrap.
 
 ---

@@ -19,9 +19,28 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   projects: [
-    // headless is Playwright's default, but pin it so a stray HEADED/PWDEBUG
-    // env or future edit can't pop a visible window during a run.
-    { name: 'chromium', use: { ...devices['Desktop Chrome'], headless: true } },
+    // Logs in once (alice/alice) and caches the session; everything else
+    // depends on it so the specs run authenticated. See auth.setup.ts. Its
+    // teardown (cleanup) runs after setup and all its dependents finish.
+    { name: 'setup', testMatch: /auth\.setup\.ts/, teardown: 'cleanup' },
+    {
+      // Sweeps all agents at the very end so the dashboard is left empty.
+      // Reuses the cached session to reach the (authenticated) API.
+      name: 'cleanup',
+      testMatch: /global\.teardown\.ts/,
+      use: { storageState: 'playwright/.auth/user.json' },
+    },
+    {
+      // headless is Playwright's default, but pin it so a stray HEADED/PWDEBUG
+      // env or future edit can't pop a visible window during a run.
+      name: 'chromium',
+      use: {
+        ...devices['Desktop Chrome'],
+        headless: true,
+        storageState: 'playwright/.auth/user.json',
+      },
+      dependencies: ['setup'],
+    },
   ],
   webServer: {
     command: 'bash ../scripts/e2e.sh portforward',

@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"embed"
+	"encoding/json"
 	"io"
 	"io/fs"
 	"log"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 )
 
@@ -18,11 +22,38 @@ func main() {
 		orchestratorURL = "http://orchestrator:8080"
 	}
 
+	// OIDC config. Authority is the browser-facing origin (== IdentityServer
+	// IssuerUri); identityInternalURL is the in-cluster back-channel target.
+	authority := getenv("OIDC_AUTHORITY", "http://localhost:8090")
+	identityInternalURL := getenv("IDENTITY_INTERNAL_URL", "http://identity-server:8080")
+	clientID := getenv("OIDC_CLIENT_ID", "dashboard")
+	clientSecret := getenv("OIDC_CLIENT_SECRET", "dashboard-secret")
+	auth := NewAuthenticator(authority, identityInternalURL, clientID, clientSecret)
+
 	staticFS, _ := fs.Sub(staticFiles, "static")
 	mux := http.NewServeMux()
 
-	// Serve static files
-	mux.Handle("GET /", http.FileServer(http.FS(staticFS)))
+	// Reverse-proxy the browser-facing OIDC endpoints to identity-server so the
+	// browser only ever talks to the dashboard origin (single issuer). These are
+	// public — they must not be gated by require().
+	idTarget, err := url.Parse(identityInternalURL)
+	if err != nil {
+		log.Fatalf("invalid IDENTITY_INTERNAL_URL: %v", err)
+	}
+	idProxy := httputil.NewSingleHostReverseProxy(idTarget)
+	mux.Handle("/connect/", idProxy)
+	mux.Handle("/.well-known/", idProxy)
+	mux.Handle("/Account/", idProxy)
+
+	// Relying-party routes (public).
+	mux.HandleFunc("GET /login", auth.handleLogin)
+	mux.HandleFunc("GET /callback", auth.handleCallback)
+	mux.HandleFunc("POST /logout", auth.handleLogout)
+
+	// Static UI behind a session (browser GETs redirect to /login when absent).
+	// Method-less so it doesn't conflict with the method-less OIDC proxy
+	// prefixes (Go 1.22 mux rejects a "GET /" catch-all alongside "/connect/").
+	mux.Handle("/", auth.require(http.FileServer(http.FS(staticFS))))
 
 	// Proxy handlers — forward to orchestrator, copy status+headers+body verbatim
 	proxy := func(method, target string) http.HandlerFunc {
@@ -39,27 +70,53 @@ func main() {
 				return
 			}
 			defer resp.Body.Close()
-			for k, vs := range resp.Header {
-				for _, v := range vs {
-					w.Header().Add(k, v)
-				}
-			}
-			w.WriteHeader(resp.StatusCode)
-			io.Copy(w, resp.Body)
+			copyResponse(w, resp)
 		}
 	}
 
-	mux.HandleFunc("GET /api/agents", proxy("GET", orchestratorURL+"/v1/agents"))
-	mux.HandleFunc("POST /api/spawn", proxy("POST", orchestratorURL+"/spawn"))
+	mux.HandleFunc("GET /api/me", func(w http.ResponseWriter, r *http.Request) {
+		auth.require(http.HandlerFunc(auth.handleMe)).ServeHTTP(w, r)
+	})
+	mux.Handle("GET /api/agents", auth.require(proxy("GET", orchestratorURL+"/v1/agents")))
+
+	// Spawn — inject the authenticated user's identity as userId so the human
+	// principal (not a browser-supplied value) flows into the agent's token sub.
+	mux.Handle("POST /api/spawn", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, _ := auth.user(r) // require() guarantees a session
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		body, err = injectUserID(body, user)
+		if err != nil {
+			http.Error(w, "bad request body", http.StatusBadRequest)
+			return
+		}
+		req, err := http.NewRequestWithContext(r.Context(), "POST", orchestratorURL+"/spawn", bytes.NewReader(body))
+		if err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		req.Header = r.Header.Clone()
+		req.ContentLength = int64(len(body))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		copyResponse(w, resp)
+	})))
 
 	// For endpoints with path params, extract and forward
-	mux.HandleFunc("GET /api/agents/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/agents/{id}/events", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		proxy("GET", orchestratorURL+"/v1/agents/"+id+"/events")(w, r)
-	})
+	})))
 	// Logs route — unlike the generic proxy, this MUST forward the inbound
 	// query string (container, sinceTime, tailLines) to the orchestrator.
-	mux.HandleFunc("GET /api/agents/{id}/logs", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /api/agents/{id}/logs", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		target := orchestratorURL + "/v1/agents/" + id + "/logs"
 		if r.URL.RawQuery != "" {
@@ -77,41 +134,66 @@ func main() {
 			return
 		}
 		defer resp.Body.Close()
-		for k, vs := range resp.Header {
-			for _, v := range vs {
-				w.Header().Add(k, v)
-			}
-		}
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
-	})
-	mux.HandleFunc("DELETE /api/agents/{id}", func(w http.ResponseWriter, r *http.Request) {
+		copyResponse(w, resp)
+	})))
+	mux.Handle("DELETE /api/agents/{id}", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		proxy("DELETE", orchestratorURL+"/v1/agents/"+id)(w, r)
-	})
-	mux.HandleFunc("POST /api/agents/{id}/message", func(w http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("POST /api/agents/{id}/message", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		proxy("POST", orchestratorURL+"/v1/agents/"+id+"/message")(w, r)
-	})
-	mux.HandleFunc("POST /api/agents/{id}/dismiss", func(w http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("POST /api/agents/{id}/dismiss", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		proxy("POST", orchestratorURL+"/v1/agents/"+id+"/dismiss")(w, r)
-	})
+	})))
 	// revoke/resume cascade an authorization change down the agent's subtree.
-	mux.HandleFunc("POST /api/agents/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("POST /api/agents/{id}/revoke", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		proxy("POST", orchestratorURL+"/v1/agents/"+id+"/revoke")(w, r)
-	})
-	mux.HandleFunc("POST /api/agents/{id}/resume", func(w http.ResponseWriter, r *http.Request) {
+	})))
+	mux.Handle("POST /api/agents/{id}/resume", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		proxy("POST", orchestratorURL+"/v1/agents/"+id+"/resume")(w, r)
-	})
-	mux.HandleFunc("GET /api/templates", proxy("GET", orchestratorURL+"/v1/templates"))
+	})))
+	mux.Handle("GET /api/templates", auth.require(proxy("GET", orchestratorURL+"/v1/templates")))
 
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-	log.Printf("dashboard listening on :%s (orchestrator: %s)", port, orchestratorURL)
+	log.Printf("dashboard listening on :%s (orchestrator: %s, oidc authority: %s)", port, orchestratorURL, authority)
 	log.Fatal(http.ListenAndServe(":"+port, mux))
+}
+
+// copyResponse copies an upstream response's status, headers, and body verbatim.
+func copyResponse(w http.ResponseWriter, resp *http.Response) {
+	for k, vs := range resp.Header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+// injectUserID overwrites the spawn request's userId with the authenticated
+// user, so the human identity is authoritative (a browser cannot spoof it).
+func injectUserID(body []byte, user string) ([]byte, error) {
+	var m map[string]any
+	if len(body) == 0 {
+		m = map[string]any{}
+	} else if err := json.Unmarshal(body, &m); err != nil {
+		return nil, err
+	}
+	m["userId"] = user
+	return json.Marshal(m)
+}
+
+func getenv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }

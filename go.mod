@@ -5,8 +5,10 @@ go 1.25.0
 require (
 	github.com/authzed/authzed-go v1.2.0
 	github.com/authzed/grpcutil v0.0.0-20230908193239-4286bb1d6403
+	github.com/coreos/go-oidc/v3 v3.18.0
 	github.com/lestrrat-go/jwx/v2 v2.1.6
 	github.com/spiffe/go-spiffe/v2 v2.6.0
+	golang.org/x/oauth2 v0.36.0
 	google.golang.org/grpc v1.75.0
 	k8s.io/api v0.29.6
 	k8s.io/apimachinery v0.29.6
@@ -28,7 +30,7 @@ require (
 	github.com/evanphx/json-patch v4.12.0+incompatible // indirect
 	github.com/evanphx/json-patch/v5 v5.8.0 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.2 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/zapr v1.3.0 // indirect
 	github.com/go-openapi/jsonpointer v0.19.6 // indirect
@@ -76,7 +78,6 @@ require (
 	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/exp v0.0.0-20240909161429-701f63a606c0 // indirect
 	golang.org/x/net v0.52.0 // indirect
-	golang.org/x/oauth2 v0.30.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/term v0.41.0 // indirect
 	golang.org/x/text v0.36.0 // indirect

@@ -6,6 +6,21 @@ public static class Config
 {
     public const string TokenExchangeGrantType = "urn:ietf:params:oauth:grant-type:token-exchange";
 
+    // The dashboard's public origin (browser-facing). Used to build the OIDC
+    // client's redirect/post-logout URIs. Kept in sync with the dashboard's
+    // OIDC_AUTHORITY and IdentityServer's IssuerUri so there is a single origin.
+    public static string DashboardOrigin =>
+        Environment.GetEnvironmentVariable("DASHBOARD_ORIGIN") ?? "http://localhost:8090";
+
+    // Interactive (human) login resources: openid for the id_token's sub,
+    // profile for name/preferred_username.
+    public static IEnumerable<IdentityResource> IdentityResources =>
+        new List<IdentityResource>
+        {
+            new IdentityResources.OpenId(),
+            new IdentityResources.Profile(),
+        };
+
     public static IEnumerable<ApiScope> ApiScopes =>
         new List<ApiScope>
         {
@@ -34,6 +49,30 @@ public static class Config
     public static IEnumerable<Client> Clients() =>
         new List<Client>
         {
+            // Interactive human login for the example dashboard (the only client
+            // that uses authorization_code + a real client_secret; all others are
+            // machine clients authenticated via SPIFFE JWT-SVID). The dashboard's
+            // Go backend is a confidential relying party.
+            new Client
+            {
+                ClientId = "dashboard",
+                ClientName = "Spawnly Dashboard",
+                AllowedGrantTypes = GrantTypes.Code,
+                RequirePkce = true,
+                RequireConsent = false,
+                // Real secret (env-overridable for the deployed manifest). The
+                // SpireClientSecretValidator delegates non-SPIFFE requests to
+                // Duende's default validator, which checks this hash.
+                ClientSecrets =
+                {
+                    new Secret(
+                        (Environment.GetEnvironmentVariable("DASHBOARD_CLIENT_SECRET") ?? "dashboard-secret")
+                            .Sha256()),
+                },
+                RedirectUris = { $"{DashboardOrigin}/callback" },
+                PostLogoutRedirectUris = { $"{DashboardOrigin}/" },
+                AllowedScopes = { "openid", "profile" },
+            },
             new Client
             {
                 ClientId = "worker",

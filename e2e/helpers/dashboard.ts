@@ -6,6 +6,7 @@ export interface AgentSummary {
   agentType?: string;
   status?: string;
   tenantId?: string;
+  userId?: string;
   parentId?: string;
   lifecycle?: string;
   supportsChat?: boolean;

@@ -20,6 +20,17 @@ spec:
           env:
             - name: ORCHESTRATOR_URL
               value: "http://orchestrator:8080"
+            # OIDC relying-party config. OIDC_AUTHORITY is the browser-facing
+            # origin (== IdentityServer ISSUER_URI); IDENTITY_INTERNAL_URL is the
+            # in-cluster back-channel to identity-server.
+            - name: OIDC_AUTHORITY
+              value: "http://localhost:8090"
+            - name: IDENTITY_INTERNAL_URL
+              value: "http://identity-server:8080"
+            - name: OIDC_CLIENT_ID
+              value: "dashboard"
+            - name: OIDC_CLIENT_SECRET
+              value: "dashboard-secret"
           ports:
             - containerPort: 8080
 ---

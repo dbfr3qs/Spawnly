@@ -1,0 +1,61 @@
+@page
+@model IdentityServer.Pages.Account.LoginModel
+@{
+    Layout = null;
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in · Spawnly</title>
+    <style>
+        :root { color-scheme: dark; }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+            background: #11151c; color: #e8edf2;
+        }
+        .card {
+            width: 320px; padding: 32px; border-radius: 12px;
+            background: #1b212b; box-shadow: 0 10px 40px rgba(0,0,0,.4);
+        }
+        h1 { margin: 0 0 4px; font-size: 22px; }
+        p.sub { margin: 0 0 24px; color: #8a97a8; font-size: 13px; }
+        label { display: block; margin: 14px 0 6px; font-size: 13px; color: #b6c2d1; }
+        input {
+            width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid #2b3442;
+            background: #11151c; color: #e8edf2; font-size: 14px;
+        }
+        input:focus { outline: none; border-color: #2980b9; }
+        button {
+            margin-top: 22px; width: 100%; padding: 11px; border: 0; border-radius: 8px;
+            background: #27ae60; color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+        }
+        button:hover { filter: brightness(1.1); }
+        .error {
+            margin-top: 16px; padding: 10px 12px; border-radius: 8px; font-size: 13px;
+            background: rgba(231,76,60,.15); color: #ff8a7a; border: 1px solid rgba(231,76,60,.4);
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Spawnly</h1>
+        <p class="sub">Sign in to continue</p>
+        <form method="post">
+            <input asp-for="ReturnUrl" type="hidden" />
+            <label asp-for="Username">Username</label>
+            <input asp-for="Username" autocomplete="username" autofocus />
+            <label asp-for="Password">Password</label>
+            <input asp-for="Password" type="password" autocomplete="current-password" />
+            <button type="submit">Sign in</button>
+        </form>
+        @if (!string.IsNullOrEmpty(Model.Error))
+        {
+            <div class="error">@Model.Error</div>
+        }
+    </div>
+</body>
+</html>
