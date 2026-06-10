@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -31,6 +32,12 @@ type config struct {
 	registryURL string
 	isTokenURL  string
 	socketPath  string
+	// consentRequired (CONSENT_REQUIRED=true, stamped by the orchestrator from
+	// the parent template) gates the agent's tokens behind a CIBA backchannel
+	// authentication approved by the spawning user. consentScopes is the
+	// template-declared scope set that consent covers.
+	consentRequired bool
+	consentScopes   string
 }
 
 func fetchJWT(ctx context.Context, socketPath, audience string) (string, error) {
@@ -299,11 +306,65 @@ func run(ctx context.Context, cfg config) error {
 		Payload: mustMarshal(map[string]string{"svid": regSVID}),
 	})
 
-	// 4. Start HTTP server (registration already succeeded at this point)
-	tc := &tokenCache{cfg: cfg, socketPath: cfg.socketPath}
+	// 4. Consent gate: a consent-gated agent flips to awaiting-consent and runs
+	// the CIBA flow in the background. /token serves 503 while pending (SDK
+	// clients retry 5xx); denial or expiry is terminal — events are posted to
+	// this agent and its parent, the record is marked failed (dropping SpiceDB
+	// authority), and the sidecar exits so the pod winds down.
+	var ciba *cibaTokenSource
+	if cfg.consentRequired {
+		if cfg.userID == "" {
+			return fmt.Errorf("consent required but no USER_ID: nobody to ask")
+		}
+		ciba = newCibaTokenSource(cfg)
+		if err := updateStatus(ctx, cfg.registryURL, agentID, "awaiting-consent"); err != nil {
+			log.Printf("warn: set awaiting-consent: %v", err)
+		}
+		postEvent(ctx, cfg.registryURL, agentID, events.Event{
+			Source: events.SourceAgent,
+			Type:   "consent_requested",
+			Payload: mustMarshal(map[string]string{
+				"agentId": agentID, "userId": cfg.userID, "scopes": ciba.scopes(),
+			}),
+		})
+		go func() {
+			if err := ciba.waitForGrant(ctx); err != nil {
+				if ctx.Err() != nil {
+					return // shutting down anyway
+				}
+				log.Printf("consent not granted: %v", err)
+				payload := mustMarshal(map[string]string{
+					"agentId": agentID, "childType": cfg.agentType, "reason": err.Error(),
+				})
+				postEvent(ctx, cfg.registryURL, agentID, events.Event{
+					Source: events.SourceAgent, Type: "consent_denied", Payload: payload,
+				})
+				if cfg.parentID != "" {
+					postEvent(ctx, cfg.registryURL, cfg.parentID, events.Event{
+						Source: events.SourceAgent, Type: "consent_denied", Payload: payload,
+					})
+				}
+				if err := updateStatus(ctx, cfg.registryURL, agentID, "failed"); err != nil {
+					log.Printf("warn: mark failed: %v", err)
+				}
+				os.Exit(1)
+			}
+			if err := updateStatus(ctx, cfg.registryURL, agentID, "active"); err != nil {
+				log.Printf("warn: set active: %v", err)
+			}
+			postEvent(ctx, cfg.registryURL, agentID, events.Event{
+				Source: events.SourceAgent,
+				Type:   "consent_granted",
+				Payload: mustMarshal(map[string]string{
+					"agentId": agentID, "userId": cfg.userID, "scopes": ciba.scopes(),
+				}),
+			})
+			log.Printf("user consent granted (user=%s scopes=%q)", cfg.userID, ciba.scopes())
+		}()
+	}
 
-	registered := true // we're past self-register
-	_ = registered
+	// 5. Start HTTP server (registration already succeeded at this point)
+	tc := &tokenCache{cfg: cfg, socketPath: cfg.socketPath}
 
 	mux := http.NewServeMux()
 
@@ -335,6 +396,25 @@ func run(ctx context.Context, cfg config) error {
 			// delegation token (audience=delegation) to hand to a child. Not
 			// cached: audience/scope are request-specific.
 			tok, expiresIn, err = clientCredentialsToken(r.Context(), cfg, cfg.socketPath, scope, audience)
+		} else if ciba != nil {
+			// Consent-gated agent: plain tokens come from the CIBA grant, so
+			// every renewal re-checks the stored consent — revoking it stops
+			// token issuance within the token lifetime.
+			if !ciba.covered(scope) {
+				http.Error(w, fmt.Sprintf("scope %q exceeds the user-consented set %q", scope, ciba.scopes()),
+					http.StatusForbidden)
+				return
+			}
+			tok, expiresIn, err = ciba.get(r.Context())
+			switch {
+			case errors.Is(err, errConsentPending):
+				w.Header().Set("Retry-After", "5")
+				http.Error(w, "awaiting user consent", http.StatusServiceUnavailable)
+				return
+			case errors.Is(err, errConsentDenied):
+				http.Error(w, "user denied consent", http.StatusForbidden)
+				return
+			}
 		} else {
 			if scope == "" {
 				scope = "sample-api"
@@ -391,14 +471,16 @@ func run(ctx context.Context, cfg config) error {
 
 func main() {
 	cfg := config{
-		agentID:     os.Getenv("AGENT_ID"),
-		agentType:   os.Getenv("AGENT_TYPE"),
-		tenantID:    os.Getenv("TENANT_ID"),
-		userID:      os.Getenv("USER_ID"),
-		parentID:    os.Getenv("PARENT_ID"),
-		registryURL: os.Getenv("REGISTRY_URL"),
-		isTokenURL:  os.Getenv("IS_TOKEN_URL"),
-		socketPath:  os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		agentID:         os.Getenv("AGENT_ID"),
+		agentType:       os.Getenv("AGENT_TYPE"),
+		tenantID:        os.Getenv("TENANT_ID"),
+		userID:          os.Getenv("USER_ID"),
+		parentID:        os.Getenv("PARENT_ID"),
+		registryURL:     os.Getenv("REGISTRY_URL"),
+		isTokenURL:      os.Getenv("IS_TOKEN_URL"),
+		socketPath:      os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		consentRequired: os.Getenv("CONSENT_REQUIRED") == "true",
+		consentScopes:   os.Getenv("CONSENT_SCOPES"),
 	}
 
 	// tenantID is optional: a global agent has no tenant. The empty value
