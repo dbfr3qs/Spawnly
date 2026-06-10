@@ -38,6 +38,10 @@ export default defineConfig({
             { slug: 'authoring/06-chat' },
           ],
         },
+        {
+          label: 'Under the hood',
+          items: [{ slug: 'internals/token-minting' }],
+        },
       ],
     }),
   ],

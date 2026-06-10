@@ -74,7 +74,9 @@ ones you will use:
   - `new TokenClient(baseUrl?)` — defaults to `http://localhost:8089`.
   - `getToken(scope, { audience? })` — a client-credentials token for `scope`,
     cached per `scope|audience`. Pass `audience` to target a resource or mint a
-    delegation token (`{ audience: 'delegation' }`).
+    delegation token (`{ audience: 'delegation' }`). For what IdentityServer does
+    with the SVID to produce that token, see
+    [How an agent's token is minted](/internals/token-minting).
   - `exchangeToken({ subjectToken, audience, scope })` — RFC 8693 token-exchange
     (a child exchanging a delegation token from its parent). Never cached.
   - `createAuthenticatedFetch(baseUrl, scope)` — a `fetch` that attaches a

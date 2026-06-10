@@ -386,6 +386,10 @@ the query params; the SDK's `TokenClient` is the typed wrapper over each:
 | `audience` (+ `scope`) | `client_credentials`, explicit audience | `getToken(scope, { audience })` | parent mints a delegation token (`audience=delegation`) |
 | `subject_token` (+ `audience`, `scope`) | `token-exchange` | `exchangeToken({ subjectToken, audience, scope })` | child exchanges a delegated token, extending the `act` chain |
 
+For how the first row's `client_credentials` mint turns a workload's SVID into a
+token carrying `sub = user:<id>` and an `act` actor, see
+[How an agent's token is minted](/internals/token-minting).
+
 ### Status callouts
 
 - ⚠️ Suspension/revocation reflects the **M3** implementation; deferred items

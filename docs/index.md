@@ -26,3 +26,9 @@ reference on templates and policy.
 - **[Defining a Template](/authoring/04-defining-a-template)** — the full `AgentTemplate` schema, field by field.
 - **[Defining Policy](/authoring/05-defining-policy)** — an agent's own authority and parent→child delegation.
 - **[Chatting with a Long-Lived Agent](/authoring/06-chat)** — how the dashboard chat interface works and the `/agents/chat/:sessionId` contract.
+
+## Under the hood
+
+How the platform works beneath the SDK.
+
+- **[How an agent's token is minted](/internals/token-minting)** — a workload's JWT-SVID becomes a scoped access token via `client_credentials`, with `sub = user:<id>` and an `act` actor — the non-exchange path, traced end to end.

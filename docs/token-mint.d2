@@ -1,0 +1,42 @@
+# Spawnly token mint (client_credentials) — source for docs/token-mint.svg
+# Regenerate with:  d2 docs/token-mint.d2 docs/token-mint.svg
+#
+# How a workload's JWT-SVID becomes a scoped OAuth access token via the
+# client_credentials grant (the non-exchange path). The SVID authenticates the
+# *client* (which workload); the Agent Registry lookup supplies the *subject*
+# (whose authority — user:<id>). Return messages are dashed.
+
+shape: sequence_diagram
+
+agent: Agent (SDK)
+sidecar: "Sidecar :8089"
+spire: SPIRE Workload API
+idsrv: "IdentityServer\n/connect/token"
+registry: Agent Registry
+api: "Sample API\n(resource server)" {
+  style.stroke-dash: 2
+}
+
+agent -> sidecar: "getToken('sample-api-a:write')"
+sidecar -> spire: "FetchJWTSVID(aud = IS token URL)"
+spire -> sidecar: "JWT-SVID\nsub = spiffe://…/tenant-1/alice/global-worker/agent-id" {
+  style.stroke-dash: 3
+}
+
+sidecar -> idsrv: "POST /connect/token\ngrant_type=client_credentials\nclient_id=global-worker\nclient_assertion=<SVID>\nscope=sample-api-a:write"
+
+idsrv -> idsrv: "SpireClientSecretValidator\nverify SVID against SPIRE JWKS\n→ authenticates the client"
+idsrv -> registry: "look up agent by id (from SVID sub)"
+registry -> idsrv: "{ userId: alice, status: active }" {
+  style.stroke-dash: 3
+}
+idsrv -> idsrv: "AgentRegistryValidator (client_credentials only)\nsub = user:alice\nact = { sub: <spiffe> }"
+
+idsrv -> sidecar: "access_token\nsub=user:alice · act=… · aud=sample-api-a" {
+  style.stroke-dash: 3
+}
+sidecar -> agent: "access_token (cached until ~30s before exp)" {
+  style.stroke-dash: 3
+}
+
+agent -> api: "call with Authorization: Bearer <access_token>"
