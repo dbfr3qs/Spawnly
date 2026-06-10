@@ -48,3 +48,6 @@ kubeconfig
 .env
 .env.local
 !.env.example
+
+# Duende auto-generated dev signing keys (local runs)
+identityserver/keys/

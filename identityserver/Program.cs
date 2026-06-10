@@ -45,7 +45,9 @@ builder.Services.AddIdentityServer(options =>
     .AddInMemoryClients(Config.Clients())
     .AddTestUsers(TestUsers.Users)
     .AddCustomTokenRequestValidator<AgentRegistryValidator>()
-    .AddExtensionGrantValidator<TokenExchangeGrantValidator>();
+    .AddExtensionGrantValidator<TokenExchangeGrantValidator>()
+    // CIBA: resolves a backchannel request's login_hint to the approving user.
+    .AddBackchannelAuthenticationUserValidator<CibaUserValidator>();
 
 // Concrete default secret validator — SpireClientSecretValidator delegates to it
 // for non-SPIFFE (normal client_secret) requests, e.g. the dashboard's code flow.
@@ -63,4 +65,11 @@ app.UseRouting();
 app.UseIdentityServer();
 app.UseAuthorization();
 app.MapRazorPages();
+
+// Dev-only CIBA inspection/completion API (curl-driven spike); see DevCibaEndpoints.
+if (Environment.GetEnvironmentVariable("DEV_CIBA_API") == "true")
+{
+    app.MapDevCibaEndpoints();
+}
+
 app.Run();

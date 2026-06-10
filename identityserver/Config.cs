@@ -5,6 +5,7 @@ namespace IdentityServer;
 public static class Config
 {
     public const string TokenExchangeGrantType = "urn:ietf:params:oauth:grant-type:token-exchange";
+    public const string CibaGrantType = "urn:openid:params:grant-type:ciba";
 
     // The dashboard's public origin (browser-facing). Used to build the OIDC
     // client's redirect/post-logout URIs. Kept in sync with the dashboard's
@@ -192,6 +193,10 @@ public static class Config
                 {
                     GrantType.ClientCredentials,
                     TokenExchangeGrantType,
+                    // CIBA (spike): the child agent runs a backchannel authentication
+                    // request at spawn so the human approves the handoff before any
+                    // user-bound token is minted.
+                    CibaGrantType,
                 },
                 RequireClientSecret = true,
                 ClientSecrets = { new Secret("placeholder".Sha256()) },
@@ -200,8 +205,14 @@ public static class Config
                 // Short-lived delegated tokens (Milestone 3): a revocation backstop so an
                 // in-flight token cannot be used long after its chain is revoked.
                 AccessTokenLifetime = 120,
+                // How long a pending backchannel request may wait for the human
+                // (expired_token on poll afterwards), and the minimum poll interval.
+                CibaLifetime = 300,
+                PollingInterval = 5,
                 AllowedScopes =
                 {
+                    // CIBA is an OIDC authentication request, so openid is required.
+                    "openid",
                     "sample-api-b:read",
                 },
             },
