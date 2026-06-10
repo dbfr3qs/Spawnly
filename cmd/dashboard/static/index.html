@@ -703,6 +703,51 @@
       grid-template-columns: minmax(120px,1fr) 100px 88px auto;
     }
 
+    /* ── Consent requests (CIBA) ── */
+    .consent-card {
+      background: rgba(230,170,40,.08);
+      border: 1px solid rgba(230,170,40,.45);
+      border-radius: 8px;
+      padding: 14px 18px;
+      margin-bottom: 14px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .consent-card .consent-msg { flex: 1 1 320px; font-size: 13px; line-height: 1.5; }
+    .consent-card .consent-msg b { color: var(--text); }
+    .consent-scope {
+      display: inline-block;
+      background: rgba(255,255,255,.07);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 7px;
+      margin: 0 3px 2px 0;
+      font-size: 11px;
+      font-family: monospace;
+    }
+    .consent-binding { color: var(--text-dim); font-size: 11px; margin-top: 4px; }
+    .consent-actions { display: flex; gap: 8px; }
+    .btn-approve { background: #1e5f3a; border-color: #2e8b57; color: #d9f5e5; }
+    .btn-approve:hover { background: #2e8b57; }
+    .btn-deny { background: #4a1010; border-color: #c0392b; color: #f5d9d9; }
+    .btn-deny:hover { background: #c0392b; }
+
+    .consent-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 13px;
+      flex-wrap: wrap;
+    }
+    .consent-row:last-child { border-bottom: none; }
+    .consent-row .consent-edge { flex: 1 1 260px; }
+    .consent-row .consent-meta { color: var(--text-dim); font-size: 11px; }
+    .consent-revoked-tag { color: #c0392b; font-size: 11px; font-weight: 600; }
+
     /* ── Scrollbar ── */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -715,6 +760,7 @@
   <h1>Spawnly</h1>
   <div class="header-actions">
     <button class="btn btn-primary" id="open-modal-btn">+ New Agent</button>
+    <button class="btn btn-ghost" id="open-consents-btn">Consents</button>
     <span id="current-user" class="current-user"></span>
     <form method="post" action="/logout" class="logout-form">
       <button class="btn btn-ghost" type="submit" id="logout-btn">Log out</button>
@@ -723,6 +769,9 @@
 </header>
 
 <main>
+  <!-- Pending CIBA consent requests for the logged-in user -->
+  <div id="consent-banner"></div>
+
   <div class="section-header">
     <span class="section-title">Running Agents</span>
     <span class="agent-count" id="agent-count">0 agents</span>
@@ -751,6 +800,17 @@
     <div class="modal-actions">
       <button class="btn btn-ghost" id="close-modal-btn">Cancel</button>
       <button class="btn btn-primary" id="spawn-btn">Spawn</button>
+    </div>
+  </div>
+</div>
+
+<!-- Consents management modal -->
+<div class="modal-overlay" id="consents-modal">
+  <div class="modal">
+    <h2>Spawn Consents</h2>
+    <div id="consents-list"><div class="no-events">Loading…</div></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="close-consents-btn">Close</button>
     </div>
   </div>
 </div>
@@ -1706,6 +1766,103 @@
     }
   });
 
+  // ── Consent requests (CIBA) ──────────────────────────────────────────────
+  // Pending backchannel authentication requests for the logged-in user: a
+  // consent-gated spawn is waiting for approval. Served by IdentityServer
+  // through the /ciba/ proxy, authenticated by the IS session cookie.
+
+  async function fetchPendingConsents() {
+    try { const r = await fetch('/ciba/pending'); return r.ok ? r.json() : []; }
+    catch (_) { return []; }
+  }
+
+  async function respondConsent(id, action) {
+    const r = await fetch(`/ciba/pending/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  }
+
+  window.handleConsent = async (id, action) => {
+    try {
+      await respondConsent(id, action);
+      showToast(action === 'approve' ? 'Consent granted' : 'Consent denied', action !== 'approve');
+      updateConsentBanner(await fetchPendingConsents());
+    } catch (e) {
+      showToast(`Consent ${action} failed: ${e.message}`, true);
+    }
+  };
+
+  function consentCardHtml(c) {
+    const scopes = (c.scopes || []).map(s => `<span class="consent-scope">${escHtml(s)}</span>`).join('');
+    const edge = c.parentType
+      ? `<b>${escHtml(c.parentType)}</b> wants to spawn <b>${escHtml(c.childType || c.client)}</b>`
+      : `<b>${escHtml(c.client || c.childType || 'an agent')}</b> requests access`;
+    return `<div class="consent-card" id="consent-${escHtml(c.id)}" data-testid="consent-request">
+      <div class="consent-msg">${edge} with scopes ${scopes}
+        ${c.bindingMessage ? `<div class="consent-binding">${escHtml(c.bindingMessage)}</div>` : ''}
+      </div>
+      <div class="consent-actions">
+        <button class="btn btn-approve" onclick="handleConsent('${escHtml(c.id)}','approve')">Approve</button>
+        <button class="btn btn-deny" onclick="handleConsent('${escHtml(c.id)}','deny')">Deny</button>
+      </div>
+    </div>`;
+  }
+
+  let renderedConsentIds = '';
+  function updateConsentBanner(items) {
+    const ids = (items || []).map(c => c.id).join(',');
+    if (ids === renderedConsentIds) return; // never rebuild mid-click for nothing
+    renderedConsentIds = ids;
+    document.getElementById('consent-banner').innerHTML = (items || []).map(consentCardHtml).join('');
+  }
+
+  // ── Consents management modal ────────────────────────────────────────────
+
+  async function fetchConsents() {
+    try { const r = await fetch('/api/consents'); return r.ok ? r.json() : []; }
+    catch (_) { return []; }
+  }
+
+  window.handleConsentRevoke = async (id) => {
+    try {
+      const r = await fetch(`/api/consents/${encodeURIComponent(id)}/revoke`, { method: 'POST' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      showToast('Consent revoked — the next spawn will re-prompt');
+      renderConsentsList(await fetchConsents());
+    } catch (e) {
+      showToast(`Revoke failed: ${e.message}`, true);
+    }
+  };
+
+  function renderConsentsList(items) {
+    const el = document.getElementById('consents-list');
+    if (!items || items.length === 0) {
+      el.innerHTML = '<div class="no-events">No spawn consents on record.</div>';
+      return;
+    }
+    el.innerHTML = items.map(c => {
+      const scopes = (c.scopes || []).map(s => `<span class="consent-scope">${escHtml(s)}</span>`).join('');
+      const expiry = c.expiresAt ? `expires ${fmtTime(c.expiresAt)}` : 'no expiry';
+      return `<div class="consent-row" data-testid="consent-record">
+        <div class="consent-edge"><b>${escHtml(c.parentType)}</b> → <b>${escHtml(c.childType)}</b><br>${scopes}</div>
+        <div class="consent-meta">granted ${fmtTime(c.grantedAt)} · ${expiry}</div>
+        ${c.revoked
+          ? '<span class="consent-revoked-tag">revoked</span>'
+          : `<button class="btn btn-deny" onclick="handleConsentRevoke('${escHtml(c.id)}')">Revoke</button>`}
+      </div>`;
+    }).join('');
+  }
+
+  document.getElementById('open-consents-btn').addEventListener('click', async () => {
+    document.getElementById('consents-modal').classList.add('open');
+    renderConsentsList(await fetchConsents());
+  });
+  document.getElementById('close-consents-btn').addEventListener('click', () => {
+    document.getElementById('consents-modal').classList.remove('open');
+  });
+  document.getElementById('consents-modal').addEventListener('click', e => {
+    if (e.target === e.currentTarget) e.currentTarget.classList.remove('open');
+  });
+
   // ── Toast ────────────────────────────────────────────────────────────────
 
   let toastTimer = null;
@@ -1723,6 +1880,7 @@
 
   async function poll() {
     try { updateAgentList(await fetchAgents()); } catch (_) {}
+    try { updateConsentBanner(await fetchPendingConsents()); } catch (_) {}
     try { refreshStaleness(); } catch (_) {}
   }
 
@@ -1738,7 +1896,11 @@
       `<option value="${escHtml(t)}"${t === 'worker' ? ' selected' : ''}>${escHtml(t)}</option>`
     ).join('');
   });
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    closeModal();
+    document.getElementById('consents-modal').classList.remove('open');
+  });
 
   // Show the logged-in user in the header. The page itself is only reachable
   // with a session (the server redirects to /login otherwise), so this is just

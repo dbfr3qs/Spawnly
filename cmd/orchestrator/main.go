@@ -451,6 +451,46 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		io.Copy(w, resp.Body)
 	})
 
+	// Stored spawn consents: registry passthroughs for the dashboard's consent
+	// management view (list per user, revoke to force a re-prompt next spawn).
+	mux.HandleFunc("GET /v1/consents", func(w http.ResponseWriter, r *http.Request) {
+		target := registryURL + "/v1/consents"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		req2, err := http.NewRequestWithContext(r.Context(), "GET", target, nil)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		resp, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			http.Error(w, "registry unavailable", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	})
+
+	mux.HandleFunc("POST /v1/consents/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
+		req2, err := http.NewRequestWithContext(r.Context(), "POST",
+			registryURL+"/v1/consents/"+r.PathValue("id")+"/revoke", nil)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		resp, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			http.Error(w, "registry unavailable", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	})
+
 	mux.HandleFunc("POST /v1/agents/{id}/message", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 

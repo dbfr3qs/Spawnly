@@ -44,6 +44,11 @@ func main() {
 	mux.Handle("/connect/", idProxy)
 	mux.Handle("/.well-known/", idProxy)
 	mux.Handle("/Account/", idProxy)
+	// CIBA consent API: pending spawn-consent requests for the logged-in user.
+	// IdentityServer authenticates these with its own session cookie (which the
+	// browser holds under this origin, since all IS traffic is proxied here),
+	// binding approval to the very user the request asks to authenticate.
+	mux.Handle("/ciba/", idProxy)
 
 	// Relying-party routes (public).
 	mux.HandleFunc("GET /login", auth.handleLogin)
@@ -158,6 +163,17 @@ func main() {
 		proxy("POST", orchestratorURL+"/v1/agents/"+id+"/resume")(w, r)
 	})))
 	mux.Handle("GET /api/templates", auth.require(proxy("GET", orchestratorURL+"/v1/templates")))
+
+	// Stored spawn consents (management view). Scoped server-side to the
+	// session user — the browser cannot list or revoke another user's grants.
+	mux.Handle("GET /api/consents", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, _ := auth.user(r)
+		proxy("GET", orchestratorURL+"/v1/consents?userId="+url.QueryEscape(user))(w, r)
+	})))
+	mux.Handle("POST /api/consents/{id}/revoke", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		proxy("POST", orchestratorURL+"/v1/consents/"+id+"/revoke")(w, r)
+	})))
 
 	port := os.Getenv("PORT")
 	if port == "" {
