@@ -1796,7 +1796,7 @@
     const edge = c.parentType
       ? `<b>${escHtml(c.parentType)}</b> wants to spawn <b>${escHtml(c.childType || c.client)}</b>`
       : `<b>${escHtml(c.client || c.childType || 'an agent')}</b> requests access`;
-    return `<div class="consent-card" id="consent-${escHtml(c.id)}" data-testid="consent-request">
+    return `<div class="consent-card" id="consent-${escHtml(c.id)}" data-testid="consent-request" data-agent-id="${escHtml(c.agentId || '')}">
       <div class="consent-msg">${edge} with scopes ${scopes}
         ${c.bindingMessage ? `<div class="consent-binding">${escHtml(c.bindingMessage)}</div>` : ''}
       </div>

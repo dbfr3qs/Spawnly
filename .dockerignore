@@ -1,0 +1,7 @@
+# Local build/runtime artifacts that must never enter an image. In particular
+# identityserver/keys/ holds Duende auto-generated dev signing keys from LOCAL
+# runs - baked into the image, the in-cluster pod cannot unprotect them (its
+# data-protection ring differs) and Duende key management fails noisily.
+identityserver/keys/
+identityserver/bin/
+identityserver/obj/

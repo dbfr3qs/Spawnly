@@ -67,7 +67,7 @@ test.describe('ciba-consent', () => {
     expect(link2.status).toBe('awaiting-consent');
 
     // 2) Approve through the UI: the link activates and starts working.
-    await resolveConsentPrompt(page, 'approve');
+    await resolveConsentPrompt(page, 'approve', { agentId: link2.agentId });
     await waitForEventType(page, link2.agentId, 'consent_granted', { timeout: 60_000 });
     await waitForEventType(page, link2.agentId, 'work_ok', { timeout: 90_000 });
 
@@ -103,9 +103,10 @@ test.describe('ciba-consent', () => {
     const root2 = await spawn(page, 'chain-worker');
     spawned.push(root2);
 
-    await expect(consentPrompts(page).first()).toBeVisible({ timeout: 150_000 });
+    // Target the new link's own prompt by agent id — a just-killed chain link's
+    // renewal re-consent could share the banner for a few seconds.
     const deniedLink = await findAgent(page, (a) => a.parentId === root2);
-    await resolveConsentPrompt(page, 'deny');
+    await resolveConsentPrompt(page, 'deny', { agentId: deniedLink.agentId, timeout: 150_000 });
 
     await waitForEventType(page, deniedLink.agentId, 'consent_denied', { timeout: 60_000 });
     await waitForEventType(page, root2, 'consent_denied', { timeout: 60_000 });

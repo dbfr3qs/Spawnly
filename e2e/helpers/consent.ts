@@ -35,16 +35,28 @@ export function consentPrompts(page: Page): Locator {
   return page.locator('[data-testid="consent-request"]');
 }
 
+export interface ResolveConsentOpts {
+  /**
+   * Target the prompt belonging to this specific agent. Without it the first
+   * card is used — fine when only one prompt can exist, ambiguous otherwise
+   * (e.g. a dying agent's renewal re-consent sharing the banner).
+   */
+  agentId?: string;
+  timeout?: number;
+}
+
 // Wait for a pending consent prompt and resolve it through the real UI.
-// Returns after the card disappears (the banner re-renders on the next poll).
+// Returns after the targeted card disappears (the banner re-renders on poll).
 export async function resolveConsentPrompt(
   page: Page,
   action: 'approve' | 'deny',
-  timeout = 120_000,
+  opts: ResolveConsentOpts = {},
 ): Promise<void> {
-  const card = consentPrompts(page).first();
-  await expect(card).toBeVisible({ timeout });
-  const before = await consentPrompts(page).count();
+  const scope = opts.agentId
+    ? page.locator(`[data-testid="consent-request"][data-agent-id="${opts.agentId}"]`)
+    : consentPrompts(page);
+  const card = scope.first();
+  await expect(card).toBeVisible({ timeout: opts.timeout ?? 120_000 });
   await card.locator(action === 'approve' ? '.btn-approve' : '.btn-deny').click();
-  await expect(consentPrompts(page)).toHaveCount(before - 1, { timeout: 15_000 });
+  await expect(scope).toHaveCount(0, { timeout: 15_000 });
 }

@@ -16,19 +16,36 @@ public static class CibaConsentApi
     public static void MapCibaConsentApi(this WebApplication app)
     {
         app.MapGet("/ciba/pending", async (
-            IBackchannelAuthenticationInteractionService interaction) =>
+            IBackchannelAuthenticationInteractionService interaction,
+            AgentRegistryClient registry) =>
         {
             var pending = await interaction.GetPendingLoginRequestsForCurrentUserAsync();
-            return Results.Json(pending.Select(r => new
+            var visible = new List<object>();
+            foreach (var r in pending)
             {
-                id = r.InternalId,
-                childType = CibaRequestValidator.Property(r.Properties, CibaRequestValidator.ChildTypeKey),
-                parentType = CibaRequestValidator.Property(r.Properties, CibaRequestValidator.ParentTypeKey),
-                agentId = CibaRequestValidator.Property(r.Properties, CibaRequestValidator.AgentIdKey),
-                scopes = r.ValidatedResources.RawScopeValues,
-                bindingMessage = r.BindingMessage,
-                client = r.Client.ClientName ?? r.Client.ClientId,
-            }));
+                var agentId = CibaRequestValidator.Property(r.Properties, CibaRequestValidator.AgentIdKey);
+                // A request whose agent has since gone terminal (killed link
+                // whose token renewal raced a consent revocation, a pod that
+                // exited while pending) is moot: never ask a human to approve
+                // a dead agent. The request itself lapses via its own expiry.
+                if (agentId is { Length: > 0 })
+                {
+                    var agent = await registry.GetAgent(agentId);
+                    if (agent?.Status is not ("active" or "pending" or "awaiting-consent"))
+                        continue;
+                }
+                visible.Add(new
+                {
+                    id = r.InternalId,
+                    childType = CibaRequestValidator.Property(r.Properties, CibaRequestValidator.ChildTypeKey),
+                    parentType = CibaRequestValidator.Property(r.Properties, CibaRequestValidator.ParentTypeKey),
+                    agentId,
+                    scopes = r.ValidatedResources.RawScopeValues,
+                    bindingMessage = r.BindingMessage,
+                    client = r.Client.ClientName ?? r.Client.ClientId,
+                });
+            }
+            return Results.Json(visible);
         }).RequireAuthorization();
 
         app.MapPost("/ciba/pending/{id}/approve", (
