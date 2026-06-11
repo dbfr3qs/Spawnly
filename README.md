@@ -4,6 +4,10 @@ A proof-of-concept platform for running AI agents on Kubernetes with cryptograph
 
 Each agent pod gets a unique SPIFFE identity (JWT-SVID) issued by SPIRE at start. A per-pod **sidecar** uses that identity to register the agent with the **agent registry** and to obtain scoped OAuth 2.0 access tokens; the agent then calls protected APIs and emits structured lifecycle events throughout — all visible in a real-time web dashboard.
 
+> **New here?** The easiest way to run, demo, and learn this platform is the
+> [Claude Code plugin](PLUGIN.md): `/spawnly:up` then `/spawnly:demo`, and ask
+> it how anything works.
+
 Agents run on the same platform contract regardless of language or framework:
 
 - **A Go worker** (`agents/go-worker/`) — the minimal short-lived reference workload, built on the Go SDK (`github.com/spawnly/sdk-go`).
