@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { spawn, listAgents, descendants, type AgentSummary } from '../helpers/dashboard';
+import { spawn, listAgents, findAgent, descendants, type AgentSummary } from '../helpers/dashboard';
 import { waitForEventType, newestEventTime } from '../helpers/events';
 import { killTrees } from '../helpers/cleanup';
 import { revokeAllConsents, resolveConsentPrompt } from '../helpers/consent';
@@ -40,7 +40,11 @@ test.describe('chain-worker', () => {
     const rootId = await spawn(page, 'chain-worker');
     spawned.push(rootId);
 
-    await resolveConsentPrompt(page, 'approve');
+    // Approve the first link's OWN prompt, pinned by agent id — clicking the
+    // first card in the banner could hit a stale prompt from an earlier
+    // session, storing a consent that silently auto-approves this link.
+    const firstLink = await findAgent(page, (a) => a.parentId === rootId);
+    await resolveConsentPrompt(page, 'approve', { agentId: firstLink.agentId });
 
     // Wait for the chain to grow AND settle: poll until the node count is both
     // ≥3 and unchanged across two consecutive reads. A fixed sleep would race a

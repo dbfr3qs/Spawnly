@@ -66,6 +66,27 @@ export async function listAgents(page: Page): Promise<AgentSummary[]> {
   return resp.json();
 }
 
+// Poll until the predicate finds an agent; returns it. Used to pin down a
+// freshly spawned child (e.g. by parentId) before interacting with anything
+// keyed to its agent id, such as its consent prompt.
+export async function findAgent(
+  page: Page,
+  pred: (a: AgentSummary) => boolean,
+  timeout = 120_000,
+): Promise<AgentSummary> {
+  let found: AgentSummary | undefined;
+  await expect
+    .poll(
+      async () => {
+        found = (await listAgents(page)).find(pred);
+        return Boolean(found);
+      },
+      { timeout, intervals: [1000, 2000, 3000] },
+    )
+    .toBe(true);
+  return found!;
+}
+
 // Send one chat message to a long-lived agent and return its reply text. Opens
 // the chat panel only if it isn't already open (so repeated calls don't toggle
 // it shut), and waits for a NEW agent bubble to appear — counting the existing

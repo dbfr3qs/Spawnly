@@ -16,10 +16,11 @@ agents/*/dist/
 sdks/*/node_modules/
 sdks/*/dist/
 
-# E2E (Playwright)
+# E2E (Playwright) — match run artifacts wherever Playwright is invoked from
+# (repo root or e2e/), not just under e2e/.
 e2e/node_modules/
-e2e/test-results/
-e2e/playwright-report/
+test-results/
+playwright-report/
 e2e/playwright/.auth/
 
 # .NET build output

@@ -147,17 +147,30 @@ kubectl apply -f deploy/manifests/operator.yaml
 kubectl apply -f deploy/manifests/orchestrator.yaml
 kubectl apply -f deploy/manifests/dashboard.yaml
 
+# On a pre-existing cluster the manifests are unchanged (image tags are
+# `:latest`), so the applies above are no-ops and the running pods keep the
+# PREVIOUSLY loaded images — a bootstrap would silently test stale code.
+# Restart every platform deployment so the freshly kind-loaded images take
+# effect (this also resets IdentityServer's in-memory grant store, dropping
+# stale pending CIBA requests from earlier sessions).
+echo "==> Restarting platform deployments to pick up freshly loaded images..."
+kubectl rollout restart \
+  deployment/registry deployment/identity-server \
+  deployment/sample-api deployment/sample-api-a deployment/sample-api-b \
+  deployment/sample-api-global deployment/agent-operator \
+  deployment/orchestrator deployment/dashboard
+
 echo "==> Waiting for all services to be ready..."
 kubectl wait --for=condition=ready pod -l app=spicedb --timeout=120s
-kubectl wait --for=condition=available deployment/registry --timeout=120s
-kubectl wait --for=condition=available deployment/identity-server --timeout=120s
-kubectl wait --for=condition=available deployment/sample-api --timeout=120s
-kubectl wait --for=condition=available deployment/sample-api-a --timeout=120s
-kubectl wait --for=condition=available deployment/sample-api-b --timeout=120s
-kubectl wait --for=condition=available deployment/sample-api-global --timeout=120s
-kubectl wait --for=condition=available deployment/agent-operator --timeout=120s
-kubectl wait --for=condition=available deployment/orchestrator --timeout=120s
-kubectl wait --for=condition=available deployment/dashboard --timeout=120s
+kubectl rollout status deployment/registry --timeout=120s
+kubectl rollout status deployment/identity-server --timeout=120s
+kubectl rollout status deployment/sample-api --timeout=120s
+kubectl rollout status deployment/sample-api-a --timeout=120s
+kubectl rollout status deployment/sample-api-b --timeout=120s
+kubectl rollout status deployment/sample-api-global --timeout=120s
+kubectl rollout status deployment/agent-operator --timeout=120s
+kubectl rollout status deployment/orchestrator --timeout=120s
+kubectl rollout status deployment/dashboard --timeout=120s
 
 # ── Secrets ──────────────────────────────────────────────────────────────────
 

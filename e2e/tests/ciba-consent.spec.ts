@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { spawn, listAgents, type AgentSummary } from '../helpers/dashboard';
+import { spawn, listAgents, findAgent } from '../helpers/dashboard';
 import { waitForEventType } from '../helpers/events';
 import { killTrees } from '../helpers/cleanup';
 import {
@@ -21,25 +21,6 @@ import {
 // consent forces the next spawn of the edge to re-prompt; denial fails the
 // pending link and notifies its parent.
 
-// Poll until the predicate finds an agent; returns it.
-async function findAgent(
-  page: Parameters<typeof listAgents>[0],
-  pred: (a: AgentSummary) => boolean,
-  timeout = 120_000,
-): Promise<AgentSummary> {
-  let found: AgentSummary | undefined;
-  await expect
-    .poll(
-      async () => {
-        found = (await listAgents(page)).find(pred);
-        return Boolean(found);
-      },
-      { timeout, intervals: [1000, 2000, 3000] },
-    )
-    .toBe(true);
-  return found!;
-}
-
 test.describe('ciba-consent', () => {
   const spawned: string[] = [];
 
@@ -58,13 +39,22 @@ test.describe('ciba-consent', () => {
     spawned.push(rootId);
 
     // 1) The first link waits for the user: registry record awaiting-consent,
-    //    prompt visible on the dashboard.
-    const prompt = consentPrompts(page).first();
+    //    prompt visible on the dashboard. Pin the prompt to the link's own
+    //    agent id — an unscoped .first() could match a stale card from an
+    //    earlier session and race ahead of this link's actual request.
+    const link2 = await findAgent(page, (a) => a.parentId === rootId);
+    const prompt = consentPrompts(page).and(
+      page.locator(`[data-agent-id="${link2.agentId}"]`),
+    );
     await expect(prompt).toBeVisible({ timeout: 150_000 });
     await expect(prompt).toContainText('chain-worker');
-
-    const link2 = await findAgent(page, (a) => a.parentId === rootId);
-    expect(link2.status).toBe('awaiting-consent');
+    await expect
+      .poll(
+        async () =>
+          (await listAgents(page)).find((a) => a.agentId === link2.agentId)?.status,
+        { timeout: 30_000, intervals: [1000, 2000] },
+      )
+      .toBe('awaiting-consent');
 
     // 2) Approve through the UI: the link activates and starts working.
     await resolveConsentPrompt(page, 'approve', { agentId: link2.agentId });
@@ -72,12 +62,17 @@ test.describe('ciba-consent', () => {
     await waitForEventType(page, link2.agentId, 'work_ok', { timeout: 90_000 });
 
     // 3) The next link auto-approves from the stored consent: it reaches
-    //    work_ok without any prompt ever appearing, and the registry still
-    //    holds exactly one live consent for the edge.
+    //    work_ok without any prompt of ITS OWN ever appearing, and the registry
+    //    still holds exactly one live consent for the edge. Scope the "no
+    //    prompt" check to link3's card — a global empty-banner assertion flakes
+    //    on any unrelated pending prompt (e.g. a leaked sibling chain's renewal
+    //    re-consent) that has nothing to do with link3 auto-approving.
     const link3 = await findAgent(page, (a) => a.parentId === link2.agentId);
     await waitForEventType(page, link3.agentId, 'consent_granted', { timeout: 90_000 });
     await waitForEventType(page, link3.agentId, 'work_ok', { timeout: 90_000 });
-    await expect(consentPrompts(page)).toHaveCount(0);
+    await expect(
+      consentPrompts(page).and(page.locator(`[data-agent-id="${link3.agentId}"]`)),
+    ).toHaveCount(0);
 
     const live = (await listConsents(page)).filter(
       (c) => c.parentType === 'chain-worker' && c.childType === 'chain-worker' && !c.revoked,
