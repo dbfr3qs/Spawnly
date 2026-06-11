@@ -31,7 +31,7 @@ public class CibaUserValidator : IBackchannelAuthenticationUserValidator
             return Task.FromResult(new BackchannelAuthenticationUserValidationResult
             {
                 Error = "unknown_user_id",
-                ErrorDescription = $"no user matches login_hint",
+                ErrorDescription = "no user matches login_hint",
             });
         }
 

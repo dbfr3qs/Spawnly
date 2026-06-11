@@ -975,7 +975,9 @@
   }
 
   function escHtml(str) {
-    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    // &#39; (not &apos;) so values are safe inside single-quoted inline
+    // handlers like onclick="f('${escHtml(id)}')" as well as in HTML text.
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   }
 
   // ── Neutral event-type taxonomy → visual treatment ───────────────────────

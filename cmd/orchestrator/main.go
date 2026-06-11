@@ -409,13 +409,13 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		w.WriteHeader(resp.StatusCode)
 	})
 
-	// revoke/resume are cascading authorization actions owned by the registry (it
-	// holds agent lineage). The orchestrator forwards them and relays the
-	// registry's status and JSON body (the list of affected agent ids).
-	forwardToRegistry := func(suffix string) http.HandlerFunc {
+	// forwardToRegistry relays a bodyless request to the registry (which owns
+	// agent lineage, templates, and consents) and copies back the registry's
+	// status and JSON body. path builds the registry path from the inbound
+	// request (path values, query string).
+	forwardToRegistry := func(method string, path func(r *http.Request) string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			id := r.PathValue("id")
-			req2, err := http.NewRequestWithContext(r.Context(), "POST", registryURL+"/v1/agents/"+id+suffix, nil)
+			req2, err := http.NewRequestWithContext(r.Context(), method, registryURL+path(r), nil)
 			if err != nil {
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
@@ -431,65 +431,34 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			io.Copy(w, resp.Body)
 		}
 	}
-	mux.HandleFunc("POST /v1/agents/{id}/revoke", forwardToRegistry("/revoke"))
-	mux.HandleFunc("POST /v1/agents/{id}/resume", forwardToRegistry("/resume"))
+	withQuery := func(path string, r *http.Request) string {
+		if r.URL.RawQuery != "" {
+			return path + "?" + r.URL.RawQuery
+		}
+		return path
+	}
 
-	mux.HandleFunc("GET /v1/templates", func(w http.ResponseWriter, r *http.Request) {
-		req2, err := http.NewRequestWithContext(r.Context(), "GET", registryURL+"/v1/templates", nil)
-		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		resp, err := http.DefaultClient.Do(req2)
-		if err != nil {
-			http.Error(w, "registry unavailable", http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
-	})
+	// revoke/resume are cascading authorization actions owned by the registry.
+	mux.HandleFunc("POST /v1/agents/{id}/revoke", forwardToRegistry("POST", func(r *http.Request) string {
+		return "/v1/agents/" + r.PathValue("id") + "/revoke"
+	}))
+	mux.HandleFunc("POST /v1/agents/{id}/resume", forwardToRegistry("POST", func(r *http.Request) string {
+		return "/v1/agents/" + r.PathValue("id") + "/resume"
+	}))
+
+	mux.HandleFunc("GET /v1/templates", forwardToRegistry("GET", func(*http.Request) string {
+		return "/v1/templates"
+	}))
 
 	// Stored spawn consents: registry passthroughs for the dashboard's consent
 	// management view (list per user, revoke to force a re-prompt next spawn).
-	mux.HandleFunc("GET /v1/consents", func(w http.ResponseWriter, r *http.Request) {
-		target := registryURL + "/v1/consents"
-		if r.URL.RawQuery != "" {
-			target += "?" + r.URL.RawQuery
-		}
-		req2, err := http.NewRequestWithContext(r.Context(), "GET", target, nil)
-		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		resp, err := http.DefaultClient.Do(req2)
-		if err != nil {
-			http.Error(w, "registry unavailable", http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
-	})
-
-	mux.HandleFunc("POST /v1/consents/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
-		req2, err := http.NewRequestWithContext(r.Context(), "POST",
-			registryURL+"/v1/consents/"+r.PathValue("id")+"/revoke", nil)
-		if err != nil {
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		resp, err := http.DefaultClient.Do(req2)
-		if err != nil {
-			http.Error(w, "registry unavailable", http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
-	})
+	// The query string carries the dashboard's session-user scoping.
+	mux.HandleFunc("GET /v1/consents", forwardToRegistry("GET", func(r *http.Request) string {
+		return withQuery("/v1/consents", r)
+	}))
+	mux.HandleFunc("POST /v1/consents/{id}/revoke", forwardToRegistry("POST", func(r *http.Request) string {
+		return withQuery("/v1/consents/"+r.PathValue("id")+"/revoke", r)
+	}))
 
 	mux.HandleFunc("POST /v1/agents/{id}/message", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
