@@ -17,6 +17,21 @@ namespace IdentityServer;
 /// </summary>
 public class SpireClientSecretValidator : IClientSecretValidator
 {
+    public const string JwtBearerAssertionType = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+
+    /// <summary>
+    /// The request's client_assertion, but only when its assertion type means
+    /// THIS validator signature-checked it against SPIRE's JWKS during client
+    /// authentication. Downstream validators must use this — never read
+    /// client_assertion straight from the raw form — or a caller could
+    /// authenticate with a client_secret and smuggle an unvalidated assertion
+    /// past them.
+    /// </summary>
+    public static string? ValidatedAssertion(System.Collections.Specialized.NameValueCollection? raw) =>
+        raw?.Get("client_assertion_type") == JwtBearerAssertionType
+            ? raw.Get("client_assertion")
+            : null;
+
     private readonly IClientStore _clients;
     private readonly SpireSvidValidator _svid;
     private readonly ClientSecretValidator _inner;
@@ -40,8 +55,7 @@ public class SpireClientSecretValidator : IClientSecretValidator
 
         // Not a SPIFFE assertion — hand off to Duende's default secret validation
         // (client_secret_post / basic). This is the human-login (dashboard) path.
-        if (assertion is null ||
-            assertionType != "urn:ietf:params:oauth:client-assertion-type:jwt-bearer")
+        if (assertion is null || assertionType != JwtBearerAssertionType)
             return await _inner.ValidateAsync(context);
 
         if (clientId is null) return Fail();

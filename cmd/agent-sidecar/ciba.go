@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/spawnly/platform/internal/registry"
 )
 
 var (
@@ -73,16 +75,7 @@ func (cs *cibaTokenSource) scopes() string {
 // covered reports whether every requested scope is inside the consent set, so
 // /token can refuse scope escalation locally with a clear error.
 func (cs *cibaTokenSource) covered(requested string) bool {
-	consented := map[string]bool{}
-	for _, sc := range strings.Fields(cs.scopes()) {
-		consented[sc] = true
-	}
-	for _, sc := range strings.Fields(requested) {
-		if !consented[sc] {
-			return false
-		}
-	}
-	return true
+	return registry.FirstUncoveredScope(strings.Fields(cs.scopes()), strings.Fields(requested)) == ""
 }
 
 // initiate opens a fresh backchannel authentication request. Callers hold mu.
@@ -202,27 +195,49 @@ func (cs *cibaTokenSource) pollOnce(ctx context.Context) error {
 
 // waitForGrant drives the startup consent flow to a verdict: initiate the
 // backchannel request and poll until the user (or a stored consent) approves,
-// denies, or the request expires.
+// denies, or the request expires. The lock is held per request, never across
+// a poll sleep — /token is served concurrently during startup and must get
+// its documented 503-while-pending instead of blocking on the mutex.
 func (cs *cibaTokenSource) waitForGrant(ctx context.Context) error {
 	cs.mu.Lock()
-	defer cs.mu.Unlock()
-	if err := cs.initiate(ctx); err != nil {
+	var err error
+	// An early /token call may have initiated already; never open a second
+	// outstanding request (it would surface a duplicate dashboard prompt).
+	if cs.authReqID == "" && cs.token == "" && !cs.denied {
+		err = cs.initiate(ctx)
+	}
+	cs.mu.Unlock()
+	if err != nil {
 		return err
 	}
 	for {
+		cs.mu.Lock()
+		// A concurrent /token call may have polled the verdict while we slept;
+		// honor it instead of re-polling a consumed auth_req_id.
+		switch {
+		case cs.denied:
+			cs.mu.Unlock()
+			return errConsentDenied
+		case cs.token != "":
+			cs.mu.Unlock()
+			return nil
+		case cs.authReqID == "":
+			cs.mu.Unlock()
+			return errConsentExpired
+		}
 		err := cs.pollOnce(ctx)
+		next := cs.nextPoll
+		cs.mu.Unlock()
 		if err == nil {
 			return nil
 		}
 		if !errors.Is(err, errConsentPending) {
 			return err
 		}
-		// Sleep without holding other callers off the state would be nicer,
-		// but during startup nothing else reads this source.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(time.Until(cs.nextPoll)):
+		case <-time.After(time.Until(next)):
 		}
 	}
 }

@@ -31,6 +31,23 @@ type ConsentDecision struct {
 	Reason  string `json:"reason"`
 }
 
+// FirstUncoveredScope returns the first requested scope missing from the
+// granted set, or "" when every requested scope is covered. It is the single
+// definition of "scope subset" for consent decisions — the registry's
+// EvaluateConsent and the sidecar's local escalation check both use it.
+func FirstUncoveredScope(granted, requested []string) string {
+	set := make(map[string]bool, len(granted))
+	for _, sc := range granted {
+		set[sc] = true
+	}
+	for _, sc := range requested {
+		if !set[sc] {
+			return sc
+		}
+	}
+	return ""
+}
+
 // EvaluateConsent checks a stored consent record against the scopes a new
 // spawn requests. The re-consent triggers are revocation, TTL expiry, and
 // scope escalation: every requested scope must be inside the granted set.
@@ -41,14 +58,8 @@ func EvaluateConsent(rec ConsentRecord, requestedScopes []string, now time.Time)
 	if rec.ExpiresAt != nil && now.After(*rec.ExpiresAt) {
 		return ConsentDecision{Reason: "consent expired"}
 	}
-	granted := make(map[string]bool, len(rec.Scopes))
-	for _, sc := range rec.Scopes {
-		granted[sc] = true
-	}
-	for _, sc := range requestedScopes {
-		if !granted[sc] {
-			return ConsentDecision{Reason: fmt.Sprintf("scope %q not previously granted", sc)}
-		}
+	if sc := FirstUncoveredScope(rec.Scopes, requestedScopes); sc != "" {
+		return ConsentDecision{Reason: fmt.Sprintf("scope %q not previously granted", sc)}
 	}
 	return ConsentDecision{Granted: true, Reason: "matched"}
 }

@@ -308,15 +308,44 @@ func run(ctx context.Context, cfg config) error {
 
 	// 4. Consent gate: a consent-gated agent flips to awaiting-consent and runs
 	// the CIBA flow in the background. /token serves 503 while pending (SDK
-	// clients retry 5xx); denial or expiry is terminal — events are posted to
-	// this agent and its parent, the record is marked failed (dropping SpiceDB
-	// authority), and the sidecar exits so the pod winds down.
+	// clients retry 5xx); denial or startup expiry is terminal — events are
+	// posted to this agent and its parent and the record is marked failed
+	// (dropping SpiceDB authority). The sidecar stays up serving 403s rather
+	// than exiting: a native sidecar container is restarted by the kubelet
+	// regardless of the pod's restart policy, and a restart would re-run the
+	// whole consent flow for an agent the user already rejected.
 	var ciba *cibaTokenSource
+	var failConsent func(reason string)
 	if cfg.consentRequired {
 		if cfg.userID == "" {
 			return fmt.Errorf("consent required but no USER_ID: nobody to ask")
 		}
 		ciba = newCibaTokenSource(cfg)
+
+		// Terminal consent failure: notify this agent and its parent, mark the
+		// record failed. Shared by the startup verdict and a denial at renewal;
+		// Once keeps repeated /token 403s from re-posting the events.
+		var failOnce sync.Once
+		failConsent = func(reason string) {
+			failOnce.Do(func() {
+				log.Printf("consent not granted: %s", reason)
+				payload := mustMarshal(map[string]string{
+					"agentId": agentID, "childType": cfg.agentType, "reason": reason,
+				})
+				postEvent(ctx, cfg.registryURL, agentID, events.Event{
+					Source: events.SourceAgent, Type: "consent_denied", Payload: payload,
+				})
+				if cfg.parentID != "" {
+					postEvent(ctx, cfg.registryURL, cfg.parentID, events.Event{
+						Source: events.SourceAgent, Type: "consent_denied", Payload: payload,
+					})
+				}
+				if err := updateStatus(ctx, cfg.registryURL, agentID, "failed"); err != nil {
+					log.Printf("warn: mark failed: %v", err)
+				}
+			})
+		}
+
 		if err := updateStatus(ctx, cfg.registryURL, agentID, "awaiting-consent"); err != nil {
 			log.Printf("warn: set awaiting-consent: %v", err)
 		}
@@ -332,22 +361,8 @@ func run(ctx context.Context, cfg config) error {
 				if ctx.Err() != nil {
 					return // shutting down anyway
 				}
-				log.Printf("consent not granted: %v", err)
-				payload := mustMarshal(map[string]string{
-					"agentId": agentID, "childType": cfg.agentType, "reason": err.Error(),
-				})
-				postEvent(ctx, cfg.registryURL, agentID, events.Event{
-					Source: events.SourceAgent, Type: "consent_denied", Payload: payload,
-				})
-				if cfg.parentID != "" {
-					postEvent(ctx, cfg.registryURL, cfg.parentID, events.Event{
-						Source: events.SourceAgent, Type: "consent_denied", Payload: payload,
-					})
-				}
-				if err := updateStatus(ctx, cfg.registryURL, agentID, "failed"); err != nil {
-					log.Printf("warn: mark failed: %v", err)
-				}
-				os.Exit(1)
+				failConsent(err.Error())
+				return
 			}
 			if err := updateStatus(ctx, cfg.registryURL, agentID, "active"); err != nil {
 				log.Printf("warn: set active: %v", err)
@@ -412,6 +427,9 @@ func run(ctx context.Context, cfg config) error {
 				http.Error(w, "awaiting user consent", http.StatusServiceUnavailable)
 				return
 			case errors.Is(err, errConsentDenied):
+				// A denial at renewal is as terminal as one at startup: same
+				// events to agent and parent, same failed status (idempotent).
+				failConsent("user denied consent")
 				http.Error(w, "user denied consent", http.StatusForbidden)
 				return
 			}

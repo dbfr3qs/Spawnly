@@ -25,13 +25,23 @@ public class AgentRegistryValidator : ICustomTokenRequestValidator
 
         // CIBA poll: sub is the human (set by the grant itself); add the agent
         // actor chain from the SVID so resource servers can authorize the agent,
-        // mirroring the client_credentials act shape.
+        // mirroring the client_credentials act shape. The poll must also pass
+        // the same registry liveness check as client_credentials — an agent
+        // revoked while its approved auth_req_id is outstanding may not redeem
+        // it (real-time revocation has no CIBA-shaped gap).
         if (request.GrantType == Config.CibaGrantType)
         {
-            var cibaAssertion = request.Raw?.Get("client_assertion");
+            var cibaAssertion = SpireClientSecretValidator.ValidatedAssertion(request.Raw);
             if (cibaAssertion is not null)
             {
                 var cibaSpiffeId = new JsonWebTokenHandler().ReadJsonWebToken(cibaAssertion).Subject;
+                var cibaAgentId = cibaSpiffeId.Split('/').Last();
+                var cibaAgent = await _registry.GetAgent(cibaAgentId);
+                if (cibaAgent?.Status is not ("active" or "pending" or "awaiting-consent"))
+                {
+                    Reject(context, $"agent {cibaAgentId} is {cibaAgent?.Status ?? "not registered"}");
+                    return;
+                }
                 var cibaActJson = JsonSerializer.Serialize(
                     new Dictionary<string, string> { ["sub"] = cibaSpiffeId });
                 request.ClientClaims?.Add(new Claim("act", cibaActJson, JsonClaimValueTypes.Json));
@@ -46,7 +56,7 @@ public class AgentRegistryValidator : ICustomTokenRequestValidator
             return;
         }
 
-        var assertion = request.Raw?.Get("client_assertion");
+        var assertion = SpireClientSecretValidator.ValidatedAssertion(request.Raw);
         if (assertion is null) { Reject(context, "missing client_assertion"); return; }
 
         var handler = new JsonWebTokenHandler();

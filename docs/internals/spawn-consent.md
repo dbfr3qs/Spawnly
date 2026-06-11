@@ -87,8 +87,11 @@ entry must allow the CIBA grant (`urn:openid:params:grant-type:ciba`) and the
      `sub` = the user, the agent in the `act` chain — is what `/token` serves
      to the agent;
    - **`access_denied` / `expired_token`** → `consent_denied` events to the
-     agent *and its parent* (mirroring `spawn_denied`), status `failed`
-     (dropping SpiceDB authority), and the sidecar exits.
+     agent *and its parent* (mirroring `spawn_denied`) and status `failed`
+     (dropping SpiceDB authority). The sidecar stays up answering `403` —
+     exiting would only make the kubelet restart it (native sidecars restart
+     regardless of pod restart policy), and the registry refuses to
+     re-register an agent whose authority was dropped.
 
 While pending, `/token` answers `503` (the SDKs already retry 5xx), and the
 `client_credentials` path refuses too — the record isn't `active`. The agent
@@ -103,7 +106,8 @@ Consents → Revoke), the next renewal goes *pending* instead: token issuance
 stops within the token lifetime, the re-consent prompt surfaces on the
 dashboard, and a re-approval restores the agent **without restarting
 anything**. Revocation of live access and re-prompting of future spawns are
-the same mechanism.
+the same mechanism. Denying the re-consent prompt is terminal, exactly like a
+denial at spawn: `consent_denied` events and status `failed`.
 
 Requests for scopes outside the consented set are refused locally by the
 sidecar (`403`) — scope escalation always goes back to the human.

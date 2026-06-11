@@ -1,4 +1,5 @@
 using Duende.IdentityServer.Services;
+using Duende.IdentityServer.Stores;
 
 namespace IdentityServer;
 
@@ -17,12 +18,14 @@ public static class CibaConsentApi
     {
         app.MapGet("/ciba/pending", async (
             IBackchannelAuthenticationInteractionService interaction,
+            IBackChannelAuthenticationRequestStore store,
             AgentRegistryClient registry) =>
         {
             var pending = await interaction.GetPendingLoginRequestsForCurrentUserAsync();
             var visible = new List<object>();
             foreach (var r in pending)
             {
+                if (await IsExpired(store, r.InternalId)) continue;
                 var agentId = CibaRequestValidator.Property(r.Properties, CibaRequestValidator.AgentIdKey);
                 // A request whose agent has since gone terminal (killed link
                 // whose token renewal raced a consent revocation, a pod that
@@ -51,25 +54,44 @@ public static class CibaConsentApi
         app.MapPost("/ciba/pending/{id}/approve", (
             string id, HttpContext http,
             IBackchannelAuthenticationInteractionService interaction,
+            IBackChannelAuthenticationRequestStore store,
             IUserSession session, CibaCompletionService completion) =>
-            CompleteAsync(id, approve: true, http, interaction, session, completion))
+            CompleteAsync(id, approve: true, http, interaction, store, session, completion))
             .RequireAuthorization();
 
         app.MapPost("/ciba/pending/{id}/deny", (
             string id, HttpContext http,
             IBackchannelAuthenticationInteractionService interaction,
+            IBackChannelAuthenticationRequestStore store,
             IUserSession session, CibaCompletionService completion) =>
-            CompleteAsync(id, approve: false, http, interaction, session, completion))
+            CompleteAsync(id, approve: false, http, interaction, store, session, completion))
             .RequireAuthorization();
+    }
+
+    /// <summary>
+    /// True when the stored request is past CreationTime + Lifetime (or gone).
+    /// Duende's in-memory store keeps expired never-completed requests around
+    /// and the interaction service still lists — and completes! — them, so a
+    /// long-lived IdentityServer accumulates zombie prompts: the sidecar's poll
+    /// already got expired_token and moved on, and approving one (e.g. a stray
+    /// click on a stale dashboard card) records a consent the user never meant
+    /// to refresh. Treat expiry as authoritative here.
+    /// </summary>
+    private static async Task<bool> IsExpired(IBackChannelAuthenticationRequestStore store, string internalId)
+    {
+        var stored = await store.GetByInternalIdAsync(internalId);
+        return stored is null ||
+               stored.CreationTime.AddSeconds(stored.Lifetime) < DateTime.UtcNow;
     }
 
     private static async Task<IResult> CompleteAsync(
         string id, bool approve, HttpContext http,
         IBackchannelAuthenticationInteractionService interaction,
+        IBackChannelAuthenticationRequestStore store,
         IUserSession session, CibaCompletionService completion)
     {
         var request = await interaction.GetLoginRequestByInternalIdAsync(id);
-        if (request is null) return Results.NotFound();
+        if (request is null || await IsExpired(store, id)) return Results.NotFound();
 
         // The session user must be the user the request asks to authenticate.
         var sessionSub = http.User.FindFirst("sub")?.Value;

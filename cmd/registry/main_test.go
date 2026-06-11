@@ -954,3 +954,76 @@ func TestSpawnPolicy_ConsentRequired(t *testing.T) {
 		t.Fatalf("expected allowed without consent for unflagged child, got %+v", d)
 	}
 }
+
+// TestRegister_RefusesToResurrectDroppedAuthority guards against the
+// restart-resurrection bug: a native sidecar container restarts independently
+// of its pod and re-registers on boot. Registration must never flip a record
+// whose SpiceDB authority was deliberately dropped (failed/completed/revoked)
+// back to active, nor rewrite its tuples.
+func TestRegister_RefusesToResurrectDroppedAuthority(t *testing.T) {
+	for _, status := range []string{"failed", "completed", "revoked"} {
+		t.Run(status, func(t *testing.T) {
+			s := newStore()
+			s.putTemplate(workerTemplate())
+			sdb := spicedb.NewMock()
+			validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/agent-dead"}
+			mux := buildMux(s, sdb, validator)
+
+			s.registerAgent(registry.AgentRecord{
+				AgentID: "agent-dead", AgentType: "worker", UserID: "user-1", Status: status,
+			})
+
+			body, _ := json.Marshal(map[string]string{"agentType": "worker", "userId": "user-1", "tenantId": "acme"})
+			req := httptest.NewRequest("POST", "/v1/agents", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer test-svid")
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("re-register %s agent: got %d, want 409", status, rec.Code)
+			}
+			if got := s.getAgent("agent-dead").Status; got != status {
+				t.Fatalf("status overwritten: got %q, want %q", got, status)
+			}
+			if ok, _ := sdb.CheckPermission(t.Context(), "tenant:acme", "work_on", "agent:agent-dead"); ok {
+				t.Fatal("SpiceDB authority must not be restored by re-registration")
+			}
+		})
+	}
+}
+
+// TestConsentRevoke_ScopedToOwner: a userId on the revoke call restricts it to
+// that user's own consents — another user's (guessed) id 404s and the record
+// stays live.
+func TestConsentRevoke_ScopedToOwner(t *testing.T) {
+	s := newStore()
+	s.putTemplate(consentParentTemplate("720h"))
+	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+
+	body := `{"userId":"alice","parentType":"parent-agent","childType":"child-agent","scopes":["openid"]}`
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/consents", strings.NewReader(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("record consent: got %d, want 201", rec.Code)
+	}
+	var cr registry.ConsentRecord
+	json.NewDecoder(rec.Body).Decode(&cr)
+
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/consents/"+cr.ID+"/revoke?userId=mallory", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("cross-user revoke: got %d, want 404", rec.Code)
+	}
+	if got := s.listConsents("alice"); len(got) != 1 || got[0].Revoked {
+		t.Fatalf("alice's consent must survive a cross-user revoke, got %+v", got)
+	}
+
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/consents/"+cr.ID+"/revoke?userId=alice", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("owner revoke: got %d, want 204", rec.Code)
+	}
+	if got := s.listConsents("alice"); len(got) != 1 || !got[0].Revoked {
+		t.Fatalf("owner revoke must mark the record revoked, got %+v", got)
+	}
+}

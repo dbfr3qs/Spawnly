@@ -157,11 +157,14 @@ func (s *store) listConsents(userID string) []registry.ConsentRecord {
 	return out
 }
 
-func (s *store) revokeConsent(id string) bool {
+// revokeConsent marks the consent with the given id revoked. A non-empty
+// userID scopes the lookup to that user's own records — the dashboard path
+// always passes the session user, so one user cannot revoke another's grant.
+func (s *store) revokeConsent(id, userID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for key, rec := range s.consents {
-		if rec.ID == id {
+		if rec.ID == id && (userID == "" || rec.UserID == userID) {
 			rec.Revoked = true
 			s.consents[key] = rec
 			return true
@@ -399,6 +402,19 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 		if !ok {
 			http.Error(w, "unknown agent type", http.StatusBadRequest)
 			return
+		}
+
+		// A restarting sidecar (native sidecars restart independently of the
+		// pod) re-registers on boot. Never let that resurrect a record whose
+		// SpiceDB authority was deliberately dropped — a failed/completed agent
+		// stays terminal and a revoked one stays revoked until /resume.
+		if existing := s.getAgent(agentID); existing.AgentID != "" {
+			switch existing.Status {
+			case "completed", "failed", "revoked":
+				http.Error(w, fmt.Sprintf("agent %s is %s; re-registration refused", agentID, existing.Status),
+					http.StatusConflict)
+				return
+			}
 		}
 
 		rec := registry.AgentRecord{
@@ -702,9 +718,11 @@ func buildMux(s *store, sdb spicedb.Client, validator spiffe.SVIDValidator) *htt
 
 	// Revoke a stored consent: the next spawn of that edge re-prompts the user.
 	// Live agents are untouched — cascading a revoke of agents spawned under
-	// this consent is a separate, explicit /v1/agents/{id}/revoke call.
+	// this consent is a separate, explicit /v1/agents/{id}/revoke call. An
+	// optional userId query scopes the revoke to that user's own records
+	// (a mismatch is indistinguishable from an unknown id).
 	mux.HandleFunc("POST /v1/consents/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
-		if !s.revokeConsent(r.PathValue("id")) {
+		if !s.revokeConsent(r.PathValue("id"), r.URL.Query().Get("userId")) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}

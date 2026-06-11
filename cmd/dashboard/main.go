@@ -171,8 +171,11 @@ func main() {
 		proxy("GET", orchestratorURL+"/v1/consents?userId="+url.QueryEscape(user))(w, r)
 	})))
 	mux.Handle("POST /api/consents/{id}/revoke", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, _ := auth.user(r)
 		id := r.PathValue("id")
-		proxy("POST", orchestratorURL+"/v1/consents/"+id+"/revoke")(w, r)
+		// userId scopes the registry lookup to the session user's own records,
+		// so a guessed consent id belonging to someone else 404s.
+		proxy("POST", orchestratorURL+"/v1/consents/"+id+"/revoke?userId="+url.QueryEscape(user))(w, r)
 	})))
 
 	port := os.Getenv("PORT")
