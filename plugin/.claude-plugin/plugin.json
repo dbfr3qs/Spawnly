@@ -1,0 +1,9 @@
+{
+  "name": "spawnly",
+  "version": "0.1.0",
+  "description": "Run, demo, and understand the Spawnly agent platform from Claude Code: one-command bootstrap, a guided demo of the example agents, health/diagnosis, and grounded explanations of how the platform works.",
+  "author": { "name": "dbfr3qs" },
+  "homepage": "https://github.com/dbfr3qs/Spawnly",
+  "repository": "https://github.com/dbfr3qs/Spawnly",
+  "keywords": ["spawnly", "spiffe", "spire", "agents", "kubernetes", "oauth", "identityserver"]
+}

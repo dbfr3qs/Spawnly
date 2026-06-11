@@ -1,0 +1,14 @@
+{
+  "name": "spawnly",
+  "owner": {
+    "name": "dbfr3qs",
+    "url": "https://github.com/dbfr3qs/Spawnly"
+  },
+  "plugins": [
+    {
+      "name": "spawnly",
+      "source": "./plugin",
+      "description": "Companion plugin for the Spawnly agent platform — bootstrap, demo, diagnose, and learn how it works."
+    }
+  ]
+}
