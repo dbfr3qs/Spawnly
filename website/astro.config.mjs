@@ -19,6 +19,7 @@ export default defineConfig({
         'Authoring and policy documentation for the Spawnly agent platform.',
       customCss: [
         './src/styles/theme.css',
+        './src/styles/docs.css',
         './src/styles/demos.css',
         './src/styles/landing.css',
       ],
@@ -37,20 +38,21 @@ export default defineConfig({
           // default src/content/docs path, so it would produce an empty group.
           label: 'Authoring guides',
           items: [
-            { slug: 'authoring/00-anatomy' },
-            { slug: 'authoring/01-job-and-exit' },
-            { slug: 'authoring/02-loop-until-stopped' },
-            { slug: 'authoring/03-parent-and-child' },
-            { slug: 'authoring/04-defining-a-template' },
-            { slug: 'authoring/05-defining-policy' },
-            { slug: 'authoring/06-chat' },
+            // Short sidebar labels; pages keep their full frontmatter titles.
+            { slug: 'authoring/00-anatomy', label: 'Anatomy of an Agent' },
+            { slug: 'authoring/01-job-and-exit', label: '1. Job-and-exit' },
+            { slug: 'authoring/02-loop-until-stopped', label: '2. Loop-until-stopped' },
+            { slug: 'authoring/03-parent-and-child', label: '3. Parent → child' },
+            { slug: 'authoring/04-defining-a-template', label: 'Defining a Template' },
+            { slug: 'authoring/05-defining-policy', label: 'Defining Policy' },
+            { slug: 'authoring/06-chat', label: 'Chatting with an Agent' },
           ],
         },
         {
           label: 'Under the hood',
           items: [
-            { slug: 'internals/token-minting' },
-            { slug: 'internals/spawn-consent' },
+            { slug: 'internals/token-minting', label: 'How a token is minted' },
+            { slug: 'internals/spawn-consent', label: 'CIBA spawn consent' },
           ],
         },
       ],

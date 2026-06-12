@@ -1,0 +1,90 @@
+/* Doc-page polish: sidebar hierarchy, page-title brand bar, tables, TOC.
+   Loaded before landing.css so equal-specificity hero rules win there. */
+
+/* --- Sidebar --------------------------------------------------------------
+   Group labels become small uppercase captions so the visual hierarchy reads
+   caption -> items, instead of everything bold at the same size. */
+#starlight__sidebar .group-label .large {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--sl-color-gray-2);
+}
+
+/* Top-level links ("See it in action") sit at item size, not heading size,
+   so they don't outrank the group captions above them. */
+#starlight__sidebar a.large {
+  font-size: var(--sl-text-sm);
+  font-weight: 500;
+}
+
+/* Soften the current-page pill from solid accent to a tint. */
+#starlight__sidebar a[aria-current='page'],
+#starlight__sidebar a[aria-current='page']:hover,
+#starlight__sidebar a[aria-current='page']:focus {
+  background-color: var(--sl-color-accent-low);
+  color: var(--sl-color-accent-high);
+  font-weight: 600;
+}
+
+/* --- Page title ------------------------------------------------------------
+   Same brand-gradient bar as the landing sections, above every doc h1.
+   Attribute selector keeps specificity at (0,1,1) so landing.css's .hero h1
+   (loaded later) wins its ties; the hero cancels the bar explicitly. */
+main h1[id='_top'] {
+  letter-spacing: -0.025em;
+}
+
+main h1[id='_top']::before {
+  content: '';
+  display: block;
+  width: 2.5rem;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--brand-gradient);
+  margin-bottom: 1rem;
+}
+
+[data-has-hero] main h1[id='_top']::before {
+  content: none;
+}
+
+/* --- Tables ----------------------------------------------------------------
+   Starlight tables are bare rows; box them in with a header band so the
+   reference tables (env vars, template fields) read as designed units. */
+.sl-markdown-content table {
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.6rem;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.sl-markdown-content thead th {
+  background: var(--sl-color-bg-sidebar);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--sl-color-gray-2);
+  border-bottom: 1px solid var(--sl-color-gray-5);
+}
+
+.sl-markdown-content th,
+.sl-markdown-content td {
+  padding: 0.55rem 0.9rem;
+}
+
+.sl-markdown-content tbody tr:not(:first-child) td {
+  border-top: 1px solid var(--sl-color-gray-6);
+}
+
+/* --- Right TOC -------------------------------------------------------------
+   "On this page" matches the sidebar caption style. */
+#starlight__on-this-page {
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--sl-color-gray-2);
+}
