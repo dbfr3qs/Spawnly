@@ -12,7 +12,9 @@
 .hero::before {
   content: '';
   position: absolute;
-  inset: -30% -15% auto -15%;
+  /* No horizontal bleed: extending past the hero's right edge creates
+     horizontal page scroll on mobile (rightward overflow scrolls in LTR). */
+  inset: -30% 0 auto 0;
   height: 150%;
   background: radial-gradient(55% 55% at 28% 25%, var(--brand-glow), transparent 70%);
   pointer-events: none;
@@ -28,6 +30,15 @@
   line-height: 1.02;
   letter-spacing: -0.035em;
   font-weight: 800;
+  /* background-clip:text paints glyphs only inside the background box, but
+     two of our rules push ink outside it: the tight line-height leaves
+     descenders below the box, and the negative letter-spacing (applied after
+     the last glyph too) leaves the final "y" overhanging the right edge.
+     Pad the box out on both axes; negative margins keep layout unchanged. */
+  padding-bottom: 0.14em;
+  margin-bottom: -0.14em;
+  padding-right: 0.06em;
+  margin-right: -0.06em;
   background: var(--brand-gradient);
   -webkit-background-clip: text;
   background-clip: text;
@@ -41,6 +52,24 @@
   line-height: 1.5;
   max-width: 34rem;
   color: var(--sl-color-gray-2);
+}
+
+/* --- Section rhythm (splash pages only) ----------------------------------
+   More air between sections than Starlight's doc-page default, plus a small
+   brand-gradient bar above each h2 so sections read as designed units.
+   Scoped to [data-has-hero] so doc pages keep their tighter rhythm. */
+[data-has-hero] .sl-markdown-content h2 {
+  margin-top: 3.5rem;
+}
+
+[data-has-hero] .sl-markdown-content h2::before {
+  content: '';
+  display: block;
+  width: 2.5rem;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--brand-gradient);
+  margin-bottom: 0.9rem;
 }
 
 /* --- Feature card grid ("What it demonstrates") -------------------------- */
@@ -107,4 +136,63 @@ a.feature-card:hover {
   font-size: 0.85rem;
   font-weight: 600;
   color: var(--sl-color-text-accent);
+}
+
+/* --- "Run it yourself" command callout ------------------------------------ */
+.run-callout {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+@media (min-width: 50rem) {
+  .run-callout {
+    grid-template-columns: 3fr 2fr;
+  }
+}
+
+.run-option {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  /* Grid items default to min-width:auto, which lets the wide <pre> push the
+     card past the viewport on mobile; 0 lets the pre scroll internally. */
+  min-width: 0;
+  /* Same sibling-margin neutralization as .feature-card. */
+  margin-top: 0 !important;
+  padding: 1.25rem 1.3rem;
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.85rem;
+  background: var(--sl-color-bg-sidebar);
+}
+
+.run-option .run-label {
+  margin: 0 !important;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sl-color-text-accent);
+}
+
+.run-option pre {
+  margin: 0 !important;
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.5rem;
+  background: var(--sl-color-black);
+  font-size: 0.85rem;
+  line-height: 1.7;
+  overflow-x: auto;
+}
+
+.run-option .run-comment {
+  color: var(--sl-color-gray-3);
+}
+
+.run-option .run-note {
+  margin: 0 !important;
+  margin-top: auto !important; /* pin the note to the card bottom */
+  font-size: 0.85rem;
+  color: var(--sl-color-gray-3);
 }

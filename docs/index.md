@@ -3,7 +3,7 @@ title: Spawnly
 description: A reference architecture for AI agent identity — SPIFFE workload identity, scoped OAuth tokens, human-in-the-loop spawn consent (CIBA), delegated authority, and real-time revocation across the whole agent lifecycle.
 template: splash
 hero:
-  tagline: A reference architecture for AI agent identity. SPIFFE workload identity, scoped OAuth tokens, human-in-the-loop spawn consent, and real-time revocation — across the whole agent lifecycle.
+  tagline: A reference architecture for AI agent identity — every agent a first-class workload with cryptographic identity, scoped tokens, and revocable, delegated authority.
   image:
     html: |
       <video class="hero-video" autoplay loop muted playsinline controls preload="metadata" aria-label="A user chatting with a long-lived Spawnly agent on the dashboard">
@@ -72,12 +72,21 @@ long-lived (serve until deleted, including chat).
 
 ## Run it yourself
 
-The fastest path is the
-[Claude Code plugin](https://github.com/dbfr3qs/Spawnly/blob/main/PLUGIN.md):
-`/spawnly:up` brings the platform up on a local Kind cluster, and `/spawnly:demo`
-walks you through these scenarios live — spawn, chains, consent, and a revocation
-cascade. Prefer the manual path? `make bootstrap` does the same from the
-[repository](https://github.com/dbfr3qs/Spawnly).
+Everything runs locally on a Kind cluster — no cloud account required.
+
+<div class="run-callout">
+  <div class="run-option">
+    <p class="run-label">Fastest — Claude Code plugin</p>
+    <pre>/spawnly:up    <span class="run-comment"># bring the platform up on a local Kind cluster</span>
+/spawnly:demo  <span class="run-comment"># guided tour: spawn, chains, consent, revocation</span></pre>
+    <p class="run-note">Install it from <a href="https://github.com/dbfr3qs/Spawnly/blob/main/PLUGIN.md">PLUGIN.md</a>.</p>
+  </div>
+  <div class="run-option">
+    <p class="run-label">Manual</p>
+    <pre>make bootstrap</pre>
+    <p class="run-note">Same result, straight from the <a href="https://github.com/dbfr3qs/Spawnly">repository</a> Makefile.</p>
+  </div>
+</div>
 
 ## Authoring guides
 
