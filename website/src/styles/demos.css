@@ -1,0 +1,24 @@
+/* Styling for the demo video embeds on the "See it in action" page.
+   The markup is a plain <figure class="demo-video"> with a <video> and an
+   optional <figcaption> — no component, so it works in Markdown. */
+
+.demo-video {
+  margin: 1.75rem 0;
+}
+
+.demo-video video {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 0.5rem;
+  border: 1px solid var(--sl-color-gray-5);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  background: #000;
+}
+
+.demo-video figcaption {
+  margin-top: 0.6rem;
+  text-align: center;
+  font-size: var(--sl-text-sm);
+  color: var(--sl-color-gray-3);
+}

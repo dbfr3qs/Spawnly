@@ -9,6 +9,10 @@ hero:
       link: /authoring/00-anatomy
       icon: right-arrow
       variant: primary
+    - text: See it in action
+      link: /demos
+      icon: open-book
+      variant: secondary
     - text: View on GitHub
       link: https://github.com/dbfr3qs/Spawnly
       icon: external
