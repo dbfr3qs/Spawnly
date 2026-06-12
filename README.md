@@ -1,12 +1,22 @@
 # Spawnly
 
-A proof-of-concept platform for running AI agents on Kubernetes with cryptographic identity, fine-grained authorisation, and full lifecycle observability. Agents may be **short-lived** (do one job and exit) or **long-lived** (serve until deleted — including chat). This project is aimed at those who are interested in running agents within an enterprize environment, or who just want to run agents in isolated container based environments on their own machines.
+A proof-of-concept platform for running AI agents on Kubernetes with cryptographic identity, fine-grained authorisation, and full lifecycle observability. Agents may be **short-lived** (do one job and exit) or **long-lived** (serve until deleted — including chat). This project is aimed at those who are interested in running agents within an enterprise environment, or who just want to run agents in isolated container based environments on their own machines.
 
 Each agent pod gets a unique SPIFFE identity (JWT-SVID) issued by SPIRE at start. A per-pod **sidecar** uses that identity to register the agent with the **agent registry** and to obtain scoped OAuth 2.0 access tokens; the agent then calls protected APIs and emits structured lifecycle events throughout — all visible in a real-time web dashboard.
 
 > **New here?** The easiest way to run, demo, and learn this platform is the
 > [Claude Code plugin](PLUGIN.md): `/spawnly:up` then `/spawnly:demo`, and ask
 > it how anything works.
+
+**What it demonstrates** — identity and authorisation across the full agent lifecycle:
+
+- **Per-pod workload identity** — every agent gets a unique SPIFFE JWT-SVID from SPIRE at startup; no shared secrets or static API keys.
+- **Identity → scoped OAuth tokens** — a sidecar exchanges the SVID (RFC 7523 `client_assertion`) for scoped access tokens, so agent code carries zero identity plumbing.
+- **Human-in-the-loop spawn consent** — sub-agent spawning can be gated on user approval via OpenID **CIBA**, with stored consent and auto-approval on repeats ([how it works](docs/internals/spawn-consent.md)).
+- **Delegated, attenuated authority** — parent → child agent chains with per-template delegation policy ([defining policy](docs/authoring/05-defining-policy.md)).
+- **Real-time cascading revocation** — revoke an agent and its entire descendant subtree loses authorisation within seconds; pods stay up, their next protected call returns 403. Reversible with resume.
+- **Relationship-based authorisation** — SpiceDB relations written at registration, checked by protected APIs; tenanted and global (tenant-less) agents on the same code path.
+- **Full lifecycle observability** — every component emits structured events into an append-only per-agent timeline, live in the dashboard.
 
 Agents run on the same platform contract regardless of language or framework:
 
@@ -223,6 +233,18 @@ See [Defining a Template](docs/authoring/04-defining-a-template.md) for the full
 
 ---
 
+## Spawn consent (CIBA)
+
+Sub-agent spawning can require **human approval**, using OpenID Client-Initiated Backchannel Authentication (CIBA) — the flow banks use for out-of-band payment approval, repurposed for agent authority:
+
+- A parent template's delegation policy marks a child type as consent-gated. When such a child spawns, **its sidecar initiates a CIBA request** at IdentityServer (SVID as client assertion) and polls for the token; the child cannot obtain credentials until the user decides.
+- The dashboard shows the pending request to the logged-in user — **approve** and the child's token is minted with the user bound as `sub`; **deny** (or let it expire) and the child is marked `failed`, with a `consent_denied` event on both child and parent.
+- Consent is **recorded per (user, parent type, child type, scopes)**, so an identical spawn next time auto-approves without re-prompting. Scope escalation, expiry, or the user revoking consent from the dashboard all force a re-prompt — and because token renewal re-runs the grant, **revoking consent starves a running child of tokens within ~2 minutes**.
+
+Full design and flow diagrams: [docs/internals/spawn-consent.md](docs/internals/spawn-consent.md).
+
+---
+
 ## Authoring agents
 
 Guides for building a new agent from scratch live in [`docs/authoring/`](docs/authoring/).
@@ -350,4 +372,12 @@ make kind-load
 - **IdentityServer as the OAuth 2.0 authority**: the sidecar uses the SVID as a `client_assertion` (RFC 7523 JWT Bearer) to obtain a scoped access token, validated against SPIRE's JWKS endpoint — and IdentityServer additionally checks the agent registry that the agent is `active` before issuing.
 - **SpiceDB for authorisation**: the registry writes the agent's relationships on registration (a `tenant:T#agent@agent:X` relation when tenanted, none when global). The sample API checks `work_on` permission before serving requests.
 - **Tenancy from presence**: an agent is tenanted if a tenant id is present; the same code path serves global agents by simply omitting the tenant segment, header, and relations.
+- **CIBA for human-in-the-loop spawn consent**: the consent-gated child's own sidecar runs the backchannel grant, so "user approves the spawn" is a standard OAuth flow rather than bespoke plumbing — stored consent auto-approves repeats, and revocation starves the child's token renewal.
+- **Revocation cascades, deletion doesn't**: revoke/resume walk the descendant subtree and drop/re-derive SpiceDB relations in real time (pods keep running and get 403s), while `DELETE` removes a single agent only.
 - **Append-only, filterable event log**: lifecycle events flow into the registry's in-memory store. The dashboard appends new events to the DOM without replacing existing rows (preserving expanded/collapsed state) and filters them per-agent by category (heartbeat hidden by default).
+
+---
+
+## License
+
+[MIT](LICENSE).
