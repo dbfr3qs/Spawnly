@@ -17,7 +17,11 @@ export default defineConfig({
       title: 'Spawnly Docs',
       description:
         'Authoring and policy documentation for the Spawnly agent platform.',
-      customCss: ['./src/styles/demos.css'],
+      customCss: [
+        './src/styles/theme.css',
+        './src/styles/demos.css',
+        './src/styles/landing.css',
+      ],
       social: [
         {
           icon: 'github',

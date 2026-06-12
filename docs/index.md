@@ -39,24 +39,36 @@ long-lived (serve until deleted, including chat).
 
 ## What it demonstrates
 
-- **Per-pod workload identity.** Every agent gets a unique SPIFFE JWT-SVID from
-  SPIRE at startup — no shared secrets or static API keys.
-  → [How a token is minted](/internals/token-minting)
-- **Identity → scoped OAuth tokens.** A sidecar exchanges the SVID for scoped
-  access tokens, so agent code carries zero identity plumbing.
-- **Human-in-the-loop spawn consent.** Sub-agent spawning can be gated on user
-  approval via OpenID **CIBA**, with stored consent and auto-approval on repeats.
-  → [CIBA spawn consent](/internals/spawn-consent)
-- **Delegated, attenuated authority.** Parent → child agent chains, with
-  per-template delegation policy. → [Defining Policy](/authoring/05-defining-policy)
-- **Real-time revocation cascade.** Revoke an agent and its entire descendant
-  subtree loses authority within seconds; pods stay up, their next call returns
-  `403`. Reversible. → [See it in action](/demos)
-- **Relationship-based authorisation.** SpiceDB relations written at
-  registration and checked by protected APIs; tenanted and global agents on one
-  code path.
-- **Full lifecycle observability.** Every component emits structured events into
-  an append-only, per-agent timeline.
+<div class="feature-grid">
+  <a class="feature-card" href="/internals/token-minting">
+    <h3>Per-pod workload identity → scoped tokens</h3>
+    <p>Every agent gets a unique SPIFFE JWT-SVID from SPIRE at startup — no shared secrets — and a sidecar exchanges it for scoped OAuth tokens, so agent code carries zero identity plumbing.</p>
+    <span class="feature-link">How a token is minted →</span>
+  </a>
+  <a class="feature-card" href="/internals/spawn-consent">
+    <h3>Human-in-the-loop spawn consent</h3>
+    <p>Sub-agent spawning can be gated on user approval via OpenID CIBA, with stored consent and auto-approval on repeats.</p>
+    <span class="feature-link">CIBA spawn consent →</span>
+  </a>
+  <a class="feature-card" href="/authoring/05-defining-policy">
+    <h3>Delegated, attenuated authority</h3>
+    <p>Parent → child agent chains, with per-template delegation policy that narrows authority as work is handed down.</p>
+    <span class="feature-link">Defining policy →</span>
+  </a>
+  <a class="feature-card" href="/demos">
+    <h3>Real-time revocation cascade</h3>
+    <p>Revoke an agent and its entire descendant subtree loses authority within seconds; pods stay up, their next call returns 403. Reversible.</p>
+    <span class="feature-link">See it in action →</span>
+  </a>
+  <div class="feature-card">
+    <h3>Relationship-based authorisation</h3>
+    <p>SpiceDB relations written at registration and checked by protected APIs; tenanted and global agents on one code path.</p>
+  </div>
+  <div class="feature-card">
+    <h3>Full lifecycle observability</h3>
+    <p>Every component emits structured events into an append-only, per-agent timeline.</p>
+  </div>
+</div>
 
 ## Run it yourself
 

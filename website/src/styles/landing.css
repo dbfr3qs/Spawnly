@@ -1,0 +1,110 @@
+/* Landing-page polish: hero typography + a soft brand glow + the feature
+   card grid that replaces the "What it demonstrates" bullet list. Scoped to
+   the splash hero and the .feature-grid markup so it never touches doc pages. */
+
+/* --- Hero wordmark + tagline --------------------------------------------- */
+.hero {
+  position: relative;
+}
+
+/* Soft radial glow behind the hero, in brand violet. Sits behind the hero
+   content but above the page background; pointer-events off so it's inert. */
+.hero::before {
+  content: '';
+  position: absolute;
+  inset: -30% -15% auto -15%;
+  height: 150%;
+  background: radial-gradient(55% 55% at 28% 25%, var(--brand-glow), transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+.hero > * {
+  position: relative;
+  z-index: 1;
+}
+
+.hero h1 {
+  font-size: clamp(2.75rem, 6vw, 4.5rem);
+  line-height: 1.02;
+  letter-spacing: -0.035em;
+  font-weight: 800;
+  background: var(--brand-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  /* Fallback for browsers without background-clip:text */
+  -webkit-text-fill-color: transparent;
+}
+
+.hero .tagline {
+  font-size: clamp(1.05rem, 1.6vw, 1.3rem);
+  line-height: 1.5;
+  max-width: 34rem;
+  color: var(--sl-color-gray-2);
+}
+
+/* --- Feature card grid ("What it demonstrates") -------------------------- */
+/* Pinned column counts (not auto-fit) so cards stay a uniform width and never
+   stretch to fill a short final row. Six cards tile cleanly as 1 / 2 / 3-up. */
+.feature-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+  margin-top: 1.5rem;
+}
+@media (min-width: 38rem) {
+  .feature-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (min-width: 56rem) {
+  .feature-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.feature-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  /* Starlight's sl-markdown-content sibling rule adds margin-top: 1rem to
+     non-anchor elements that follow a non-anchor sibling — which hit only the
+     <div> cards preceded by another <div>, offsetting them down and making
+     them shorter than their row. Grid `gap` owns the spacing here. */
+  margin-top: 0 !important;
+  padding: 1.25rem 1.3rem;
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.85rem;
+  background: var(--sl-color-bg-sidebar);
+  text-decoration: none;
+  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* Only linked cards lift on hover. */
+a.feature-card:hover {
+  border-color: var(--sl-color-accent);
+  transform: translateY(-3px);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+
+.feature-card h3 {
+  margin: 0;
+  font-size: 1.02rem;
+  font-weight: 600;
+  color: var(--sl-color-white);
+}
+
+.feature-card p {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: var(--sl-color-gray-3);
+}
+
+.feature-card .feature-link {
+  margin-top: auto;
+  padding-top: 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--sl-color-text-accent);
+}
