@@ -138,6 +138,67 @@ a.feature-card:hover {
   color: var(--sl-color-text-accent);
 }
 
+/* --- "Go deeper" doc-path cards ------------------------------------------- */
+.doc-paths {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+@media (min-width: 56rem) {
+  .doc-paths {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.doc-path {
+  min-width: 0;
+  margin-top: 0 !important;
+  padding: 1.25rem 1.3rem;
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.85rem;
+  background: var(--sl-color-bg-sidebar);
+}
+
+.doc-path h3 {
+  margin: 0 !important;
+  font-size: 1.02rem;
+  font-weight: 600;
+  color: var(--sl-color-white);
+}
+
+.doc-path p {
+  margin: 0.45rem 0 0 !important;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  color: var(--sl-color-gray-3);
+}
+
+.doc-path ol,
+.doc-path ul {
+  margin: 0.8rem 0 0 !important;
+  padding-left: 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  font-size: 0.9rem;
+}
+
+.doc-path li {
+  margin: 0 !important;
+  color: var(--sl-color-gray-3);
+}
+
+.doc-path a {
+  color: var(--sl-color-text-accent);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.doc-path a:hover {
+  text-decoration: underline;
+}
+
 /* --- "Run it yourself" command callout ------------------------------------ */
 .run-callout {
   display: grid;
