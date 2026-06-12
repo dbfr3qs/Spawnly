@@ -22,3 +22,29 @@
   font-size: var(--sl-text-sm);
   color: var(--sl-color-gray-3);
 }
+
+/* Hero video on the splash landing page (rendered via hero.image.html). */
+.hero-video {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 0.75rem;
+  border: 1px solid var(--sl-color-gray-5);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  background: #000;
+}
+
+/* Give the hero video more room than Starlight's default image slot.
+   `html .hero` clears the `:where()`-wrapped Starlight rules without
+   depending on its build-hashed class. */
+html .hero .hero-html {
+  width: min(90%, 26rem); /* narrow / stacked layout */
+}
+@media (min-width: 50rem) {
+  html .hero {
+    grid-template-columns: 5fr 4fr; /* widen the image column (was 7fr 4fr) */
+  }
+  html .hero .hero-html {
+    width: min(100%, 36rem); /* raise the 25rem cap */
+  }
+}

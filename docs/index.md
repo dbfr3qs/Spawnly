@@ -1,22 +1,71 @@
 ---
-title: Spawnly Documentation
-description: Authoring and policy documentation for the Spawnly agent platform.
+title: Spawnly
+description: A reference architecture for AI agent identity — SPIFFE workload identity, scoped OAuth tokens, human-in-the-loop spawn consent (CIBA), delegated authority, and real-time revocation across the whole agent lifecycle.
 template: splash
 hero:
-  tagline: Build, run, and govern short-lived and long-lived agents with cryptographic identity, scoped tokens, and least-privilege delegation.
+  tagline: A reference architecture for AI agent identity. SPIFFE workload identity, scoped OAuth tokens, human-in-the-loop spawn consent, and real-time revocation — across the whole agent lifecycle.
+  image:
+    html: |
+      <video class="hero-video" autoplay loop muted playsinline controls preload="metadata" aria-label="A user chatting with a long-lived Spawnly agent on the dashboard">
+        <source src="/media/general-demo.webm" type="video/webm" />
+        <source src="/media/general-demo.mp4" type="video/mp4" />
+      </video>
   actions:
-    - text: Start with the anatomy
-      link: /authoring/00-anatomy
-      icon: right-arrow
-      variant: primary
     - text: See it in action
       link: /demos
+      icon: right-arrow
+      variant: primary
+    - text: Start with the anatomy
+      link: /authoring/00-anatomy
       icon: open-book
       variant: secondary
     - text: View on GitHub
       link: https://github.com/dbfr3qs/Spawnly
       icon: external
 ---
+
+## The problem
+
+AI agents increasingly spawn other agents and call protected services on a
+user's behalf. A static API key can't express **which** agent is acting, **for
+whom**, or **with what authority** — and it doesn't attenuate as work is handed
+down a delegation chain. Spawnly is a working answer: every agent is a
+first-class workload with a cryptographic identity, and authority flows — and is
+revoked — along the chain.
+
+It's a proof-of-concept platform, built to make these ideas concrete and
+runnable, not a product. Agents can be short-lived (do one job and exit) or
+long-lived (serve until deleted, including chat).
+
+## What it demonstrates
+
+- **Per-pod workload identity.** Every agent gets a unique SPIFFE JWT-SVID from
+  SPIRE at startup — no shared secrets or static API keys.
+  → [How a token is minted](/internals/token-minting)
+- **Identity → scoped OAuth tokens.** A sidecar exchanges the SVID for scoped
+  access tokens, so agent code carries zero identity plumbing.
+- **Human-in-the-loop spawn consent.** Sub-agent spawning can be gated on user
+  approval via OpenID **CIBA**, with stored consent and auto-approval on repeats.
+  → [CIBA spawn consent](/internals/spawn-consent)
+- **Delegated, attenuated authority.** Parent → child agent chains, with
+  per-template delegation policy. → [Defining Policy](/authoring/05-defining-policy)
+- **Real-time revocation cascade.** Revoke an agent and its entire descendant
+  subtree loses authority within seconds; pods stay up, their next call returns
+  `403`. Reversible. → [See it in action](/demos)
+- **Relationship-based authorisation.** SpiceDB relations written at
+  registration and checked by protected APIs; tenanted and global agents on one
+  code path.
+- **Full lifecycle observability.** Every component emits structured events into
+  an append-only, per-agent timeline.
+
+## Run it yourself
+
+The fastest path is the
+[Claude Code plugin](https://github.com/dbfr3qs/Spawnly/blob/main/PLUGIN.md):
+`/spawnly:up` brings the platform up on a local Kind cluster, and `/spawnly:demo`
+walks you through these scenarios live — spawn, chains, consent, and a revocation
+cascade. Prefer the manual path? `make bootstrap` does the same from the
+[repository](https://github.com/dbfr3qs/Spawnly).
 
 ## Authoring guides
 
