@@ -7,22 +7,14 @@
   position: relative;
 }
 
-/* Soft radial glow behind the hero, in brand violet. Sits behind the hero
-   content but above the page background; pointer-events off so it's inert. */
-.hero::before {
-  content: '';
-  position: absolute;
-  /* No horizontal bleed: extending past the hero's right edge creates
-     horizontal page scroll on mobile (rightward overflow scrolls in LTR). */
-  inset: -30% 0 auto 0;
-  height: 150%;
-  background: radial-gradient(55% 55% at 28% 25%, var(--brand-glow), transparent 70%);
-  pointer-events: none;
-  z-index: 0;
-}
-.hero > * {
-  position: relative;
-  z-index: 1;
+/* Soft radial glow behind the hero, in brand violet. Painted on .main-pane —
+   the full-viewport-width container on splash pages — rather than a pseudo
+   inside .hero: the hero sits in the constrained content column, so a glow
+   scoped there ends in a hard vertical edge at the column boundary on wide
+   screens. A background also can't create horizontal scroll on mobile. */
+[data-has-hero] .main-pane {
+  background: radial-gradient(60rem 32rem at 28% 12rem, var(--brand-glow), transparent 70%)
+    no-repeat;
 }
 
 /* Starlight's splash hero carries ~clamp(2.5rem…10rem) padding-block; combined
