@@ -1,0 +1,48 @@
+name: Deploy docs to GitHub Pages
+
+# Builds the Starlight site in website/ (which globs its content from ../docs)
+# and publishes it to GitHub Pages. The site is served at the apex custom
+# domain spawnly.run; the CNAME ships in website/public/ so the custom domain
+# survives every Actions deploy.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'website/**'
+      - 'docs/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; don't cancel an in-progress run.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # Full checkout (default) — the site globs ../docs at build time.
+      - name: Build with Astro
+        uses: withastro/action@v3
+        with:
+          path: ./website
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

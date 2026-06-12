@@ -4,9 +4,11 @@ import starlight from '@astrojs/starlight';
 import { remarkStripFirstH1 } from './plugins/remark-strip-first-h1.mjs';
 import { remarkRewriteRepoLinks } from './plugins/remark-rewrite-repo-links.mjs';
 
-// Local build only for now → served at the root (no `base`). When hosting on a
-// GitHub Pages project site later, set `site`/`base` and update the workflow.
+// Hosted on GitHub Pages at the apex custom domain spawnly.run, which serves
+// from the root — so we set `site` (canonical URLs + sitemap) but no `base`.
+// A `base` would only be needed for a project URL like dbfr3qs.github.io/Spawnly.
 export default defineConfig({
+  site: 'https://spawnly.run',
   markdown: {
     remarkPlugins: [remarkStripFirstH1, remarkRewriteRepoLinks],
   },
