@@ -23,6 +23,11 @@ test-results/
 playwright-report/
 e2e/playwright/.auth/
 
+# Dev scripts for dashboard iteration (not part of the build)
+analyze-dashboard.mjs
+e2e/analyze-ui.mjs
+e2e/test-theme-*.mjs
+
 # .NET build output
 identityserver/bin/
 identityserver/obj/

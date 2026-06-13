@@ -7,23 +7,48 @@
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-    :root {
-      --bg:          #1a1a2e;
-      --card:        #16213e;
-      --accent:      #0f3460;
-      --accent-hi:   #1a5276;
-      --border:      #1e3a5f;
-      --text:        #e0e6f0;
-      --text-dim:    #7f8fa6;
-      --green:       #27ae60;
-      --blue:        #2980b9;
-      --red:         #c0392b;
-      --grey:        #5d6d7e;
-      --indigo:      #4a5bc7;
-      --purple:      #8e44ad;
-      --orange:      #d35400;
+    :root,
+    :root[data-theme="dark"] {
+      --bg:          #1a1626;
+      --card:        #2a1f42;
+      --accent:      #6d28d9;
+      --accent-hi:   #7c3aed;
+      --border:      #3d2667;
+      --text:        #f3f0ff;
+      --text-dim:    #b4a5d6;
+      --green:       #10b981;
+      --blue:        #3b82f6;
+      --red:         #ef4444;
+      --grey:        #8b7ca8;
+      --indigo:      #6366f1;
+      --purple:      #a855f7;
+      --orange:      #f97316;
       --font:        'Segoe UI', system-ui, -apple-system, sans-serif;
       --mono:        'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    }
+
+    :root[data-theme="light"] {
+      --bg:          #faf5ff;
+      --card:        #ffffff;
+      --accent:      #6d28d9;
+      --accent-hi:   #5b21b6;
+      --border:      #e9d5ff;
+      --text:        #2a1f42;
+      --text-dim:    #6d28d9;
+      --green:       #059669;
+      --blue:        #2563eb;
+      --red:         #dc2626;
+      --grey:        #6b7280;
+      --indigo:      #4f46e5;
+      --purple:      #9333ea;
+      --orange:      #ea580c;
+      --font:        'Segoe UI', system-ui, -apple-system, sans-serif;
+      --mono:        'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+      color-scheme: light;
+    }
+
+    :root[data-theme="dark"] {
+      color-scheme: dark;
     }
 
     body {
@@ -32,6 +57,7 @@
       font-family: var(--font);
       font-size: 14px;
       min-height: 100vh;
+      transition: background-color 0.3s ease, color 0.3s ease;
     }
 
     /* ── Header ── */
@@ -79,8 +105,8 @@
       width: 10px;
       height: 10px;
       border-radius: 50%;
-      background: #27ae60;
-      box-shadow: 0 0 8px #27ae60;
+      background: #a855f7;
+      box-shadow: 0 0 8px #a855f7;
     }
 
     /* ── Buttons ── */
@@ -88,85 +114,162 @@
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      padding: 7px 16px;
-      border-radius: 6px;
+      padding: 8px 14px;
+      border-radius: 8px;
       border: none;
       cursor: pointer;
       font-family: var(--font);
-      font-size: 13px;
-      font-weight: 500;
-      transition: filter .15s, transform .1s;
+      font-size: 12px;
+      font-weight: 600;
+      transition: all .15s ease;
     }
-    .btn:active { transform: scale(.97); }
-    .btn:hover  { filter: brightness(1.15); }
+    .btn:active { transform: scale(.95); }
+    .btn:hover { transform: translateY(-1px); }
 
-    .btn-primary  { background: #27ae60; color: #fff; }
-    .btn-danger   { background: var(--red); color: #fff; }
-    .btn-ghost    { background: rgba(255,255,255,.08); color: var(--text); }
-    .btn-events   { background: var(--accent-hi); color: var(--text); }
-    .btn-events.active { background: #1a5276; outline: 1px solid #2980b9; }
+    .btn-primary {
+      background: #27ae60;
+      color: #fff;
+      box-shadow: 0 2px 4px rgba(39,174,96,.2);
+    }
+    .btn-primary:hover {
+      background: #229954;
+      box-shadow: 0 4px 8px rgba(39,174,96,.3);
+    }
 
-    .btn-chat     { background: rgba(39,174,96,.2); color: #2ecc71; border: 1px solid rgba(39,174,96,.3); }
-    .btn-chat.active { background: rgba(39,174,96,.3); outline: 1px solid #27ae60; }
+    .btn-danger {
+      background: var(--red);
+      color: #fff;
+      box-shadow: 0 2px 4px rgba(192,57,43,.2);
+    }
+    .btn-danger:hover {
+      background: #a93226;
+      box-shadow: 0 4px 8px rgba(192,57,43,.3);
+    }
 
-    .btn-dismiss  { background: rgba(255,255,255,.06); color: var(--text-dim); padding: 4px 10px; font-size: 13px; }
+    .btn-ghost {
+      background: rgba(255,255,255,.08);
+      color: var(--text);
+      border: 1px solid rgba(255,255,255,.1);
+      transition: background .15s, border-color .15s;
+    }
+    .btn-ghost:hover {
+      background: rgba(255,255,255,.12);
+      border-color: rgba(255,255,255,.2);
+    }
 
-    /* Revoke = authority-only, cascades to the subtree (amber). Resume restores it (green). */
-    .btn-revoke   { background: rgba(243,156,18,.18); color: #f39c12; border: 1px solid rgba(243,156,18,.4); }
-    .btn-resume   { background: rgba(39,174,96,.2); color: #2ecc71; border: 1px solid rgba(39,174,96,.4); }
+    .btn-events {
+      background: var(--accent-hi);
+      color: var(--text);
+      border: 1px solid rgba(255,255,255,.1);
+    }
+    .btn-events.active {
+      background: #2980b9;
+      border-color: #2980b9;
+    }
+
+    .btn-chat {
+      background: rgba(39,174,96,.15);
+      color: #2ecc71;
+      border: 1px solid rgba(39,174,96,.3);
+    }
+    .btn-chat:hover {
+      background: rgba(39,174,96,.25);
+    }
+    .btn-chat.active {
+      background: rgba(39,174,96,.25);
+      border-color: #27ae60;
+    }
+
+    .btn-dismiss {
+      background: rgba(255,255,255,.06);
+      color: var(--text-dim);
+      padding: 6px 10px;
+      font-size: 12px;
+      border: 1px solid rgba(255,255,255,.1);
+    }
+
+    .btn-revoke {
+      background: rgba(243,156,18,.15);
+      color: #f39c12;
+      border: 1px solid rgba(243,156,18,.3);
+    }
+    .btn-revoke:hover {
+      background: rgba(243,156,18,.25);
+    }
+
+    .btn-resume {
+      background: rgba(39,174,96,.15);
+      color: #2ecc71;
+      border: 1px solid rgba(39,174,96,.3);
+    }
+    .btn-resume:hover {
+      background: rgba(39,174,96,.25);
+    }
 
     /* ── Main content ── */
     main {
       max-width: 1100px;
       margin: 0 auto;
-      padding: 28px 20px;
+      padding: 32px 24px;
     }
 
     .section-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 16px;
+      margin-bottom: 24px;
     }
 
     .section-title {
-      font-size: 13px;
-      font-weight: 600;
+      font-size: 12px;
+      font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 1px;
+      letter-spacing: 1.2px;
       color: var(--text-dim);
     }
 
     .agent-count {
-      font-size: 12px;
-      color: var(--text-dim);
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text);
       background: var(--accent);
-      padding: 2px 8px;
-      border-radius: 10px;
+      padding: 4px 10px;
+      border-radius: 12px;
     }
 
     /* ── Agent list ── */
     #agent-list {
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 12px;
     }
 
     .agent-card {
       background: var(--card);
       border: 1px solid var(--border);
-      border-radius: 10px;
+      border-radius: 12px;
       overflow: hidden;
-      transition: border-color .2s;
+      transition: border-color .2s, box-shadow .2s;
+      box-shadow: 0 1px 3px rgba(0,0,0,.08);
     }
-    .agent-card:hover { border-color: var(--accent-hi); }
+    .agent-card:hover {
+      border-color: var(--accent-hi);
+      box-shadow: 0 4px 12px rgba(0,0,0,.12);
+    }
+
+    :root[data-theme="light"] .agent-card {
+      box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 1px 4px rgba(0,0,0,.08);
+    }
+    :root[data-theme="light"] .agent-card:hover {
+      box-shadow: 0 4px 8px rgba(0,0,0,.08), 0 2px 4px rgba(0,0,0,.06);
+    }
 
     .agent-row {
       display: grid;
-      grid-template-columns: minmax(130px,1fr) 108px 96px 100px auto;
+      grid-template-columns: minmax(180px, 250px) 130px 120px 130px 1fr;
       align-items: center;
       gap: 12px;
-      padding: 14px 18px;
+      padding: 16px 20px;
     }
 
     .agent-id {
@@ -194,6 +297,7 @@
       justify-content: flex-end;
       flex-wrap: nowrap;
       white-space: nowrap;
+      position: relative;
     }
     /* Uniform, compact sizing for in-row action buttons (Events, Chat, Revoke/
        Resume, Kill, Dismiss) so they line up evenly and never overflow the card.
@@ -203,20 +307,28 @@
     /* ── Badges ── */
     .badge {
       display: inline-block;
-      padding: 3px 9px;
-      border-radius: 12px;
-      font-size: 11px;
-      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 14px;
+      font-size: 10px;
+      font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: .5px;
+      letter-spacing: .6px;
       white-space: nowrap;
+      border: 1px solid;
+      transition: all .15s ease;
     }
 
-    .badge-active    { background: rgba(39,174,96,.2);  color: #2ecc71; border: 1px solid rgba(39,174,96,.4); }
-    .badge-completed { background: rgba(41,128,185,.2); color: #5dade2; border: 1px solid rgba(41,128,185,.4); }
-    .badge-failed    { background: rgba(192,57,43,.2);  color: #e74c3c; border: 1px solid rgba(192,57,43,.4); }
-    .badge-pending   { background: rgba(93,109,126,.2); color: #95a5a6; border: 1px solid rgba(93,109,126,.4); }
-    .badge-revoked   { background: rgba(243,156,18,.2); color: #f39c12; border: 1px solid rgba(243,156,18,.4); }
+    .badge-active    { background: rgba(39,174,96,.15); color: #2ecc71; border-color: rgba(39,174,96,.35); }
+    .badge-completed { background: rgba(41,128,185,.15); color: #5dade2; border-color: rgba(41,128,185,.35); }
+    .badge-failed    { background: rgba(192,57,43,.15);  color: #e74c3c; border-color: rgba(192,57,43,.35); }
+    .badge-pending   { background: rgba(93,109,126,.15); color: #95a5a6; border-color: rgba(93,109,126,.35); }
+    .badge-revoked   { background: rgba(243,156,18,.15); color: #f39c12; border-color: rgba(243,156,18,.35); }
+
+    :root[data-theme="light"] .badge-active    { background: rgba(5,150,105,.1); color: #059669; border-color: rgba(5,150,105,.25); }
+    :root[data-theme="light"] .badge-completed { background: rgba(2,132,199,.1); color: #0284c7; border-color: rgba(2,132,199,.25); }
+    :root[data-theme="light"] .badge-failed    { background: rgba(220,38,38,.1); color: #dc2626; border-color: rgba(220,38,38,.25); }
+    :root[data-theme="light"] .badge-pending   { background: rgba(107,114,128,.1); color: #4b5563; border-color: rgba(107,114,128,.25); }
+    :root[data-theme="light"] .badge-revoked   { background: rgba(234,88,12,.1); color: #ea580c; border-color: rgba(234,88,12,.25); }
 
     .src-badge {
       display: inline-block;
@@ -347,15 +459,6 @@
     }
 
     /* ── Staleness / last-activity indicator ── */
-    .agent-stale {
-      font-family: var(--mono);
-      font-size: 11px;
-      color: var(--text-dim);
-      white-space: nowrap;
-    }
-    .agent-stale:empty { display: none; }
-    .agent-stale.warn { color: var(--orange); font-weight: 600; }
-
     .event-payload {
       margin: 0 10px 8px 10px;
       padding: 10px 14px;
@@ -559,16 +662,24 @@
     /* ── Empty state ── */
     .empty-state {
       text-align: center;
-      padding: 60px 20px;
+      padding: 64px 28px;
       color: var(--text-dim);
     }
     .empty-state .icon {
-      font-size: 48px;
-      margin-bottom: 12px;
-      opacity: .4;
+      font-size: 56px;
+      margin-bottom: 16px;
+      opacity: .3;
     }
-    .empty-state p { font-size: 15px; }
-    .empty-state small { font-size: 12px; margin-top: 6px; display: block; }
+    .empty-state p {
+      font-size: 15px;
+      font-weight: 500;
+      margin-bottom: 8px;
+    }
+    .empty-state small {
+      font-size: 12px;
+      display: block;
+      margin-top: 8px;
+    }
 
     /* ── Modal ── */
     .modal-overlay {
@@ -586,11 +697,15 @@
     .modal {
       background: var(--card);
       border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 28px 32px;
+      border-radius: 16px;
+      padding: 32px 36px;
       width: 420px;
       box-shadow: 0 20px 60px rgba(0,0,0,.6);
       animation: slide-in .2s ease;
+    }
+
+    :root[data-theme="light"] .modal {
+      box-shadow: 0 20px 50px rgba(0,0,0,.15);
     }
 
     @keyframes slide-in {
@@ -611,12 +726,12 @@
 
     .form-group label {
       display: block;
-      font-size: 12px;
-      font-weight: 600;
+      font-size: 11px;
+      font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: .5px;
+      letter-spacing: .6px;
       color: var(--text-dim);
-      margin-bottom: 6px;
+      margin-bottom: 8px;
     }
 
     .form-group input,
@@ -625,24 +740,40 @@
       width: 100%;
       background: rgba(255,255,255,.06);
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: 8px;
       color: var(--text);
       font-family: var(--font);
       font-size: 13px;
-      padding: 8px 12px;
+      padding: 10px 12px;
       outline: none;
-      transition: border-color .15s;
+      transition: border-color .15s, background-color .15s, box-shadow .15s;
     }
     .form-group input:focus,
     .form-group select:focus,
     .form-group textarea:focus {
-      border-color: #2980b9;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(59,130,246,.1);
     }
     .form-group select { cursor: pointer; color-scheme: dark; }
     .form-group select option { background: #16213e; color: #e0e6f0; }
+
+    :root[data-theme="light"] .form-group input,
+    :root[data-theme="light"] .form-group select,
+    :root[data-theme="light"] .form-group textarea {
+      background: rgba(0,0,0,.04);
+      border: 1px solid #d1d5db;
+    }
+    :root[data-theme="light"] .form-group select {
+      color-scheme: light;
+    }
+    :root[data-theme="light"] .form-group select option {
+      background: #ffffff;
+      color: #1f2937;
+    }
     .form-group textarea {
-      min-height: 70px;
+      min-height: 80px;
       resize: vertical;
+      line-height: 1.5;
     }
 
     .modal-actions {
@@ -657,13 +788,15 @@
       position: fixed;
       bottom: 24px;
       right: 24px;
-      background: #1e3a5f;
+      background: var(--card);
       border: 1px solid var(--border);
+      border-left: 4px solid var(--accent);
       border-radius: 8px;
-      padding: 12px 20px;
-      font-size: 13px;
-      color: var(--text);
-      box-shadow: 0 4px 20px rgba(0,0,0,.4);
+      padding: 14px 20px;
+      font-size: 14px;
+      font-weight: 500;
+      color: #fff;
+      box-shadow: 0 4px 20px rgba(0,0,0,.2);
       z-index: 300;
       opacity: 0;
       transform: translateY(8px);
@@ -699,8 +832,9 @@
     }
     .child-card:last-child { margin-bottom: 0; }
     .child-card .agent-row {
-      padding: 10px 14px;
-      grid-template-columns: minmax(120px,1fr) 100px 88px auto;
+      padding: 16px 20px;
+      /* Use exact same grid as parent for perfect alignment */
+      grid-template-columns: minmax(180px, 250px) 130px 120px 130px 1fr;
     }
 
     /* ── Consent requests (CIBA) ── */
@@ -748,10 +882,73 @@
     .consent-row .consent-meta { color: var(--text-dim); font-size: 11px; }
     .consent-revoked-tag { color: #c0392b; font-size: 11px; font-weight: 600; }
 
+    /* ── Theme toggle ── */
+    .theme-toggle {
+      background: rgba(255,255,255,.1);
+      border: 1px solid rgba(255,255,255,.2);
+      padding: 7px 11px;
+      cursor: pointer;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .theme-toggle:hover {
+      background: rgba(255,255,255,.15);
+      border-color: rgba(255,255,255,.3);
+    }
+    .theme-toggle::before {
+      font-size: 14px;
+    }
+    :root[data-theme="dark"] .theme-toggle::before { content: "🌙 Dark"; }
+    :root[data-theme="light"] .theme-toggle::before { content: "☀️ Light"; }
+
+    /* ── Light theme adjustments ── */
+    :root[data-theme="light"] header {
+      box-shadow: 0 1px 3px rgba(0,0,0,.1);
+    }
+
+    :root[data-theme="light"] .agent-card,
+    :root[data-theme="light"] .modal,
+    :root[data-theme="light"] .logs-subpanel {
+      box-shadow: 0 1px 2px rgba(0,0,0,.05), 0 1px 3px rgba(0,0,0,.1);
+    }
+
+    :root[data-theme="light"] .agent-card:hover {
+      box-shadow: 0 4px 6px rgba(0,0,0,.07), 0 2px 4px rgba(0,0,0,.06);
+    }
+
+    :root[data-theme="light"] .modal-overlay {
+      background: rgba(0,0,0,.3);
+    }
+
+    :root[data-theme="light"] #toast {
+      box-shadow: 0 4px 12px rgba(0,0,0,.08);
+    }
+
+    :root[data-theme="light"] .btn-approve {
+      background: #dbeafe;
+      border-color: #3b82f6;
+      color: #1e40af;
+    }
+    :root[data-theme="light"] .btn-approve:hover {
+      background: #bfdbfe;
+    }
+
+    :root[data-theme="light"] .btn-deny {
+      background: #fee2e2;
+      border-color: #dc2626;
+      color: #7f1d1d;
+    }
+    :root[data-theme="light"] .btn-deny:hover {
+      background: #fecaca;
+    }
+
     /* ── Scrollbar ── */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--accent-hi); border-radius: 3px; }
+
+    :root[data-theme="light"] ::-webkit-scrollbar-thumb {
+      background: #d1d5db;
+    }
   </style>
 </head>
 <body>
@@ -761,6 +958,7 @@
   <div class="header-actions">
     <button class="btn btn-primary" id="open-modal-btn">+ New Agent</button>
     <button class="btn btn-ghost" id="open-consents-btn">Consents</button>
+    <button class="btn btn-ghost theme-toggle" id="theme-toggle-btn" title="Toggle dark/light mode"></button>
     <span id="current-user" class="current-user"></span>
     <form method="post" action="/logout" class="logout-form">
       <button class="btn btn-ghost" type="submit" id="logout-btn">Log out</button>
@@ -820,6 +1018,57 @@
 
 <script>
   'use strict';
+
+  // ── Theme Management ──────────────────────────────────────────────────────
+  const THEME_KEY = 'spawnly-theme';
+  const THEME_DARK = 'dark';
+  const THEME_LIGHT = 'light';
+
+  function getSystemTheme() {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? THEME_DARK : THEME_LIGHT;
+  }
+
+  function getSavedTheme() {
+    try {
+      return localStorage.getItem(THEME_KEY) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function setTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    try {
+      localStorage.setItem(THEME_KEY, theme);
+    } catch {
+      // localStorage unavailable
+    }
+  }
+
+  function toggleTheme() {
+    const current = document.documentElement.getAttribute('data-theme') || THEME_DARK;
+    const next = current === THEME_DARK ? THEME_LIGHT : THEME_DARK;
+    setTheme(next);
+  }
+
+  // Initialize theme on page load
+  (function initTheme() {
+    const saved = getSavedTheme();
+    const theme = saved || getSystemTheme();
+    setTheme(theme);
+
+    const toggleBtn = document.getElementById('theme-toggle-btn');
+    if (toggleBtn) {
+      toggleBtn.addEventListener('click', toggleTheme);
+    }
+
+    // Listen for system theme changes
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+      if (!getSavedTheme()) {
+        setTheme(e.matches ? THEME_DARK : THEME_LIGHT);
+      }
+    });
+  })();
 
   const POLL_MS = 2000;
 
@@ -1042,23 +1291,6 @@
 
   // Recompute every staleness node from lastEventAt vs now, without rebuilding
   // cards. Driven by a 1s interval so the "Xs ago" text stays live.
-  function refreshStaleness() {
-    const nodes = document.querySelectorAll('.agent-stale');
-    for (const el of nodes) {
-      const id = el.getAttribute('data-agent');
-      if (!id) continue;
-      if (isTerminalStatus(agentStatus[id])) {
-        el.textContent = '';
-        el.classList.remove('warn');
-        continue;
-      }
-      const ts = lastEventAt[id];
-      if (!ts) { el.textContent = ''; el.classList.remove('warn'); continue; }
-      el.textContent = `last activity ${fmtAgo(ts)}`;
-      el.classList.toggle('warn', (Date.now() - ts) > STALE_MS);
-    }
-  }
-
   // ── Shared action buttons (top-level and child cards alike) ──────────────
   // Revoke/Resume cascade an authorization change down the agent's whole
   // subtree; Kill tears down just this pod; Dismiss clears a terminal card.
@@ -1120,8 +1352,8 @@
         <span class="agent-id">${escHtml(a.agentId)}</span>
         <span class="agent-meta">${escHtml(a.agentType || '—')}</span>
         <span class="status-wrap">${statusBadge(a.status)}</span>
+        <span class="agent-meta">${escHtml(a.tenantId || '—')}</span>
         <div class="agent-actions">
-          <span class="agent-stale" data-agent="${a.agentId}" id="stale-${a.agentId}"></span>
           <button class="btn btn-events" id="evtbtn-${a.agentId}"
                   onclick="toggleEvents('${a.agentId}')">▼ Events</button>
           ${actionButtonsHtml(a)}
@@ -1174,7 +1406,6 @@
         <span class="status-wrap">${statusBadge(a.status)}</span>
         <span class="agent-meta">${escHtml(a.tenantId || '—')}</span>
         <div class="agent-actions">
-          <span class="agent-stale" data-agent="${a.agentId}" id="stale-${a.agentId}"></span>
           <button class="btn btn-events" id="evtbtn-${a.agentId}"
                   onclick="toggleEvents('${a.agentId}')">▼ Events</button>
           ${a.lifecycle === 'long-lived' && a.supportsChat ? `<button class="btn btn-chat" id="chatbtn-${a.agentId}" onclick="toggleChat('${a.agentId}')">💬 Chat</button>` : ''}
@@ -1254,7 +1485,6 @@
       }
       if (newest > 0 && newest > (lastEventAt[agentId] || 0)) lastEventAt[agentId] = newest;
     }
-    refreshStaleness();
 
     const already = renderedEventCount[agentId] || 0;
     for (const e of evts.slice(already)) {
@@ -1883,13 +2113,10 @@
   async function poll() {
     try { updateAgentList(await fetchAgents()); } catch (_) {}
     try { updateConsentBanner(await fetchPendingConsents()); } catch (_) {}
-    try { refreshStaleness(); } catch (_) {}
   }
 
   poll();
   setInterval(poll, POLL_MS);
-  // Keep the "Xs ago" labels live between polls; relabels DOM, never rebuilds.
-  setInterval(() => { try { refreshStaleness(); } catch (_) {} }, 1000);
   fetchTemplates().then(types => {
     if (!Array.isArray(types) || types.length === 0) return;
     const sel = document.getElementById('f-type');
