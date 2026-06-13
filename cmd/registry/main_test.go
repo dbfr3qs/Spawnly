@@ -544,6 +544,30 @@ func TestConsentBroker_DenyLeavesNoRecord(t *testing.T) {
 	}
 }
 
+func TestConsentBroker_ApproveScopedToUser(t *testing.T) {
+	s, mux := consentBrokerMux(t)
+	rec := postJSON(t, mux, "POST", "/v1/consent-requests", map[string]any{
+		"userId": "u1", "parentType": "p", "childType": "c", "scopes": []string{"x"},
+	})
+	var cr registry.ConsentRequest
+	json.NewDecoder(rec.Body).Decode(&cr)
+
+	// A different user must not be able to approve u1's request.
+	other := postJSON(t, mux, "POST", "/v1/consent-requests/"+cr.ID+"/approve?userId=u2", nil)
+	if other.Code != http.StatusNotFound {
+		t.Fatalf("cross-user approve: got %d, want 404", other.Code)
+	}
+	if _, ok := s.findConsent("u1", "p", "c"); ok {
+		t.Fatal("cross-user approve must not create a ConsentRecord")
+	}
+
+	// The owner can.
+	ok := postJSON(t, mux, "POST", "/v1/consent-requests/"+cr.ID+"/approve?userId=u1", nil)
+	if ok.Code != http.StatusOK {
+		t.Fatalf("owner approve: got %d, want 200", ok.Code)
+	}
+}
+
 func TestConsentBroker_ListPending(t *testing.T) {
 	_, mux := consentBrokerMux(t)
 	postJSON(t, mux, "POST", "/v1/consent-requests", map[string]any{"userId": "u1", "parentType": "p", "childType": "c", "scopes": []string{"x"}})

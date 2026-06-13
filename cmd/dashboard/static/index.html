@@ -1998,18 +1998,19 @@
     }
   });
 
-  // ── Consent requests (CIBA) ──────────────────────────────────────────────
-  // Pending backchannel authentication requests for the logged-in user: a
-  // consent-gated spawn is waiting for approval. Served by IdentityServer
-  // through the /ciba/ proxy, authenticated by the IS session cookie.
+  // ── Consent requests (broker) ────────────────────────────────────────────
+  // Pending spawn-consent requests for the logged-in user: a consent-gated
+  // spawn is waiting for approval. Served by the registry-native consent broker
+  // (Phase 5b) via the dashboard's /api proxy, scoped server-side to the
+  // session user. CIBA is now just one driver that creates these same requests.
 
   async function fetchPendingConsents() {
-    try { const r = await fetch('/ciba/pending'); return r.ok ? r.json() : []; }
+    try { const r = await fetch('/api/consent-requests'); return r.ok ? r.json() : []; }
     catch (_) { return []; }
   }
 
   async function respondConsent(id, action) {
-    const r = await fetch(`/ciba/pending/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
+    const r = await fetch(`/api/consent-requests/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
   }
 

@@ -451,6 +451,20 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		return withQuery("/v1/consents/"+r.PathValue("id")+"/revoke", r)
 	}))
 
+	// Brokered consent requests (Phase 5b): registry passthroughs for the
+	// dashboard's pending-consent banner and approve/deny actions. The query
+	// string carries the session-user scoping (status=pending&userId=... on the
+	// list, userId=... on approve/deny for confused-deputy protection).
+	mux.HandleFunc("GET /v1/consent-requests", forwardToRegistry("GET", func(r *http.Request) string {
+		return withQuery("/v1/consent-requests", r)
+	}))
+	mux.HandleFunc("POST /v1/consent-requests/{id}/approve", forwardToRegistry("POST", func(r *http.Request) string {
+		return withQuery("/v1/consent-requests/"+r.PathValue("id")+"/approve", r)
+	}))
+	mux.HandleFunc("POST /v1/consent-requests/{id}/deny", forwardToRegistry("POST", func(r *http.Request) string {
+		return withQuery("/v1/consent-requests/"+r.PathValue("id")+"/deny", r)
+	}))
+
 	mux.HandleFunc("POST /v1/agents/{id}/message", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 

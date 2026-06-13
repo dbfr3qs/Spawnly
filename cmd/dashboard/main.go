@@ -178,6 +178,26 @@ func main() {
 		proxy("POST", orchestratorURL+"/v1/consents/"+id+"/revoke?userId="+url.QueryEscape(user))(w, r)
 	})))
 
+	// Pending consent requests (Phase 5b broker). The registry owns the
+	// pending->approved/denied lifecycle, so the dashboard banner reads pending
+	// requests for the session user and approves/denies them here rather than
+	// via IdentityServer's CIBA endpoints. userId scopes every call to the
+	// session user (confused-deputy protection on approve/deny).
+	mux.Handle("GET /api/consent-requests", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, _ := auth.user(r)
+		proxy("GET", orchestratorURL+"/v1/consent-requests?status=pending&userId="+url.QueryEscape(user))(w, r)
+	})))
+	mux.Handle("POST /api/consent-requests/{id}/approve", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, _ := auth.user(r)
+		id := r.PathValue("id")
+		proxy("POST", orchestratorURL+"/v1/consent-requests/"+id+"/approve?userId="+url.QueryEscape(user))(w, r)
+	})))
+	mux.Handle("POST /api/consent-requests/{id}/deny", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, _ := auth.user(r)
+		id := r.PathValue("id")
+		proxy("POST", orchestratorURL+"/v1/consent-requests/"+id+"/deny?userId="+url.QueryEscape(user))(w, r)
+	})))
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"

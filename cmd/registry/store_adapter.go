@@ -135,7 +135,7 @@ func (s *store) ListConsentRequests(_ context.Context, userID, status string) ([
 	return s.listConsentRequests(userID, status), nil
 }
 
-func (s *store) ResolveConsentRequest(_ context.Context, id string, approve bool, scopes []string) (registry.ConsentRequest, bool, error) {
-	cr, ok := s.resolveConsentRequest(id, approve, scopes)
+func (s *store) ResolveConsentRequest(_ context.Context, id, userID string, approve bool, scopes []string) (registry.ConsentRequest, bool, error) {
+	cr, ok := s.resolveConsentRequest(id, userID, approve, scopes)
 	return cr, ok, nil
 }

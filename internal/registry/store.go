@@ -64,6 +64,7 @@ type Store interface {
 	GetConsentRequest(ctx context.Context, id string) (ConsentRequest, bool, error)
 	ListConsentRequests(ctx context.Context, userID, status string) ([]ConsentRequest, error)
 	// ResolveConsentRequest approves/denies a pending request; on approve it
-	// upserts the ConsentRecord and sweeps other covered pending requests.
-	ResolveConsentRequest(ctx context.Context, id string, approve bool, scopes []string) (ConsentRequest, bool, error)
+	// upserts the ConsentRecord and sweeps other covered pending requests. A
+	// non-empty userID scopes the resolve to that user's own request.
+	ResolveConsentRequest(ctx context.Context, id, userID string, approve bool, scopes []string) (ConsentRequest, bool, error)
 }

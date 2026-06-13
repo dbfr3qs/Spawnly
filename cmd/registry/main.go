@@ -332,9 +332,14 @@ func (s *store) listConsentRequests(userID, status string) []registry.ConsentReq
 // pending request for the same edge that the fresh grant now covers — making
 // the registry, not the IdP, the owner of the full consent lifecycle. It is
 // idempotent: resolving an already-resolved request returns it unchanged.
-func (s *store) resolveConsentRequest(id string, approve bool, scopes []string) (registry.ConsentRequest, bool) {
+//
+// A non-empty userID scopes the resolve to that user's own request (the
+// dashboard passes the session user, so one user cannot approve another's
+// pending request — a mismatch is indistinguishable from an unknown id). The
+// CIBA driver passes "" because it has already authenticated the user.
+func (s *store) resolveConsentRequest(id, userID string, approve bool, scopes []string) (registry.ConsentRequest, bool) {
 	cr, ok := s.getConsentRequest(id)
-	if !ok {
+	if !ok || (userID != "" && cr.UserID != userID) {
 		return registry.ConsentRequest{}, false
 	}
 
@@ -1085,7 +1090,7 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 		// Body is optional — an empty/absent body approves the originally
 		// requested scopes.
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		cr, ok := s.resolveConsentRequest(r.PathValue("id"), true, body.Scopes)
+		cr, ok := s.resolveConsentRequest(r.PathValue("id"), r.URL.Query().Get("userId"), true, body.Scopes)
 		if !ok {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -1095,7 +1100,7 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 	})
 
 	mux.HandleFunc("POST /v1/consent-requests/{id}/deny", func(w http.ResponseWriter, r *http.Request) {
-		cr, ok := s.resolveConsentRequest(r.PathValue("id"), false, nil)
+		cr, ok := s.resolveConsentRequest(r.PathValue("id"), r.URL.Query().Get("userId"), false, nil)
 		if !ok {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
