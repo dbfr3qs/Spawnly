@@ -2,6 +2,7 @@ package spicedb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -21,8 +22,18 @@ type Client interface {
 	WriteSchema(ctx context.Context, schema string) error
 	// WriteRelationship writes a single tuple: resource#relation@subject.
 	WriteRelationship(ctx context.Context, resource, relation, subject string) error
-	// DeleteAgentRelationships removes every tuple whose subject is "agent:agentID".
-	DeleteAgentRelationships(ctx context.Context, agentID string) error
+	// DeleteRelationship removes a single fully-specified tuple:
+	// resource#relation@subject. Unlike DeleteAgentRelationships' broad
+	// subject-only filter, this targets one exact tuple — used to toggle an
+	// agent's `enabled` status tuple on revoke/resume (Phase 5a).
+	DeleteRelationship(ctx context.Context, resource, relation, subject string) error
+	// DeleteAgentRelationships removes every tuple whose subject is "agent:agentID"
+	// and whose resource is one of resourceTypes. Pass the set of resource types
+	// the agent's template relations reference (e.g. {"tenant"} or
+	// {"tenant", "project"}) — SpiceDB's delete filter is scoped to a single
+	// resource type per call, so one call is issued per type. An empty (or nil)
+	// resourceTypes slice is a no-op.
+	DeleteAgentRelationships(ctx context.Context, agentID string, resourceTypes []string) error
 	// CheckPermission returns true when subject holds permission on resource.
 	CheckPermission(ctx context.Context, resource, permission, subject string) (bool, error)
 }
@@ -72,17 +83,43 @@ func (r *realClient) WriteRelationship(ctx context.Context, resource, relation, 
 	return err
 }
 
-func (r *realClient) DeleteAgentRelationships(ctx context.Context, agentID string) error {
+func (r *realClient) DeleteRelationship(ctx context.Context, resource, relation, subject string) error {
+	resType, resID := parseRef(resource)
+	subType, subID := parseRef(subject)
 	_, err := r.c.DeleteRelationships(ctx, &v1.DeleteRelationshipsRequest{
 		RelationshipFilter: &v1.RelationshipFilter{
-			ResourceType: "tenant",
+			ResourceType:       resType,
+			OptionalResourceId: resID,
+			OptionalRelation:   relation,
 			OptionalSubjectFilter: &v1.SubjectFilter{
-				SubjectType:       "agent",
-				OptionalSubjectId: agentID,
+				SubjectType:       subType,
+				OptionalSubjectId: subID,
 			},
 		},
 	})
 	return err
+}
+
+func (r *realClient) DeleteAgentRelationships(ctx context.Context, agentID string, resourceTypes []string) error {
+	var errs []error
+	for _, rt := range resourceTypes {
+		_, err := r.c.DeleteRelationships(ctx, &v1.DeleteRelationshipsRequest{
+			RelationshipFilter: &v1.RelationshipFilter{
+				ResourceType: rt,
+				OptionalSubjectFilter: &v1.SubjectFilter{
+					SubjectType:       "agent",
+					OptionalSubjectId: agentID,
+				},
+			},
+		})
+		if err != nil {
+			// Join rather than return early: a failure cleaning one resource
+			// type must not block cleanup of the others (a partial leak on one
+			// type is still reported).
+			errs = append(errs, fmt.Errorf("delete %s relationships for agent %s: %w", rt, agentID, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (r *realClient) CheckPermission(ctx context.Context, resource, permission, subject string) (bool, error) {
@@ -121,12 +158,34 @@ func (m *Mock) WriteRelationship(_ context.Context, resource, relation, subject 
 	return nil
 }
 
-func (m *Mock) DeleteAgentRelationships(_ context.Context, agentID string) error {
+func (m *Mock) DeleteRelationship(_ context.Context, resource, relation, subject string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.tuples, resource+"#"+relation+"@"+subject)
+	return nil
+}
+
+func (m *Mock) DeleteAgentRelationships(_ context.Context, agentID string, resourceTypes []string) error {
+	if len(resourceTypes) == 0 {
+		return nil
+	}
+	types := make(map[string]bool, len(resourceTypes))
+	for _, rt := range resourceTypes {
+		types[rt] = true
+	}
 	suffix := "@agent:" + agentID
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for k := range m.tuples {
-		if strings.HasSuffix(k, suffix) {
+		// Key shape: "resource#relation@subject" where resource is "type:id".
+		// Delete only tuples for this agent whose resource type is in the set,
+		// mirroring realClient's per-resource-type filter so tests catch a
+		// missing type in the caller's list.
+		if !strings.HasSuffix(k, suffix) {
+			continue
+		}
+		resType, _ := parseRef(strings.SplitN(k, "#", 2)[0])
+		if types[resType] {
 			delete(m.tuples, k)
 		}
 	}
@@ -134,11 +193,14 @@ func (m *Mock) DeleteAgentRelationships(_ context.Context, agentID string) error
 }
 
 // CheckPermission checks whether subject holds permission on resource.
-// The mock only models the POC schema: work_on is satisfied by the "agent"
-// relation, so any permission name resolves via the #agent@ tuple key.
+// The mock models the default schema's `work_on = agent & agent->enabled`
+// (Phase 5a): permission requires BOTH the "agent" relation tuple AND the
+// subject agent's own "enabled" status tuple, mirroring SpiceDB's intersection.
+// subject is "agent:<id>", so its enabled tuple key is "<subject>#enabled@<subject>".
 func (m *Mock) CheckPermission(_ context.Context, resource, _ /*permission*/ string, subject string) (bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	key := resource + "#agent@" + subject
-	return m.tuples[key], nil
+	agentKey := resource + "#agent@" + subject
+	enabledKey := subject + "#enabled@" + subject
+	return m.tuples[agentKey] && m.tuples[enabledKey], nil
 }

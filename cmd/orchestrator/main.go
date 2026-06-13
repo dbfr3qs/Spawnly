@@ -44,15 +44,6 @@ type SpawnResponse struct {
 	WorkloadName string `json:"workloadName"`
 }
 
-const spicedbSchema = `
-definition agent {}
-
-definition tenant {
-    relation agent: agent
-    permission work_on = agent
-}
-`
-
 func shortID() string {
 	b := make([]byte, 4)
 	rand.Read(b)
@@ -524,21 +515,13 @@ func main() {
 		spicedbPSK = "poc-secret"
 	}
 
+	// The SpiceDB client is used for spawn-time authorization checks. The schema
+	// itself is now owned and written by the registry on its boot (Phase 2:
+	// single-writer schema ownership), not here — so this service must come up
+	// after the registry has applied the schema.
 	sdb, err := spicedb.New(spicedbEndpoint, spicedbPSK)
 	if err != nil {
 		log.Fatalf("spicedb connect: %v", err)
-	}
-
-	// Retry schema write — SpiceDB may not be ready immediately on first start.
-	for i := 1; i <= 10; i++ {
-		if err := sdb.WriteSchema(context.Background(), spicedbSchema); err == nil {
-			break
-		} else if i == 10 {
-			log.Fatalf("WriteSchema failed after 10 attempts: %v", err)
-		} else {
-			log.Printf("WriteSchema attempt %d/10 failed, retrying: %v", i, err)
-			time.Sleep(3 * time.Second)
-		}
 	}
 
 	cfg := ctrl.GetConfigOrDie()

@@ -1,6 +1,14 @@
-definition agent {}
+// REFERENCE COPY — the source of truth is cmd/registry/schema.zed, which the
+// registry embeds and writes to SpiceDB on boot. Keep this file in sync for
+// documentation/tooling purposes; nothing applies it directly.
+//
+// The `enabled` relation + `& agent->enabled` intersection are the Phase 5a
+// native-revoke mechanism: revoke/resume toggle the single enabled tuple.
+definition agent {
+    relation enabled: agent
+}
 
 definition tenant {
     relation agent: agent
-    permission work_on = agent
+    permission work_on = agent & agent->enabled
 }

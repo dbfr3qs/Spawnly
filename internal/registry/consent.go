@@ -31,6 +31,38 @@ type ConsentDecision struct {
 	Reason  string `json:"reason"`
 }
 
+// ConsentRequestStatus is the lifecycle state of a human-in-the-loop consent
+// ask brokered by the registry (Phase 5b).
+type ConsentRequestStatus string
+
+const (
+	ConsentPending  ConsentRequestStatus = "pending"
+	ConsentApproved ConsentRequestStatus = "approved"
+	ConsentDenied   ConsentRequestStatus = "denied"
+)
+
+// ConsentRequest is one human-in-the-loop ask: "user U, may parent type P spawn
+// child type C with these scopes?". The registry owns its full lifecycle, so
+// consent no longer requires a CIBA-capable IdP — CIBA becomes one optional
+// driver that creates and resolves these via the registry's API. Keyed by the
+// same (user, parentType, childType) edge as ConsentRecord; at most one open
+// (pending) request exists per edge.
+type ConsentRequest struct {
+	ID             string               `json:"id"`
+	UserID         string               `json:"userId"`
+	ParentType     string               `json:"parentType"`
+	ChildType      string               `json:"childType"`
+	Scopes         []string             `json:"scopes"`
+	BindingMessage string               `json:"bindingMessage,omitempty"`
+	Status         ConsentRequestStatus `json:"status"`
+	CreatedAt      time.Time            `json:"createdAt"`
+	ResolvedAt     *time.Time           `json:"resolvedAt,omitempty"`
+	// ExternalRef carries an optional driver-specific id (e.g. a Duende CIBA
+	// BackchannelUserLoginRequest.InternalId) so a driver can correlate the
+	// registry's decision back to its own pending object. Opaque to the registry.
+	ExternalRef string `json:"externalRef,omitempty"`
+}
+
 // FirstUncoveredScope returns the first requested scope missing from the
 // granted set, or "" when every requested scope is covered. It is the single
 // definition of "scope subset" for consent decisions — the registry's

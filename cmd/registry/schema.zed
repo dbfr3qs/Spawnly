@@ -1,0 +1,24 @@
+// Default SpiceDB schema for the Spawnly platform.
+//
+// This file is the SINGLE SOURCE OF TRUTH for the schema: it is embedded into
+// the registry binary (see //go:embed in cmd/registry/main.go) and written to
+// SpiceDB by the registry on boot. A consumer can override it at runtime via
+// the SPICEDB_SCHEMA_PATH env var without rebuilding.
+//
+// deploy/spicedb/schema.zed is a reference copy of this file.
+//
+// EXTENSION CONTRACT (Phase 5a): every revocable permission must intersect with
+// the agent's own `enabled` flag (`& agent->enabled`). Revoke/resume toggle the
+// single `agent:<id>#enabled@agent:<id>` tuple; a permission that omits the
+// intersection will NOT be revocable. A consumer overriding this schema must
+// preserve that convention for their permissions to honour revoke.
+definition agent {
+    // Exactly one tuple per agent: agent:<id>#enabled@agent:<id>.
+    // Present while the agent is active; absent while revoked.
+    relation enabled: agent
+}
+
+definition tenant {
+    relation agent: agent
+    permission work_on = agent & agent->enabled
+}

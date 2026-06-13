@@ -130,6 +130,7 @@ func lastSegment(s string) string {
 func TestWorkHandlerAllowed(t *testing.T) {
 	sdb := spicedb.NewMock()
 	sdb.WriteRelationship(context.Background(), "tenant:tenant-1", "agent", "agent:agent-1")
+	sdb.WriteRelationship(context.Background(), "agent:agent-1", "enabled", "agent:agent-1")
 
 	validator := &tokenvalidator.MockValidator{
 		Claims: claimsFor("spiffe://cluster.local/agent/agent-1", []string{"sample-api-a:read"}),
@@ -193,6 +194,7 @@ func TestWorkHandlerSpiceDBDenied(t *testing.T) {
 func TestWorkHandlerWrongAudience(t *testing.T) {
 	sdb := spicedb.NewMock()
 	sdb.WriteRelationship(context.Background(), "tenant:tenant-1", "agent", "agent:agent-1")
+	sdb.WriteRelationship(context.Background(), "agent:agent-1", "enabled", "agent:agent-1")
 
 	c := claimsFor("spiffe://cluster.local/agent/agent-1", []string{"sample-api-a:read"})
 	c.Audience = []string{"sample-api-b"}
@@ -215,6 +217,7 @@ func TestWorkHandlerWrongAudience(t *testing.T) {
 func TestWorkHandlerDelegationTokenRejected(t *testing.T) {
 	sdb := spicedb.NewMock()
 	sdb.WriteRelationship(context.Background(), "tenant:tenant-1", "agent", "agent:agent-1")
+	sdb.WriteRelationship(context.Background(), "agent:agent-1", "enabled", "agent:agent-1")
 
 	c := claimsFor("spiffe://cluster.local/agent/agent-1", []string{"sample-api-a:read"})
 	c.Audience = []string{"delegation"}
@@ -238,6 +241,7 @@ func TestWorkHandlerDelegationTokenRejected(t *testing.T) {
 func TestWorkHandlerMissingScope(t *testing.T) {
 	sdb := spicedb.NewMock()
 	sdb.WriteRelationship(context.Background(), "tenant:tenant-1", "agent", "agent:agent-1")
+	sdb.WriteRelationship(context.Background(), "agent:agent-1", "enabled", "agent:agent-1")
 
 	// Only a write scope present, but GET requires read.
 	validator := &tokenvalidator.MockValidator{
@@ -260,6 +264,7 @@ func TestWorkHandlerMissingScope(t *testing.T) {
 func TestTaskHandlerAllowed(t *testing.T) {
 	sdb := spicedb.NewMock()
 	sdb.WriteRelationship(context.Background(), "tenant:tenant-1", "agent", "agent:agent-abc")
+	sdb.WriteRelationship(context.Background(), "agent:agent-abc", "enabled", "agent:agent-abc")
 
 	validator := &tokenvalidator.MockValidator{
 		Claims: claimsFor("spiffe://cluster.local/agent/agent-abc", []string{"sample-api-a:write"}),
@@ -292,6 +297,7 @@ func TestTaskHandlerAllowed(t *testing.T) {
 func TestPostWorkHandlerAllowed(t *testing.T) {
 	sdb := spicedb.NewMock()
 	sdb.WriteRelationship(context.Background(), "tenant:tenant-1", "agent", "agent:agent-abc")
+	sdb.WriteRelationship(context.Background(), "agent:agent-abc", "enabled", "agent:agent-abc")
 
 	validator := &tokenvalidator.MockValidator{
 		Claims: claimsFor("spiffe://cluster.local/agent/agent-abc", []string{"sample-api-a:write"}),
@@ -398,8 +404,9 @@ func TestWorkHandlerSuspendedAncestorDenied(t *testing.T) {
 	parent := "spiffe://cluster.local/agent/tenant-1/user-1/parent-agent/agent-parent"
 
 	sdb := spicedb.NewMock()
-	// child keeps work_on; parent's grant is absent (suspended).
+	// child keeps work_on (granted + enabled); parent's grant is absent (suspended).
 	sdb.WriteRelationship(context.Background(), "tenant:tenant-1", "agent", "agent:agent-child")
+	sdb.WriteRelationship(context.Background(), "agent:agent-child", "enabled", "agent:agent-child")
 
 	c := claimsFor(child, []string{"sample-api-a:read"})
 	c.Chain = []string{child, parent} // outermost (acting) first, ancestor nested

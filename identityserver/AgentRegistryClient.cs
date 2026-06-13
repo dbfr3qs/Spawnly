@@ -94,9 +94,84 @@ public class AgentRegistryClient
         catch { return false; }
     }
 
+    /// <summary>
+    /// Creates (or fetches the existing open) pending consent request for a
+    /// spawn edge. Returns the ConsentRequest as-is — its Status may already
+    /// be "approved" if the registry short-circuited on a covering stored
+    /// consent. Null only when the registry is unreachable or errors.
+    /// </summary>
+    public async Task<ConsentRequest?> CreateConsentRequest(
+        string userId, string parentType, string childType, IEnumerable<string> scopes,
+        string? bindingMessage, string? externalRef)
+    {
+        try
+        {
+            var resp = await _http.PostAsJsonAsync($"{_baseUrl}/v1/consent-requests", new
+            {
+                userId,
+                parentType,
+                childType,
+                scopes = scopes.ToArray(),
+                bindingMessage,
+                externalRef,
+            });
+            if (!resp.IsSuccessStatusCode) return null;
+            return await resp.Content.ReadFromJsonAsync<ConsentRequest>();
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Approves a pending consent request, recording the corresponding
+    /// ConsentRecord in the registry and sweeping any other open requests for
+    /// the same edge. Null only when the registry is unreachable or errors.
+    /// </summary>
+    public async Task<ConsentRequest?> ApproveConsentRequest(string id, IEnumerable<string>? scopes)
+    {
+        try
+        {
+            var resp = await _http.PostAsJsonAsync($"{_baseUrl}/v1/consent-requests/{id}/approve", new
+            {
+                scopes = scopes?.ToArray(),
+            });
+            if (!resp.IsSuccessStatusCode) return null;
+            return await resp.Content.ReadFromJsonAsync<ConsentRequest>();
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Denies a pending consent request. Null only when the registry is
+    /// unreachable or errors.
+    /// </summary>
+    public async Task<ConsentRequest?> DenyConsentRequest(string id)
+    {
+        try
+        {
+            var resp = await _http.PostAsync($"{_baseUrl}/v1/consent-requests/{id}/deny", null);
+            if (!resp.IsSuccessStatusCode) return null;
+            return await resp.Content.ReadFromJsonAsync<ConsentRequest>();
+        }
+        catch { return null; }
+    }
+
     public record ConsentDecision(
         [property: JsonPropertyName("granted")] bool Granted,
         [property: JsonPropertyName("reason")] string? Reason);
+
+    // Registry JSON uses camelCase fields: id, userId, parentType, childType,
+    // scopes, bindingMessage, status, createdAt, resolvedAt, externalRef.
+    public record ConsentRequest(
+        [property: JsonPropertyName("id")] string Id,
+        [property: JsonPropertyName("userId")] string UserId,
+        [property: JsonPropertyName("parentType")] string ParentType,
+        [property: JsonPropertyName("childType")] string ChildType,
+        [property: JsonPropertyName("scopes")] List<string>? Scopes,
+        [property: JsonPropertyName("bindingMessage")] string? BindingMessage,
+        [property: JsonPropertyName("status")] string Status,
+        [property: JsonPropertyName("createdAt")] DateTime CreatedAt,
+        [property: JsonPropertyName("resolvedAt")] DateTime? ResolvedAt,
+        [property: JsonPropertyName("externalRef")] string? ExternalRef);
 
     // Registry JSON uses camelCase fields: agentId, status, userId, agentType, parentId.
     public record AgentRecord(

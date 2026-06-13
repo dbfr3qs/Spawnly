@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spawnly/platform/internal/events"
+	"github.com/spawnly/platform/internal/registrant"
 	"github.com/spawnly/platform/internal/registry"
 	"github.com/spawnly/platform/internal/spicedb"
 	"github.com/spawnly/platform/internal/spiffe"
@@ -33,7 +34,7 @@ func TestTemplateCRUD(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, validator)
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator))
 
 	body, _ := json.Marshal(workerTemplate())
 	rec := httptest.NewRecorder()
@@ -75,7 +76,7 @@ func registerWorker(t *testing.T, tpl registry.AgentTemplate, agentID, tenantID 
 	s.putTemplate(tpl)
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/" + agentID}
-	mux := buildMux(s, sdb, validator)
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator))
 
 	payload := map[string]string{"agentType": tpl.AgentType, "userId": "user-1"}
 	if tenantID != "" {
@@ -138,7 +139,7 @@ func TestSpawnPolicy(t *testing.T) {
 	s.registerAgent(registry.AgentRecord{AgentID: "parent-1", AgentType: "parent-agent", TenantID: "tenant-1"})
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, validator)
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator))
 
 	check := func(parentID, childType string) registry.SpawnDecision {
 		t.Helper()
@@ -178,7 +179,7 @@ func TestSpawnPolicy_MaxDepth(t *testing.T) {
 	for _, n := range []struct{ id, parent string }{{"root", ""}, {"a", "root"}, {"b", "a"}, {"c", "b"}} {
 		s.registerAgent(registry.AgentRecord{AgentID: n.id, AgentType: "chain-worker", TenantID: "tenant-1", ParentID: n.parent})
 	}
-	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
 
 	check := func(parentID string) registry.SpawnDecision {
 		t.Helper()
@@ -204,7 +205,7 @@ func TestAgentSelfRegistration(t *testing.T) {
 	s.putTemplate(workerTemplate())
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/agent-test"}
-	mux := buildMux(s, sdb, validator)
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator))
 
 	body, _ := json.Marshal(map[string]string{
 		"agentType": "worker",
@@ -237,7 +238,7 @@ func TestAgentISBackchannelCheck(t *testing.T) {
 	s.registerAgent(registry.AgentRecord{AgentID: "agent-test", Status: "active"})
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, validator)
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator))
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/agent-test", nil))
@@ -253,11 +254,14 @@ func TestAgentISBackchannelCheck(t *testing.T) {
 
 func TestAgentCompletion_DeletesSpiceDB(t *testing.T) {
 	s := newStore()
-	s.registerAgent(registry.AgentRecord{AgentID: "agent-test", TenantID: "tenant-1", Status: "active"})
+	// The completion handler now derives the resource types to clean from the
+	// agent's template, so the type must be registered.
+	s.putTemplate(workerTemplate())
+	s.registerAgent(registry.AgentRecord{AgentID: "agent-test", AgentType: "worker", TenantID: "tenant-1", Status: "active"})
 	sdb := spicedb.NewMock()
 	sdb.WriteRelationship(t.Context(), "tenant:tenant-1", "agent", "agent:agent-test")
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, validator)
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator))
 
 	patchBody, _ := json.Marshal(map[string]string{"status": "completed"})
 	rec := httptest.NewRecorder()
@@ -276,11 +280,287 @@ func TestAgentCompletion_DeletesSpiceDB(t *testing.T) {
 	}
 }
 
+func TestPostTemplate_RejectsSchemaMismatch(t *testing.T) {
+	s := newStore() // seeded with the embedded default schema (tenant/agent)
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
+
+	// "project:" is not a definition in the default schema → must be rejected
+	// before the template is stored.
+	body, _ := json.Marshal(projectRelationTemplate())
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/templates", bytes.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for schema-mismatched template, got %d", rec.Code)
+	}
+	// And it must not have been stored.
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, httptest.NewRequest("GET", "/v1/templates/proj-worker", nil))
+	if rec2.Code != http.StatusNotFound {
+		t.Fatalf("rejected template should not be stored, got %d", rec2.Code)
+	}
+}
+
+func TestGetSchema(t *testing.T) {
+	s := newStore()
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/schema", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get schema: got %d, want 200", rec.Code)
+	}
+	var resp map[string]string
+	json.NewDecoder(rec.Body).Decode(&resp)
+	if resp["source"] != "default" || resp["version"] != "v1" {
+		t.Fatalf("unexpected schema meta: %+v", resp)
+	}
+	if !strings.Contains(resp["schema"], "definition tenant") {
+		t.Fatalf("schema body missing tenant definition: %q", resp["schema"])
+	}
+}
+
+// projectRelationTemplate uses a non-"tenant" resource type, proving cleanup is
+// no longer hardcoded to "tenant" (Phase 1: the delete path derives resource
+// types from the template).
+func projectRelationTemplate() registry.AgentTemplate {
+	return registry.AgentTemplate{
+		AgentType: "proj-worker", Version: "1.0.0", Status: "active",
+		Runtime: registry.RuntimeSpec{Image: "agent-go-worker:latest"},
+		AuthZ: registry.AuthZSpec{SpiceDBRelations: []registry.SpiceDBRelationTemplate{
+			{Resource: "project:{{tenant_id}}", Relation: "agent", Subject: "agent:{{agent_id}}"},
+		}},
+	}
+}
+
+func TestRevoke_CleansNonTenantResourceType(t *testing.T) {
+	s := newStore()
+	s.putTemplate(projectRelationTemplate())
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/proj-1"}
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator))
+
+	body, _ := json.Marshal(map[string]string{"agentType": "proj-worker", "userId": "u1", "tenantId": "acme"})
+	req := httptest.NewRequest("POST", "/v1/agents", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-svid")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("register: got %d, want 201", rec.Code)
+	}
+	if ok, _ := sdb.CheckPermission(t.Context(), "project:acme", "work_on", "agent:proj-1"); !ok {
+		t.Fatal("expected project:acme tuple written on register")
+	}
+
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/proj-1/revoke", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: got %d, want 200", rec.Code)
+	}
+	// Phase 5a: revoke denies via the enabled tuple, so work_on is now false...
+	if ok, _ := sdb.CheckPermission(t.Context(), "project:acme", "work_on", "agent:proj-1"); ok {
+		t.Fatal("expected work_on denied after revoke")
+	}
+	// ...but the project:acme template relation itself survives (only enabled
+	// toggled). Resume re-enables, and work_on returns — which is only possible
+	// if the non-"tenant" project relation was never deleted by revoke.
+	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/agents/proj-1/resume", nil))
+	if ok, _ := sdb.CheckPermission(t.Context(), "project:acme", "work_on", "agent:proj-1"); !ok {
+		t.Fatal("expected work_on restored after resume (project relation must survive revoke)")
+	}
+}
+
+// TestResumeAfterTemplateDeleted is the regression test for the re-derivation
+// drift fixed in Phase 5a: resume re-enables via the single enabled tuple and
+// no longer reads the template, so it works even if the template is gone.
+func TestResumeAfterTemplateDeleted(t *testing.T) {
+	s := newStore()
+	s.putTemplate(workerTemplate())
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/w-1"}
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator))
+
+	body, _ := json.Marshal(map[string]string{"agentType": "worker", "userId": "u1", "tenantId": "acme"})
+	req := httptest.NewRequest("POST", "/v1/agents", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-svid")
+	if rec := httptest.NewRecorder(); true {
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("register: got %d", rec.Code)
+		}
+	}
+	work := func() bool {
+		ok, _ := sdb.CheckPermission(t.Context(), "tenant:acme", "work_on", "agent:w-1")
+		return ok
+	}
+	if !work() {
+		t.Fatal("expected work_on after register")
+	}
+
+	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/agents/w-1/revoke", nil))
+	if work() {
+		t.Fatal("expected work_on denied after revoke")
+	}
+
+	// Delete the template entirely, then resume — must still re-enable.
+	delete(s.templates, "worker")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/w-1/resume", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resume: got %d", rec.Code)
+	}
+	if !work() {
+		t.Fatal("resume must restore work_on without depending on the template")
+	}
+}
+
+func TestCompletion_CleansNonTenantResourceType(t *testing.T) {
+	s := newStore()
+	s.putTemplate(projectRelationTemplate())
+	s.registerAgent(registry.AgentRecord{AgentID: "proj-2", AgentType: "proj-worker", TenantID: "acme", Status: "active"})
+	sdb := spicedb.NewMock()
+	sdb.WriteRelationship(t.Context(), "project:acme", "agent", "agent:proj-2")
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
+
+	patchBody, _ := json.Marshal(map[string]string{"status": "completed"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("PATCH", "/v1/agents/proj-2", bytes.NewReader(patchBody)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch: got %d, want 200", rec.Code)
+	}
+	if ok, _ := sdb.CheckPermission(t.Context(), "project:acme", "work_on", "agent:proj-2"); ok {
+		t.Fatal("expected project:acme tuple deleted on completion")
+	}
+}
+
+// --- Phase 5b: registry-native consent broker -----------------------------
+
+func consentBrokerMux(t *testing.T) (*store, http.Handler) {
+	t.Helper()
+	s := newStore()
+	return s, buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
+}
+
+func postJSON(t *testing.T, mux http.Handler, method, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var rd *bytes.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rd = bytes.NewReader(b)
+	} else {
+		rd = bytes.NewReader(nil)
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(method, path, rd))
+	return rec
+}
+
+func TestConsentBroker_CreateApproveProducesRecord(t *testing.T) {
+	s, mux := consentBrokerMux(t)
+
+	rec := postJSON(t, mux, "POST", "/v1/consent-requests", map[string]any{
+		"userId": "u1", "parentType": "parent", "childType": "child", "scopes": []string{"a", "b"},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: got %d, want 201", rec.Code)
+	}
+	var cr registry.ConsentRequest
+	json.NewDecoder(rec.Body).Decode(&cr)
+	if cr.Status != registry.ConsentPending {
+		t.Fatalf("expected pending, got %q", cr.Status)
+	}
+
+	// Approve → request approved AND a covering ConsentRecord exists.
+	rec2 := postJSON(t, mux, "POST", "/v1/consent-requests/"+cr.ID+"/approve", nil)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("approve: got %d", rec2.Code)
+	}
+	var approved registry.ConsentRequest
+	json.NewDecoder(rec2.Body).Decode(&approved)
+	if approved.Status != registry.ConsentApproved {
+		t.Fatalf("expected approved, got %q", approved.Status)
+	}
+	if _, ok := s.findConsent("u1", "parent", "child"); !ok {
+		t.Fatal("approve must upsert a ConsentRecord")
+	}
+	// And GET /v1/consents/check now grants the approved scopes.
+	chk := postJSON(t, mux, "GET", "/v1/consents/check?userId=u1&parentType=parent&childType=child&scope=a&scope=b", nil)
+	var d registry.ConsentDecision
+	json.NewDecoder(chk.Body).Decode(&d)
+	if !d.Granted {
+		t.Fatalf("expected consent check granted after approve, got %+v", d)
+	}
+}
+
+func TestConsentBroker_IdempotentOpenRequest(t *testing.T) {
+	_, mux := consentBrokerMux(t)
+	payload := map[string]any{"userId": "u1", "parentType": "p", "childType": "c", "scopes": []string{"x"}}
+
+	r1 := postJSON(t, mux, "POST", "/v1/consent-requests", payload)
+	var c1 registry.ConsentRequest
+	json.NewDecoder(r1.Body).Decode(&c1)
+
+	r2 := postJSON(t, mux, "POST", "/v1/consent-requests", payload)
+	if r2.Code != http.StatusOK { // 200, not 201 — existing open request returned
+		t.Fatalf("second create: got %d, want 200 (existing open request)", r2.Code)
+	}
+	var c2 registry.ConsentRequest
+	json.NewDecoder(r2.Body).Decode(&c2)
+	if c1.ID != c2.ID {
+		t.Fatalf("expected same open request id, got %q and %q", c1.ID, c2.ID)
+	}
+}
+
+func TestConsentBroker_ShortCircuitWhenCovered(t *testing.T) {
+	s, mux := consentBrokerMux(t)
+	// Pre-existing consent covering the scopes.
+	s.upsertConsent(registry.ConsentRecord{UserID: "u1", ParentType: "p", ChildType: "c", Scopes: []string{"x", "y"}, GrantedAt: time.Now()})
+
+	rec := postJSON(t, mux, "POST", "/v1/consent-requests", map[string]any{
+		"userId": "u1", "parentType": "p", "childType": "c", "scopes": []string{"x"},
+	})
+	var cr registry.ConsentRequest
+	json.NewDecoder(rec.Body).Decode(&cr)
+	if cr.Status != registry.ConsentApproved {
+		t.Fatalf("expected immediate approval when covered, got %q", cr.Status)
+	}
+}
+
+func TestConsentBroker_DenyLeavesNoRecord(t *testing.T) {
+	s, mux := consentBrokerMux(t)
+	rec := postJSON(t, mux, "POST", "/v1/consent-requests", map[string]any{
+		"userId": "u1", "parentType": "p", "childType": "c", "scopes": []string{"x"},
+	})
+	var cr registry.ConsentRequest
+	json.NewDecoder(rec.Body).Decode(&cr)
+
+	rec2 := postJSON(t, mux, "POST", "/v1/consent-requests/"+cr.ID+"/deny", nil)
+	var denied registry.ConsentRequest
+	json.NewDecoder(rec2.Body).Decode(&denied)
+	if denied.Status != registry.ConsentDenied {
+		t.Fatalf("expected denied, got %q", denied.Status)
+	}
+	if _, ok := s.findConsent("u1", "p", "c"); ok {
+		t.Fatal("deny must not create a ConsentRecord")
+	}
+}
+
+func TestConsentBroker_ListPending(t *testing.T) {
+	_, mux := consentBrokerMux(t)
+	postJSON(t, mux, "POST", "/v1/consent-requests", map[string]any{"userId": "u1", "parentType": "p", "childType": "c", "scopes": []string{"x"}})
+
+	rec := postJSON(t, mux, "GET", "/v1/consent-requests?userId=u1&status=pending", nil)
+	var list []registry.ConsentRequest
+	json.NewDecoder(rec.Body).Decode(&list)
+	if len(list) != 1 || list[0].Status != registry.ConsentPending {
+		t.Fatalf("expected one pending request, got %+v", list)
+	}
+}
+
 func TestPostAndGetEvents(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, validator)
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator))
 
 	payload, _ := json.Marshal(map[string]string{"msg": "hello"})
 	evt := events.Event{
@@ -333,7 +613,7 @@ func TestGetEvents_EmptyReturnsArray(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, validator)
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator))
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/unknown-agent/events", nil))
@@ -359,7 +639,7 @@ func TestListAgents(t *testing.T) {
 	s.registerAgent(registry.AgentRecord{AgentID: "agent-b", AgentType: "worker", Status: "active"})
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, validator)
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator))
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents", nil))
@@ -418,7 +698,7 @@ func decodeDelegation(t *testing.T, mux *http.ServeMux, query string) struct {
 func TestDelegationPolicy_AllowedChild(t *testing.T) {
 	s := newStore()
 	s.putTemplate(parentTemplate())
-	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
 
 	resp := decodeDelegation(t, mux, "?parentType=parent-agent&childType=child-agent")
 	if !resp.Allowed {
@@ -435,7 +715,7 @@ func TestDelegationPolicy_AllowedChild(t *testing.T) {
 func TestDelegationPolicy_DisallowedChild(t *testing.T) {
 	s := newStore()
 	s.putTemplate(parentTemplate())
-	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
 
 	resp := decodeDelegation(t, mux, "?parentType=parent-agent&childType=worker")
 	if resp.Allowed {
@@ -451,7 +731,7 @@ func TestDelegationPolicy_DisallowedChild(t *testing.T) {
 
 func TestDelegationPolicy_MissingParentTemplate(t *testing.T) {
 	s := newStore()
-	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
 
 	resp := decodeDelegation(t, mux, "?parentType=does-not-exist&childType=child-agent")
 	if resp.Allowed {
@@ -468,7 +748,7 @@ func TestDelegationPolicy_MissingParentTemplate(t *testing.T) {
 func TestDelegationPolicy_NoDelegationConfig(t *testing.T) {
 	s := newStore()
 	s.putTemplate(workerTemplate()) // no delegation block
-	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
 
 	resp := decodeDelegation(t, mux, "?parentType=worker&childType=child-agent")
 	if resp.Allowed {
@@ -490,7 +770,7 @@ func TestAgentChain_MultiLevel(t *testing.T) {
 	s.registerAgent(registry.AgentRecord{AgentID: "agent-root", AgentType: "parent-agent", Status: "active"})
 	s.registerAgent(registry.AgentRecord{AgentID: "agent-mid", AgentType: "parent-agent", Status: "active", ParentID: "agent-root"})
 	s.registerAgent(registry.AgentRecord{AgentID: "agent-leaf", AgentType: "child-agent", Status: "active", ParentID: "agent-mid"})
-	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/agent-leaf/chain", nil))
@@ -519,7 +799,7 @@ func TestAgentChain_MissingParentStops(t *testing.T) {
 	s := newStore()
 	// parent record absent — chain should include only the resolvable node.
 	s.registerAgent(registry.AgentRecord{AgentID: "agent-orphan", AgentType: "child-agent", Status: "active", ParentID: "agent-gone"})
-	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/agent-orphan/chain", nil))
@@ -537,7 +817,7 @@ func TestAgentChain_CycleGuard(t *testing.T) {
 	s := newStore()
 	s.registerAgent(registry.AgentRecord{AgentID: "agent-a", AgentType: "x", Status: "active", ParentID: "agent-b"})
 	s.registerAgent(registry.AgentRecord{AgentID: "agent-b", AgentType: "x", Status: "active", ParentID: "agent-a"})
-	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/agent-a/chain", nil))
@@ -554,7 +834,7 @@ func TestAgentChain_CycleGuard(t *testing.T) {
 
 func TestAgentChain_UnknownAgent404(t *testing.T) {
 	s := newStore()
-	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/nope/chain", nil))
@@ -568,7 +848,7 @@ func TestSelfRegistrationEmitsEvents(t *testing.T) {
 	s.putTemplate(workerTemplate())
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/agent-emit"}
-	mux := buildMux(s, sdb, validator)
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator))
 
 	body, _ := json.Marshal(map[string]string{
 		"agentType": "worker",
@@ -620,7 +900,7 @@ func TestRevokeResume_AuthZ(t *testing.T) {
 	sdb := spicedb.NewMock()
 	sdb.WriteRelationship(t.Context(), "tenant:tenant-1", "agent", "agent:agent-test")
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, validator)
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator))
 
 	// revoke: status -> revoked, tuple removed
 	rec := httptest.NewRecorder()
@@ -690,8 +970,9 @@ func TestRevokeResume_Cascade(t *testing.T) {
 	for _, n := range chain {
 		s.registerAgent(registry.AgentRecord{AgentID: n.id, AgentType: "worker", TenantID: "tenant-1", Status: "active", ParentID: n.parent})
 		sdb.WriteRelationship(t.Context(), "tenant:tenant-1", "agent", "agent:"+n.id)
+		sdb.WriteRelationship(t.Context(), "agent:"+n.id, "enabled", "agent:"+n.id)
 	}
-	mux := buildMux(s, sdb, &spiffe.MockSVIDValidator{})
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
 
 	has := func(id string) bool {
 		ok, _ := sdb.CheckPermission(t.Context(), "tenant:tenant-1", "work_on", "agent:"+id)
@@ -767,9 +1048,10 @@ func TestRevokeCascade_PreservesTerminalDescendant(t *testing.T) {
 		s.registerAgent(registry.AgentRecord{AgentID: n.id, AgentType: "worker", TenantID: "tenant-1", Status: n.status, ParentID: n.parent})
 		if n.status == "active" {
 			sdb.WriteRelationship(t.Context(), "tenant:tenant-1", "agent", "agent:"+n.id)
+			sdb.WriteRelationship(t.Context(), "agent:"+n.id, "enabled", "agent:"+n.id)
 		}
 	}
-	mux := buildMux(s, sdb, &spiffe.MockSVIDValidator{})
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
 	has := func(id string) bool {
 		ok, _ := sdb.CheckPermission(t.Context(), "tenant:tenant-1", "work_on", "agent:"+id)
 		return ok
@@ -824,7 +1106,7 @@ func consentParentTemplate(ttl string) registry.AgentTemplate {
 func TestConsentLifecycle(t *testing.T) {
 	s := newStore()
 	s.putTemplate(consentParentTemplate("720h"))
-	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
 
 	check := func(scopes ...string) registry.ConsentDecision {
 		t.Helper()
@@ -908,7 +1190,7 @@ func TestConsentLifecycle(t *testing.T) {
 func TestConsentExpiryDerivedFromTemplateTTL(t *testing.T) {
 	s := newStore()
 	s.putTemplate(consentParentTemplate("1ns"))
-	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
 
 	body := `{"userId":"alice","parentType":"parent-agent","childType":"child-agent","scopes":["openid"]}`
 	rec := httptest.NewRecorder()
@@ -936,7 +1218,7 @@ func TestSpawnPolicy_ConsentRequired(t *testing.T) {
 	tpl.Delegation.AllowedChildTypes = []string{"child-agent", "other-agent"}
 	s.putTemplate(tpl)
 	s.registerAgent(registry.AgentRecord{AgentID: "parent-1", AgentType: "parent-agent", TenantID: "tenant-1"})
-	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
 
 	check := func(childType string) registry.SpawnDecision {
 		t.Helper()
@@ -967,7 +1249,7 @@ func TestRegister_RefusesToResurrectDroppedAuthority(t *testing.T) {
 			s.putTemplate(workerTemplate())
 			sdb := spicedb.NewMock()
 			validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/agent-dead"}
-			mux := buildMux(s, sdb, validator)
+			mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator))
 
 			s.registerAgent(registry.AgentRecord{
 				AgentID: "agent-dead", AgentType: "worker", UserID: "user-1", Status: status,
@@ -998,7 +1280,7 @@ func TestRegister_RefusesToResurrectDroppedAuthority(t *testing.T) {
 func TestConsentRevoke_ScopedToOwner(t *testing.T) {
 	s := newStore()
 	s.putTemplate(consentParentTemplate("720h"))
-	mux := buildMux(s, spicedb.NewMock(), &spiffe.MockSVIDValidator{})
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}))
 
 	body := `{"userId":"alice","parentType":"parent-agent","childType":"child-agent","scopes":["openid"]}`
 	rec := httptest.NewRecorder()

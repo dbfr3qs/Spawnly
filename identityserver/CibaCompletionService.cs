@@ -1,7 +1,7 @@
 using Duende.IdentityServer;
 using Duende.IdentityServer.Models;
 using Duende.IdentityServer.Services;
-using Duende.IdentityServer.Stores;
+using System.Collections.Concurrent;
 using System.Security.Claims;
 
 namespace IdentityServer;
@@ -9,28 +9,44 @@ namespace IdentityServer;
 /// <summary>
 /// The one place a pending CIBA request is completed. Approval consents to all
 /// requested scopes and — when the request carries a resolved spawn edge —
-/// records the grant in the registry so the next spawn of the same edge
-/// auto-approves. Denial completes with no consented scopes (Duende requires a
-/// Subject either way; the poll then returns access_denied).
+/// approves the corresponding registry consent request, which records the
+/// grant and sweeps other pending requests for the same edge. Denial
+/// completes with no consented scopes (Duende requires a Subject either way;
+/// the poll then returns access_denied) and denies the registry request.
 /// </summary>
 public class CibaCompletionService
 {
     private readonly IBackchannelAuthenticationInteractionService _interaction;
-    private readonly IBackChannelAuthenticationRequestStore _store;
     private readonly AgentRegistryClient _registry;
     private readonly ILogger<CibaCompletionService> _log;
 
+    // Maps a CIBA request's InternalId to the registry's ConsentRequest.ID,
+    // populated by CibaConsentNotificationService when it creates the registry
+    // request. Lets ApproveAsync/DenyAsync resolve which registry request to
+    // resolve without threading the id through Duende's request Properties.
+    // In-memory and best-effort: a process restart between request-creation
+    // and approval loses the mapping (the registry request remains pending
+    // and can still be resolved directly via the registry's own API/dashboard).
+    private readonly ConcurrentDictionary<string, string> _registryRequestIds = new();
+
     public CibaCompletionService(
         IBackchannelAuthenticationInteractionService interaction,
-        IBackChannelAuthenticationRequestStore store,
         AgentRegistryClient registry,
         ILogger<CibaCompletionService> log)
     {
         _interaction = interaction;
-        _store = store;
         _registry = registry;
         _log = log;
     }
+
+    /// <summary>
+    /// Records the registry's ConsentRequest.ID for a CIBA request's
+    /// InternalId, so a later ApproveAsync/DenyAsync can resolve it in the
+    /// registry. Called by CibaConsentNotificationService after it creates the
+    /// registry consent request.
+    /// </summary>
+    public void TrackConsentRequest(string internalId, string registryRequestId) =>
+        _registryRequestIds[internalId] = registryRequestId;
 
     /// <summary>Builds the principal a completion is signed with.</summary>
     public static ClaimsPrincipal SubjectFor(string userId) =>
@@ -62,67 +78,40 @@ public class CibaCompletionService
         if (recordConsent &&
             userId is { Length: > 0 } && parentType is { Length: > 0 } && childType is { Length: > 0 })
         {
-            if (!await _registry.RecordConsent(userId, parentType, childType, scopes))
+            if (!_registryRequestIds.TryGetValue(request.InternalId, out var registryRequestId))
+            {
+                // No registry consent request was tracked for this CIBA request
+                // (e.g. a dev/manual approval path that bypassed
+                // SendLoginRequestAsync). The approval stands (tokens will
+                // mint) but the registry's ConsentRecord is not updated, so
+                // the next spawn of this edge will prompt again.
+                _log.LogWarning(
+                    "consent approved but no registry consent request tracked for {UserId} {ParentType}->{ChildType}",
+                    userId, parentType, childType);
+                return true;
+            }
+            if (await _registry.ApproveConsentRequest(registryRequestId, scopes) is null)
             {
                 // The approval stands (tokens will mint) but the next spawn of
                 // this edge will prompt again instead of auto-approving.
                 _log.LogWarning(
-                    "consent approved but not recorded for {UserId} {ParentType}->{ChildType}",
-                    userId, parentType, childType);
+                    "consent approved but registry consent request {Id} not approved for {UserId} {ParentType}->{ChildType}",
+                    registryRequestId, userId, parentType, childType);
                 return false;
             }
-            await ResolvePendingForEdgeAsync(userId, parentType, childType, request.InternalId, subject);
+            _registryRequestIds.TryRemove(request.InternalId, out _);
         }
         return true;
     }
 
-    /// <summary>
-    /// Auto-completes any OTHER pending CIBA request for the same spawn edge once
-    /// a consent has just been recorded. A consent-gated chain spawns all its
-    /// links eagerly (spawning needs no token), so deeper links open their
-    /// backchannel requests before the human approves the first one — and the
-    /// notification hook only evaluates stored consent at request-creation time.
-    /// Without this sweep those requests stay pending until their CibaLifetime
-    /// lapses (~5 min), even though a covering consent now exists. Recording a
-    /// consent is the event that should release them, so we do it here — the
-    /// same decision the notification hook makes, applied to in-flight requests.
-    /// Best-effort: a failure here never fails the human's own approval.
-    /// </summary>
-    private async Task ResolvePendingForEdgeAsync(
-        string userId, string parentType, string childType,
-        string justCompletedId, ClaimsPrincipal subject)
+    public async Task DenyAsync(BackchannelUserLoginRequest request, ClaimsPrincipal subject)
     {
-        try
+        await _interaction.CompleteLoginRequestAsync(
+            new CompleteBackchannelLoginRequest(request.InternalId) { Subject = subject });
+
+        if (_registryRequestIds.TryRemove(request.InternalId, out var registryRequestId))
         {
-            var logins = await _store.GetLoginsForUserAsync(userId);
-            foreach (var stored in logins)
-            {
-                if (stored.IsComplete || stored.InternalId == justCompletedId) continue;
-                if (CibaRequestValidator.Property(stored.Properties, CibaRequestValidator.ParentTypeKey) != parentType ||
-                    CibaRequestValidator.Property(stored.Properties, CibaRequestValidator.ChildTypeKey) != childType)
-                    continue;
-
-                var pending = await _interaction.GetLoginRequestByInternalIdAsync(stored.InternalId);
-                if (pending is null) continue;
-
-                // Mirror the notification hook: only release scopes the consent covers.
-                var decision = await _registry.CheckConsent(
-                    userId, parentType, childType, pending.ValidatedResources.RawScopeValues);
-                if (decision?.Granted != true) continue;
-
-                await ApproveAsync(pending, subject, recordConsent: false);
-                _log.LogInformation(
-                    "CIBA released a pending request from the just-recorded consent: {UserId} {ParentType}->{ChildType}",
-                    userId, parentType, childType);
-            }
-        }
-        catch (Exception e)
-        {
-            _log.LogWarning("sweep of pending CIBA requests after consent record failed: {Error}", e.Message);
+            await _registry.DenyConsentRequest(registryRequestId);
         }
     }
-
-    public Task DenyAsync(BackchannelUserLoginRequest request, ClaimsPrincipal subject) =>
-        _interaction.CompleteLoginRequestAsync(
-            new CompleteBackchannelLoginRequest(request.InternalId) { Subject = subject });
 }
