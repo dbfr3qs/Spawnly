@@ -268,7 +268,7 @@ func (s *store) consentExpiry(parentType, childType string, from time.Time) *tim
 func (s *store) createConsentRequest(req registry.ConsentRequest) (registry.ConsentRequest, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	key := consentKey(req.UserID, req.ParentType, req.ChildType)
+	key := openRequestKey(req.UserID, req.ParentType, req.ChildType, req.AgentID)
 	if id, ok := s.openRequests[key]; ok {
 		if existing, ok := s.consentRequests[id]; ok && existing.Status == registry.ConsentPending {
 			return existing, false
@@ -283,6 +283,18 @@ func (s *store) createConsentRequest(req registry.ConsentRequest) (registry.Cons
 	s.consentRequests[req.ID] = req
 	s.openRequests[key] = req.ID
 	return req, true
+}
+
+// openRequestKey is the dedup key for an open (pending) consent request. It is
+// the specific waiting agent when known (so each consent-gated agent gets its
+// own correlatable request, and a retry from the same agent's sidecar dedupes),
+// falling back to the (user, parentType, childType) edge for callers that don't
+// identify an agent. Consent *grants* and the approve-sweep remain per-edge.
+func openRequestKey(userID, parentType, childType, agentID string) string {
+	if agentID != "" {
+		return "agent:" + agentID
+	}
+	return consentKey(userID, parentType, childType)
 }
 
 // createApprovedConsentRequest stores a request already resolved as approved —
@@ -369,13 +381,13 @@ func (s *store) resolveConsentRequest(id, userID string, approve bool, scopes []
 	if !approve {
 		cr.Status = registry.ConsentDenied
 		s.consentRequests[id] = cr
-		delete(s.openRequests, key)
+		delete(s.openRequests, openRequestKey(cr.UserID, cr.ParentType, cr.ChildType, cr.AgentID))
 		return cr, true
 	}
 
 	cr.Status = registry.ConsentApproved
 	s.consentRequests[id] = cr
-	delete(s.openRequests, key)
+	delete(s.openRequests, openRequestKey(cr.UserID, cr.ParentType, cr.ChildType, cr.AgentID))
 
 	granted := s.upsertConsentLocked(registry.ConsentRecord{
 		UserID: cr.UserID, ParentType: cr.ParentType, ChildType: cr.ChildType,
@@ -383,7 +395,8 @@ func (s *store) resolveConsentRequest(id, userID string, approve bool, scopes []
 	})
 
 	// Sweep: any other still-pending request for the same edge now covered by
-	// the grant is auto-approved too (mirrors CIBA's ResolvePendingForEdge).
+	// the grant is auto-approved too — so every other agent waiting on this same
+	// (user, parentType, childType) edge activates without its own prompt.
 	for rid, other := range s.consentRequests {
 		if rid == id || other.Status != registry.ConsentPending {
 			continue
@@ -395,6 +408,7 @@ func (s *store) resolveConsentRequest(id, userID string, approve bool, scopes []
 			other.Status = registry.ConsentApproved
 			other.ResolvedAt = &now
 			s.consentRequests[rid] = other
+			delete(s.openRequests, openRequestKey(other.UserID, other.ParentType, other.ChildType, other.AgentID))
 		}
 	}
 	return cr, true
@@ -1026,6 +1040,7 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 			UserID         string   `json:"userId"`
 			ParentType     string   `json:"parentType"`
 			ChildType      string   `json:"childType"`
+			AgentID        string   `json:"agentId"`
 			Scopes         []string `json:"scopes"`
 			BindingMessage string   `json:"bindingMessage"`
 			ExternalRef    string   `json:"externalRef"`
@@ -1040,7 +1055,7 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 		}
 		cr := registry.ConsentRequest{
 			UserID: req.UserID, ParentType: req.ParentType, ChildType: req.ChildType,
-			Scopes: req.Scopes, BindingMessage: req.BindingMessage, ExternalRef: req.ExternalRef,
+			AgentID: req.AgentID, Scopes: req.Scopes, BindingMessage: req.BindingMessage, ExternalRef: req.ExternalRef,
 		}
 
 		// Short-circuit: an existing covering consent means no human ask needed.

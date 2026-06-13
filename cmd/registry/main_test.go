@@ -544,6 +544,45 @@ func TestConsentBroker_DenyLeavesNoRecord(t *testing.T) {
 	}
 }
 
+// TestConsentBroker_PerAgentRequestsAndSweep verifies that two agents waiting on
+// the SAME edge each get their OWN consent request (so the dashboard can
+// correlate a prompt to a specific pending agent), and that approving one
+// sweeps the other to approved via the shared edge grant.
+func TestConsentBroker_PerAgentRequestsAndSweep(t *testing.T) {
+	_, mux := consentBrokerMux(t)
+	mk := func(agentID string) registry.ConsentRequest {
+		rec := postJSON(t, mux, "POST", "/v1/consent-requests", map[string]any{
+			"userId": "u1", "parentType": "p", "childType": "c", "agentId": agentID, "scopes": []string{"x"},
+		})
+		var cr registry.ConsentRequest
+		json.NewDecoder(rec.Body).Decode(&cr)
+		return cr
+	}
+	a := mk("agent-a")
+	b := mk("agent-b")
+	if a.ID == b.ID {
+		t.Fatal("two agents on the same edge must get distinct consent requests")
+	}
+	if a.AgentID != "agent-a" || b.AgentID != "agent-b" {
+		t.Fatalf("agentId not preserved: %q %q", a.AgentID, b.AgentID)
+	}
+
+	// Approving agent-a's request must sweep agent-b's to approved (same edge).
+	postJSON(t, mux, "POST", "/v1/consent-requests/"+a.ID+"/approve", nil)
+	got, _ := s2GetConsentRequest(t, mux, b.ID)
+	if got.Status != registry.ConsentApproved {
+		t.Fatalf("expected agent-b swept to approved, got %q", got.Status)
+	}
+}
+
+func s2GetConsentRequest(t *testing.T, mux http.Handler, id string) (registry.ConsentRequest, int) {
+	t.Helper()
+	rec := postJSON(t, mux, "GET", "/v1/consent-requests/"+id, nil)
+	var cr registry.ConsentRequest
+	json.NewDecoder(rec.Body).Decode(&cr)
+	return cr, rec.Code
+}
+
 func TestConsentBroker_ApproveScopedToUser(t *testing.T) {
 	s, mux := consentBrokerMux(t)
 	rec := postJSON(t, mux, "POST", "/v1/consent-requests", map[string]any{

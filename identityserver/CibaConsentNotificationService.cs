@@ -35,6 +35,7 @@ public class CibaConsentNotificationService : IBackchannelAuthenticationUserNoti
         var userId = CibaRequestValidator.Property(request.Properties, CibaRequestValidator.UserIdKey);
         var parentType = CibaRequestValidator.Property(request.Properties, CibaRequestValidator.ParentTypeKey);
         var childType = CibaRequestValidator.Property(request.Properties, CibaRequestValidator.ChildTypeKey);
+        var agentId = CibaRequestValidator.Property(request.Properties, CibaRequestValidator.AgentIdKey);
         var scopes = request.ValidatedResources.RawScopeValues;
 
         if (userId is not { Length: > 0 } || parentType is not { Length: > 0 } || childType is not { Length: > 0 })
@@ -45,7 +46,8 @@ public class CibaConsentNotificationService : IBackchannelAuthenticationUserNoti
         }
 
         var consentRequest = await _registry.CreateConsentRequest(
-            userId, parentType, childType, scopes, request.BindingMessage, externalRef: request.InternalId);
+            userId, parentType, childType, scopes, request.BindingMessage,
+            externalRef: request.InternalId, agentId: agentId);
         if (consentRequest is null)
         {
             _log.LogWarning(

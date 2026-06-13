@@ -102,7 +102,7 @@ public class AgentRegistryClient
     /// </summary>
     public async Task<ConsentRequest?> CreateConsentRequest(
         string userId, string parentType, string childType, IEnumerable<string> scopes,
-        string? bindingMessage, string? externalRef)
+        string? bindingMessage, string? externalRef, string? agentId = null)
     {
         try
         {
@@ -111,10 +111,26 @@ public class AgentRegistryClient
                 userId,
                 parentType,
                 childType,
+                agentId,
                 scopes = scopes.ToArray(),
                 bindingMessage,
                 externalRef,
             });
+            if (!resp.IsSuccessStatusCode) return null;
+            return await resp.Content.ReadFromJsonAsync<ConsentRequest>();
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Fetches a single consent request by id (used by the completion poller to
+    /// learn the registry's decision). Null when not found or unreachable.
+    /// </summary>
+    public async Task<ConsentRequest?> GetConsentRequest(string id)
+    {
+        try
+        {
+            var resp = await _http.GetAsync($"{_baseUrl}/v1/consent-requests/{id}");
             if (!resp.IsSuccessStatusCode) return null;
             return await resp.Content.ReadFromJsonAsync<ConsentRequest>();
         }
@@ -160,12 +176,13 @@ public class AgentRegistryClient
         [property: JsonPropertyName("reason")] string? Reason);
 
     // Registry JSON uses camelCase fields: id, userId, parentType, childType,
-    // scopes, bindingMessage, status, createdAt, resolvedAt, externalRef.
+    // agentId, scopes, bindingMessage, status, createdAt, resolvedAt, externalRef.
     public record ConsentRequest(
         [property: JsonPropertyName("id")] string Id,
         [property: JsonPropertyName("userId")] string UserId,
         [property: JsonPropertyName("parentType")] string ParentType,
         [property: JsonPropertyName("childType")] string ChildType,
+        [property: JsonPropertyName("agentId")] string? AgentId,
         [property: JsonPropertyName("scopes")] List<string>? Scopes,
         [property: JsonPropertyName("bindingMessage")] string? BindingMessage,
         [property: JsonPropertyName("status")] string Status,

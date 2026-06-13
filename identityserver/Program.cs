@@ -54,10 +54,14 @@ builder.Services.AddIdentityServer(options =>
 // CIBA consent plumbing: completion (approve/deny + consent recording) and the
 // notification hook that auto-approves from stored consent or leaves the
 // request pending for the dashboard (optionally pinging NOTIFIER_WEBHOOK_URL).
+builder.Services.AddSingleton<ConsentRequestTracker>();
 builder.Services.AddTransient<CibaCompletionService>();
 builder.Services.AddTransient<
     Duende.IdentityServer.Services.IBackchannelAuthenticationUserNotificationService,
     CibaConsentNotificationService>();
+// Bridges registry-owned consent decisions back to Duende: polls the registry
+// for each tracked pending CIBA request and completes/fails it on resolution.
+builder.Services.AddHostedService<ConsentCompletionPoller>();
 
 // Concrete default secret validator — SpireClientSecretValidator delegates to it
 // for non-SPIFFE (normal client_secret) requests, e.g. the dashboard's code flow.

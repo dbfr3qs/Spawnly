@@ -1,7 +1,6 @@
 using Duende.IdentityServer;
 using Duende.IdentityServer.Models;
 using Duende.IdentityServer.Services;
-using System.Collections.Concurrent;
 using System.Security.Claims;
 
 namespace IdentityServer;
@@ -18,35 +17,29 @@ public class CibaCompletionService
 {
     private readonly IBackchannelAuthenticationInteractionService _interaction;
     private readonly AgentRegistryClient _registry;
+    private readonly ConsentRequestTracker _tracker;
     private readonly ILogger<CibaCompletionService> _log;
-
-    // Maps a CIBA request's InternalId to the registry's ConsentRequest.ID,
-    // populated by CibaConsentNotificationService when it creates the registry
-    // request. Lets ApproveAsync/DenyAsync resolve which registry request to
-    // resolve without threading the id through Duende's request Properties.
-    // In-memory and best-effort: a process restart between request-creation
-    // and approval loses the mapping (the registry request remains pending
-    // and can still be resolved directly via the registry's own API/dashboard).
-    private readonly ConcurrentDictionary<string, string> _registryRequestIds = new();
 
     public CibaCompletionService(
         IBackchannelAuthenticationInteractionService interaction,
         AgentRegistryClient registry,
+        ConsentRequestTracker tracker,
         ILogger<CibaCompletionService> log)
     {
         _interaction = interaction;
         _registry = registry;
+        _tracker = tracker;
         _log = log;
     }
 
     /// <summary>
-    /// Records the registry's ConsentRequest.ID for a CIBA request's
-    /// InternalId, so a later ApproveAsync/DenyAsync can resolve it in the
-    /// registry. Called by CibaConsentNotificationService after it creates the
-    /// registry consent request.
+    /// Records the registry's ConsentRequest.ID for a CIBA request's InternalId
+    /// in the shared tracker, so the completion poller can resolve the Duende
+    /// request once the registry decides. Called by CibaConsentNotificationService
+    /// after it creates the registry consent request.
     /// </summary>
     public void TrackConsentRequest(string internalId, string registryRequestId) =>
-        _registryRequestIds[internalId] = registryRequestId;
+        _tracker.Track(internalId, registryRequestId);
 
     /// <summary>Builds the principal a completion is signed with.</summary>
     public static ClaimsPrincipal SubjectFor(string userId) =>
@@ -78,7 +71,7 @@ public class CibaCompletionService
         if (recordConsent &&
             userId is { Length: > 0 } && parentType is { Length: > 0 } && childType is { Length: > 0 })
         {
-            if (!_registryRequestIds.TryGetValue(request.InternalId, out var registryRequestId))
+            if (!_tracker.TryGet(request.InternalId, out var registryRequestId))
             {
                 // No registry consent request was tracked for this CIBA request
                 // (e.g. a dev/manual approval path that bypassed
@@ -99,7 +92,7 @@ public class CibaCompletionService
                     registryRequestId, userId, parentType, childType);
                 return false;
             }
-            _registryRequestIds.TryRemove(request.InternalId, out _);
+            _tracker.Untrack(request.InternalId);
         }
         return true;
     }
@@ -109,9 +102,10 @@ public class CibaCompletionService
         await _interaction.CompleteLoginRequestAsync(
             new CompleteBackchannelLoginRequest(request.InternalId) { Subject = subject });
 
-        if (_registryRequestIds.TryRemove(request.InternalId, out var registryRequestId))
+        if (_tracker.TryGet(request.InternalId, out var registryRequestId))
         {
             await _registry.DenyConsentRequest(registryRequestId);
+            _tracker.Untrack(request.InternalId);
         }
     }
 }

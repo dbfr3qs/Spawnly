@@ -48,10 +48,13 @@ const (
 // same (user, parentType, childType) edge as ConsentRecord; at most one open
 // (pending) request exists per edge.
 type ConsentRequest struct {
-	ID             string               `json:"id"`
-	UserID         string               `json:"userId"`
-	ParentType     string               `json:"parentType"`
-	ChildType      string               `json:"childType"`
+	ID         string `json:"id"`
+	UserID     string `json:"userId"`
+	ParentType string `json:"parentType"`
+	ChildType  string `json:"childType"`
+	// AgentID is the spawning child agent this request gates, when known. It
+	// lets the dashboard correlate the prompt to the specific pending agent.
+	AgentID        string               `json:"agentId,omitempty"`
 	Scopes         []string             `json:"scopes"`
 	BindingMessage string               `json:"bindingMessage,omitempty"`
 	Status         ConsentRequestStatus `json:"status"`
