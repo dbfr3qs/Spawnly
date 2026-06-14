@@ -122,18 +122,18 @@ func (s *store) getTemplate(agentType string) (registry.AgentTemplate, bool) {
 	return t, ok
 }
 
-// updateTemplateStatus sets Status on an existing template, returning whether
-// it was found.
-func (s *store) updateTemplateStatus(agentType, status string) bool {
+// updateTemplateStatus sets Status on an existing template, returning the
+// updated template and whether it was found.
+func (s *store) updateTemplateStatus(agentType, status string) (registry.AgentTemplate, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	t, ok := s.templates[agentType]
 	if !ok {
-		return false
+		return registry.AgentTemplate{}, false
 	}
 	t.Status = status
 	s.templates[agentType] = t
-	return true
+	return t, true
 }
 
 // deleteTemplate removes a template, returning whether one was found.
@@ -517,6 +517,18 @@ func storeErr(w http.ResponseWriter, err error) bool {
 	return false
 }
 
+// validAgentType guards the {type} segment of the template write routes, which
+// is extracted by trimming the path prefix. It rejects an empty segment (a bare
+// /v1/templates/ request) or one containing a slash (a nested path) with a 400,
+// so those land as an intentional bad request rather than an accidental 404.
+func validAgentType(w http.ResponseWriter, agentType string) bool {
+	if agentType == "" || strings.Contains(agentType, "/") {
+		http.Error(w, "invalid agent type", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
 func mustMarshal(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
@@ -653,6 +665,15 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// Reject an unrecognized status at creation time so a template can't be
+		// born with a junk value. Empty (treated as active) and the tolerated
+		// legacy "deprecated" are both allowed; PATCH is stricter (active/disabled).
+		switch t.Status {
+		case "", registry.TemplateStatusActive, registry.TemplateStatusDisabled, "deprecated":
+		default:
+			http.Error(w, "invalid status", http.StatusBadRequest)
+			return
+		}
 		// Reject a template whose relations don't conform to the active schema
 		// before storing it, so a mismatch is caught at registration time rather
 		// than silently failing every tuple write at agent-register time.
@@ -671,6 +692,9 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	// list and (in a separate orchestrator step) blocks new spawns.
 	mux.HandleFunc("PATCH /v1/templates/", cp(func(w http.ResponseWriter, r *http.Request) {
 		agentType := strings.TrimPrefix(r.URL.Path, "/v1/templates/")
+		if !validAgentType(w, agentType) {
+			return
+		}
 		var body struct {
 			Status string `json:"status"`
 		}
@@ -682,16 +706,12 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			http.Error(w, "invalid status", http.StatusBadRequest)
 			return
 		}
-		found, err := s.UpdateTemplateStatus(r.Context(), agentType, body.Status)
+		t, found, err := s.UpdateTemplateStatus(r.Context(), agentType, body.Status)
 		if storeErr(w, err) {
 			return
 		}
 		if !found {
 			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		t, _, err := s.GetTemplate(r.Context(), agentType)
-		if storeErr(w, err) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -702,6 +722,9 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	// disabled, so a spawnable template can't be deleted out from under live spawns.
 	mux.HandleFunc("DELETE /v1/templates/", cp(func(w http.ResponseWriter, r *http.Request) {
 		agentType := strings.TrimPrefix(r.URL.Path, "/v1/templates/")
+		if !validAgentType(w, agentType) {
+			return
+		}
 		t, ok, err := s.GetTemplate(r.Context(), agentType)
 		if storeErr(w, err) {
 			return

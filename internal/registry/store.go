@@ -29,9 +29,9 @@ type Store interface {
 	// ListTemplateTypes returns only the spawnable set — it EXCLUDES templates
 	// whose Status is "disabled".
 	ListTemplateTypes(ctx context.Context) ([]string, error)
-	// UpdateTemplateStatus sets the Status of an existing template, reporting
-	// whether the template was found (mirrors UpdateAgentStatus's convention).
-	UpdateTemplateStatus(ctx context.Context, agentType, status string) (bool, error)
+	// UpdateTemplateStatus sets the Status of an existing template, returning the
+	// updated template and whether it was found.
+	UpdateTemplateStatus(ctx context.Context, agentType, status string) (AgentTemplate, bool, error)
 	// DeleteTemplate removes a template, reporting whether one was found.
 	DeleteTemplate(ctx context.Context, agentType string) (bool, error)
 

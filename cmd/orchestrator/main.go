@@ -414,36 +414,14 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	// registry then enforces nothing). Built once; the oidc source auto-refreshes.
 	controlPlaneBearer := controlPlaneBearerSource()
 
-	// forwardToRegistry relays a bodyless request to the registry (which owns
-	// agent lineage, templates, and consents) and copies back the registry's
-	// status and JSON body. path builds the registry path from the inbound
-	// request (path values, query string).
+	// forwardToRegistry relays a request to the registry (which owns agent
+	// lineage, templates, and consents) and copies back the registry's status,
+	// Content-Type, and body. It streams the inbound body through (empty for the
+	// bodyless GET/POST/DELETE callers) and forwards the inbound Content-Type
+	// when present, so it serves both the read passthroughs and the body-carrying
+	// template create/update routes. path builds the registry path from the
+	// inbound request (path values, query string).
 	forwardToRegistry := func(method string, path func(r *http.Request) string) http.HandlerFunc {
-		return func(w http.ResponseWriter, r *http.Request) {
-			req2, err := http.NewRequestWithContext(r.Context(), method, registryURL+path(r), nil)
-			if err != nil {
-				http.Error(w, "internal error", http.StatusInternalServerError)
-				return
-			}
-			if t := controlPlaneBearer(); t != "" {
-				req2.Header.Set("Authorization", "Bearer "+t)
-			}
-			resp, err := http.DefaultClient.Do(req2)
-			if err != nil {
-				http.Error(w, "registry unavailable", http.StatusBadGateway)
-				return
-			}
-			defer resp.Body.Close()
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(resp.StatusCode)
-			io.Copy(w, resp.Body)
-		}
-	}
-	// forwardToRegistryWithBody is forwardToRegistry's body-carrying sibling: it
-	// streams the inbound request body through to the registry, copies the
-	// inbound Content-Type, sets the same control-plane bearer, and relays back
-	// the registry's status code and body. Used for template create/update.
-	forwardToRegistryWithBody := func(method string, path func(r *http.Request) string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			req2, err := http.NewRequestWithContext(r.Context(), method, registryURL+path(r), r.Body)
 			if err != nil {
@@ -462,7 +440,11 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 				return
 			}
 			defer resp.Body.Close()
-			w.Header().Set("Content-Type", "application/json")
+			// Relay the registry's Content-Type so error bodies (text/plain from
+			// http.Error) aren't mislabeled as JSON.
+			if ct := resp.Header.Get("Content-Type"); ct != "" {
+				w.Header().Set("Content-Type", ct)
+			}
 			w.WriteHeader(resp.StatusCode)
 			io.Copy(w, resp.Body)
 		}
@@ -486,11 +468,12 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		return "/v1/templates"
 	}))
 	// Template management (control-plane-auth'd at the registry): create, update
-	// status, and delete. Create/update carry a body; delete is bodyless.
-	mux.HandleFunc("POST /v1/templates", forwardToRegistryWithBody("POST", func(*http.Request) string {
+	// status, and delete. forwardToRegistry streams the body through, so the
+	// body-carrying create/update and the bodyless delete all use it.
+	mux.HandleFunc("POST /v1/templates", forwardToRegistry("POST", func(*http.Request) string {
 		return "/v1/templates"
 	}))
-	mux.HandleFunc("PATCH /v1/templates/{agentType}", forwardToRegistryWithBody("PATCH", func(r *http.Request) string {
+	mux.HandleFunc("PATCH /v1/templates/{agentType}", forwardToRegistry("PATCH", func(r *http.Request) string {
 		return "/v1/templates/" + r.PathValue("agentType")
 	}))
 	mux.HandleFunc("DELETE /v1/templates/{agentType}", forwardToRegistry("DELETE", func(r *http.Request) string {

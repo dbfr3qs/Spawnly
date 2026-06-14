@@ -114,6 +114,32 @@ func TestPatchTemplateStatus(t *testing.T) {
 	if rec := patch("nope", registry.TemplateStatusActive); rec.Code != http.StatusNotFound {
 		t.Fatalf("patch unknown: got %d, want 404", rec.Code)
 	}
+
+	// 400 on a malformed {type} segment: empty (bare path) or slash-bearing.
+	if rec := patch("", registry.TemplateStatusActive); rec.Code != http.StatusBadRequest {
+		t.Fatalf("patch empty type: got %d, want 400", rec.Code)
+	}
+	if rec := patch("a/b", registry.TemplateStatusActive); rec.Code != http.StatusBadRequest {
+		t.Fatalf("patch slash type: got %d, want 400", rec.Code)
+	}
+}
+
+// TestCreateTemplateInvalidStatus asserts POST rejects an unrecognized status
+// value (empty and the tolerated "deprecated" stay allowed via TestTemplateCRUD).
+func TestCreateTemplateInvalidStatus(t *testing.T) {
+	s := newStore()
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{}
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+
+	tpl := workerTemplate()
+	tpl.Status = "bogus"
+	body, _ := json.Marshal(tpl)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/templates", bytes.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("create invalid status: got %d, want 400", rec.Code)
+	}
 }
 
 func TestDisabledTemplateHiddenFromList(t *testing.T) {

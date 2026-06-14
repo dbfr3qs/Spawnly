@@ -45,8 +45,9 @@ func (s *store) ListTemplateTypes(_ context.Context) ([]string, error) {
 	return out, nil
 }
 
-func (s *store) UpdateTemplateStatus(_ context.Context, agentType, status string) (bool, error) {
-	return s.updateTemplateStatus(agentType, status), nil
+func (s *store) UpdateTemplateStatus(_ context.Context, agentType, status string) (registry.AgentTemplate, bool, error) {
+	t, ok := s.updateTemplateStatus(agentType, status)
+	return t, ok, nil
 }
 
 func (s *store) DeleteTemplate(_ context.Context, agentType string) (bool, error) {
