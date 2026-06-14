@@ -122,6 +122,31 @@ func (s *store) getTemplate(agentType string) (registry.AgentTemplate, bool) {
 	return t, ok
 }
 
+// updateTemplateStatus sets Status on an existing template, returning whether
+// it was found.
+func (s *store) updateTemplateStatus(agentType, status string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.templates[agentType]
+	if !ok {
+		return false
+	}
+	t.Status = status
+	s.templates[agentType] = t
+	return true
+}
+
+// deleteTemplate removes a template, returning whether one was found.
+func (s *store) deleteTemplate(agentType string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.templates[agentType]; !ok {
+		return false
+	}
+	delete(s.templates, agentType)
+	return true
+}
+
 func (s *store) registerAgent(r registry.AgentRecord) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -619,7 +644,10 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	// handleCP registers a consent-lifecycle handler behind the control-plane check.
 	handleCP := func(pattern string, h http.HandlerFunc) { mux.HandleFunc(pattern, cp(h)) }
 
-	mux.HandleFunc("POST /v1/templates", func(w http.ResponseWriter, r *http.Request) {
+	// Template management (create/disable/delete) is a control-plane operation,
+	// so it sits behind the same control-plane authenticator as the consent
+	// lifecycle. Under the default AllowAll authenticator it runs open.
+	mux.HandleFunc("POST /v1/templates", cp(func(w http.ResponseWriter, r *http.Request) {
 		var t registry.AgentTemplate
 		if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -636,7 +664,61 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
-	})
+	}))
+
+	// PATCH /v1/templates/{type} — set a template's status. Only "active" and
+	// "disabled" are accepted; "disabled" hides the template from the spawnable
+	// list and (in a separate orchestrator step) blocks new spawns.
+	mux.HandleFunc("PATCH /v1/templates/", cp(func(w http.ResponseWriter, r *http.Request) {
+		agentType := strings.TrimPrefix(r.URL.Path, "/v1/templates/")
+		var body struct {
+			Status string `json:"status"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if body.Status != registry.TemplateStatusActive && body.Status != registry.TemplateStatusDisabled {
+			http.Error(w, "invalid status", http.StatusBadRequest)
+			return
+		}
+		found, err := s.UpdateTemplateStatus(r.Context(), agentType, body.Status)
+		if storeErr(w, err) {
+			return
+		}
+		if !found {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		t, _, err := s.GetTemplate(r.Context(), agentType)
+		if storeErr(w, err) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(t)
+	}))
+
+	// DELETE /v1/templates/{type} — remove a template, but only once it has been
+	// disabled, so a spawnable template can't be deleted out from under live spawns.
+	mux.HandleFunc("DELETE /v1/templates/", cp(func(w http.ResponseWriter, r *http.Request) {
+		agentType := strings.TrimPrefix(r.URL.Path, "/v1/templates/")
+		t, ok, err := s.GetTemplate(r.Context(), agentType)
+		if storeErr(w, err) {
+			return
+		}
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if t.Status != registry.TemplateStatusDisabled {
+			http.Error(w, "template must be disabled before deletion", http.StatusConflict)
+			return
+		}
+		if _, err := s.DeleteTemplate(r.Context(), agentType); storeErr(w, err) {
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
 
 	// Returns the active SpiceDB schema the registry applied on boot, its
 	// version, and whether it's the embedded default or an override. Public

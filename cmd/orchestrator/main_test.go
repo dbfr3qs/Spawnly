@@ -323,6 +323,57 @@ func TestSpawnTenantPresenceGuard(t *testing.T) {
 	}
 }
 
+// TestSpawnDisabledTemplateRejected asserts the spawn gate rejects a spawn whose
+// target template is disabled with 409 and creates no AgentWorkload.
+func TestSpawnDisabledTemplateRejected(t *testing.T) {
+	mockReg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/events"):
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents":
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte("[]"))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/templates/"):
+			w.Header().Set("Content-Type", "application/json")
+			tpl := registry.AgentTemplate{
+				AgentType: "worker",
+				Version:   "1.0.0",
+				Status:    registry.TemplateStatusDisabled,
+				Meta:      registry.TemplateMeta{DisplayName: "Worker", Description: "Test"},
+				Runtime:   registry.RuntimeSpec{Image: "agent-go-worker:latest", EnvDefaults: map[string]string{}},
+				AuthZ:     registry.AuthZSpec{SpiceDBRelations: []registry.SpiceDBRelationTemplate{}},
+			}
+			json.NewEncoder(w).Encode(tpl)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	sdb := spicedb.NewMock()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+
+	body, _ := json.Marshal(SpawnRequest{
+		AgentType: "worker",
+		UserID:    "user-1",
+		TenantID:  "tenant-1",
+	})
+	req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("got %d, want 409 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var list agentv1alpha1.AgentWorkloadList
+	fakeClient.List(context.Background(), &list)
+	if len(list.Items) != 0 {
+		t.Fatalf("expected 0 AgentWorkloads after disabled-template spawn, got %d", len(list.Items))
+	}
+}
+
 func TestSpawnDefaultAgentType(t *testing.T) {
 	mockReg := defaultMockRegistry(t)
 	defer mockReg.Close()

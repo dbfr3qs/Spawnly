@@ -161,6 +161,19 @@ func main() {
 		proxy("POST", orchestratorURL+"/v1/agents/"+id+"/resume")(w, r)
 	})))
 	mux.Handle("GET /api/templates", auth.require(proxy("GET", orchestratorURL+"/v1/templates")))
+	// Template management — forward to the orchestrator (which forwards to the
+	// registry). POST/PATCH carry a JSON body; the proxy helper forwards method
+	// and body verbatim. PATCH/DELETE build the target per-request from the
+	// {agentType} path param (Go 1.22 mux), mirroring the /api/agents/{id} routes.
+	mux.Handle("POST /api/templates", auth.require(proxy("POST", orchestratorURL+"/v1/templates")))
+	mux.Handle("PATCH /api/templates/{agentType}", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		agentType := r.PathValue("agentType")
+		proxy("PATCH", orchestratorURL+"/v1/templates/"+agentType)(w, r)
+	})))
+	mux.Handle("DELETE /api/templates/{agentType}", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		agentType := r.PathValue("agentType")
+		proxy("DELETE", orchestratorURL+"/v1/templates/"+agentType)(w, r)
+	})))
 
 	// Stored spawn consents (management view). Scoped server-side to the
 	// session user — the browser cannot list or revoke another user's grants.

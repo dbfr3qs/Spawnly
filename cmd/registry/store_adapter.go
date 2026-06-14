@@ -30,14 +30,27 @@ func (s *store) GetTemplate(_ context.Context, agentType string) (registry.Agent
 	return t, ok, nil
 }
 
+// ListTemplateTypes returns the spawnable set: it skips templates whose Status
+// is "disabled" so a disabled type never appears in GET /v1/templates.
 func (s *store) ListTemplateTypes(_ context.Context) ([]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]string, 0, len(s.templates))
-	for k := range s.templates {
+	for k, t := range s.templates {
+		if t.Status == registry.TemplateStatusDisabled {
+			continue
+		}
 		out = append(out, k)
 	}
 	return out, nil
+}
+
+func (s *store) UpdateTemplateStatus(_ context.Context, agentType, status string) (bool, error) {
+	return s.updateTemplateStatus(agentType, status), nil
+}
+
+func (s *store) DeleteTemplate(_ context.Context, agentType string) (bool, error) {
+	return s.deleteTemplate(agentType), nil
 }
 
 func (s *store) ValidateTemplate(t registry.AgentTemplate) error {

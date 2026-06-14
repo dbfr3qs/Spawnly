@@ -1,10 +1,20 @@
 // internal/registry/types.go
 package registry
 
+// Template status values. An empty Status is treated as active/spawnable.
+// "deprecated" is tolerated for backward compatibility but never enforced.
+const (
+	TemplateStatusActive   = "active"
+	TemplateStatusDisabled = "disabled"
+)
+
 type AgentTemplate struct {
-	AgentType  string           `json:"agentType"`
-	Version    string           `json:"version"`
-	Status     string           `json:"status"` // active | deprecated
+	AgentType string `json:"agentType"`
+	Version   string `json:"version"`
+	// Status gates instantiation. "disabled" blocks new instantiations and
+	// hides the template from the spawnable list; an empty value is treated as
+	// active/spawnable; "deprecated" is tolerated but not enforced.
+	Status     string           `json:"status"`
 	Meta       TemplateMeta     `json:"meta"`
 	Runtime    RuntimeSpec      `json:"runtimeSpec"`
 	AuthZ      AuthZSpec        `json:"authzTemplate"`

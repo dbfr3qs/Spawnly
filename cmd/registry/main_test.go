@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -53,6 +54,141 @@ func TestTemplateCRUD(t *testing.T) {
 	json.NewDecoder(rec2.Body).Decode(&got)
 	if got.Runtime.Image != "agent-go-worker:latest" {
 		t.Fatalf("unexpected image: %q", got.Runtime.Image)
+	}
+}
+
+// seedWorker POSTs the worker template and fails the test if creation didn't 201.
+func seedWorker(t *testing.T, mux http.Handler) {
+	t.Helper()
+	body, _ := json.Marshal(workerTemplate())
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/templates", bytes.NewReader(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("seed worker: got %d, want 201", rec.Code)
+	}
+}
+
+func listTemplateTypes(t *testing.T, mux http.Handler) []string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/templates", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list templates: got %d, want 200", rec.Code)
+	}
+	var types []string
+	json.NewDecoder(rec.Body).Decode(&types)
+	return types
+}
+
+func TestPatchTemplateStatus(t *testing.T) {
+	s := newStore()
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{}
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	seedWorker(t, mux)
+
+	patch := func(agentType, status string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]string{"status": status})
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("PATCH", "/v1/templates/"+agentType, bytes.NewReader(body)))
+		return rec
+	}
+
+	// 200 on an existing type, response carries the updated template.
+	rec := patch("worker", registry.TemplateStatusDisabled)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch disabled: got %d, want 200", rec.Code)
+	}
+	var got registry.AgentTemplate
+	json.NewDecoder(rec.Body).Decode(&got)
+	if got.Status != registry.TemplateStatusDisabled {
+		t.Fatalf("patched status: got %q, want disabled", got.Status)
+	}
+
+	// 400 on an invalid status value.
+	if rec := patch("worker", "bogus"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("patch invalid status: got %d, want 400", rec.Code)
+	}
+
+	// 404 on an unknown type.
+	if rec := patch("nope", registry.TemplateStatusActive); rec.Code != http.StatusNotFound {
+		t.Fatalf("patch unknown: got %d, want 404", rec.Code)
+	}
+}
+
+func TestDisabledTemplateHiddenFromList(t *testing.T) {
+	s := newStore()
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{}
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	seedWorker(t, mux)
+
+	// Visible while active.
+	if !slices.Contains(listTemplateTypes(t, mux), "worker") {
+		t.Fatalf("worker should be listed while active")
+	}
+
+	// Disable it.
+	body, _ := json.Marshal(map[string]string{"status": registry.TemplateStatusDisabled})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("PATCH", "/v1/templates/worker", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable worker: got %d, want 200", rec.Code)
+	}
+
+	// Gone from the list filter.
+	if slices.Contains(listTemplateTypes(t, mux), "worker") {
+		t.Fatalf("disabled worker should not be listed")
+	}
+
+	// But still fetchable by type, with Status==disabled.
+	recGet := httptest.NewRecorder()
+	mux.ServeHTTP(recGet, httptest.NewRequest("GET", "/v1/templates/worker", nil))
+	if recGet.Code != http.StatusOK {
+		t.Fatalf("get disabled worker: got %d, want 200", recGet.Code)
+	}
+	var got registry.AgentTemplate
+	json.NewDecoder(recGet.Body).Decode(&got)
+	if got.Status != registry.TemplateStatusDisabled {
+		t.Fatalf("get disabled worker status: got %q, want disabled", got.Status)
+	}
+}
+
+func TestDeleteTemplateGuarded(t *testing.T) {
+	s := newStore()
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{}
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	seedWorker(t, mux)
+
+	del := func(agentType string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("DELETE", "/v1/templates/"+agentType, nil))
+		return rec
+	}
+
+	// 409 while active (must be disabled first).
+	if rec := del("worker"); rec.Code != http.StatusConflict {
+		t.Fatalf("delete active: got %d, want 409", rec.Code)
+	}
+
+	// Disable, then 204.
+	body, _ := json.Marshal(map[string]string{"status": registry.TemplateStatusDisabled})
+	recP := httptest.NewRecorder()
+	mux.ServeHTTP(recP, httptest.NewRequest("PATCH", "/v1/templates/worker", bytes.NewReader(body)))
+	if recP.Code != http.StatusOK {
+		t.Fatalf("disable worker: got %d, want 200", recP.Code)
+	}
+	if rec := del("worker"); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete disabled: got %d, want 204", rec.Code)
+	}
+
+	// 404 on a second delete (now gone) and on an unknown type.
+	if rec := del("worker"); rec.Code != http.StatusNotFound {
+		t.Fatalf("delete gone: got %d, want 404", rec.Code)
+	}
+	if rec := del("nope"); rec.Code != http.StatusNotFound {
+		t.Fatalf("delete unknown: got %d, want 404", rec.Code)
 	}
 }
 

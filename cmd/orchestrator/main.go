@@ -153,6 +153,13 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			http.Error(w, "unknown agent type", http.StatusBadRequest)
 			return
 		}
+		// A disabled template blocks all new instantiations. This gate covers both
+		// top-level and agent-initiated spawns, since both fetch the target
+		// template here, and runs before any tenant/lifecycle/consent logic.
+		if tpl.Status == registry.TemplateStatusDisabled {
+			http.Error(w, "agent type is disabled", http.StatusConflict)
+			return
+		}
 		// Tenant-ness is derived from the presence of a tenant id; a tenant id is
 		// only mandatory when the template explicitly requires one.
 		if tpl.RequiresTenant && req.TenantID == "" {
@@ -432,6 +439,34 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			io.Copy(w, resp.Body)
 		}
 	}
+	// forwardToRegistryWithBody is forwardToRegistry's body-carrying sibling: it
+	// streams the inbound request body through to the registry, copies the
+	// inbound Content-Type, sets the same control-plane bearer, and relays back
+	// the registry's status code and body. Used for template create/update.
+	forwardToRegistryWithBody := func(method string, path func(r *http.Request) string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			req2, err := http.NewRequestWithContext(r.Context(), method, registryURL+path(r), r.Body)
+			if err != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			if ct := r.Header.Get("Content-Type"); ct != "" {
+				req2.Header.Set("Content-Type", ct)
+			}
+			if t := controlPlaneBearer(); t != "" {
+				req2.Header.Set("Authorization", "Bearer "+t)
+			}
+			resp, err := http.DefaultClient.Do(req2)
+			if err != nil {
+				http.Error(w, "registry unavailable", http.StatusBadGateway)
+				return
+			}
+			defer resp.Body.Close()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(resp.StatusCode)
+			io.Copy(w, resp.Body)
+		}
+	}
 	withQuery := func(path string, r *http.Request) string {
 		if r.URL.RawQuery != "" {
 			return path + "?" + r.URL.RawQuery
@@ -449,6 +484,17 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	mux.HandleFunc("GET /v1/templates", forwardToRegistry("GET", func(*http.Request) string {
 		return "/v1/templates"
+	}))
+	// Template management (control-plane-auth'd at the registry): create, update
+	// status, and delete. Create/update carry a body; delete is bodyless.
+	mux.HandleFunc("POST /v1/templates", forwardToRegistryWithBody("POST", func(*http.Request) string {
+		return "/v1/templates"
+	}))
+	mux.HandleFunc("PATCH /v1/templates/{agentType}", forwardToRegistryWithBody("PATCH", func(r *http.Request) string {
+		return "/v1/templates/" + r.PathValue("agentType")
+	}))
+	mux.HandleFunc("DELETE /v1/templates/{agentType}", forwardToRegistry("DELETE", func(r *http.Request) string {
+		return "/v1/templates/" + r.PathValue("agentType")
 	}))
 
 	// Stored spawn consents: registry passthroughs for the dashboard's consent

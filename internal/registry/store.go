@@ -26,7 +26,14 @@ type Store interface {
 	// Templates — point access keyed by agentType.
 	PutTemplate(ctx context.Context, t AgentTemplate) error
 	GetTemplate(ctx context.Context, agentType string) (AgentTemplate, bool, error)
+	// ListTemplateTypes returns only the spawnable set — it EXCLUDES templates
+	// whose Status is "disabled".
 	ListTemplateTypes(ctx context.Context) ([]string, error)
+	// UpdateTemplateStatus sets the Status of an existing template, reporting
+	// whether the template was found (mirrors UpdateAgentStatus's convention).
+	UpdateTemplateStatus(ctx context.Context, agentType, status string) (bool, error)
+	// DeleteTemplate removes a template, reporting whether one was found.
+	DeleteTemplate(ctx context.Context, agentType string) (bool, error)
 
 	// Schema — the active SpiceDB schema the registry applied on boot, used to
 	// validate templates and serve GET /v1/schema. (Config, co-located here so
