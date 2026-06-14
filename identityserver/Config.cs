@@ -30,6 +30,10 @@ public static class Config
             new ApiScope("sample-api-a:write", "Write sample-api-a"),
             new ApiScope("sample-api-b:read", "Read sample-api-b"),
             new ApiScope("sample-api-b:write", "Write sample-api-b"),
+            // Control-plane scope: the orchestrator and the IdP's own CIBA driver
+            // present a client-credentials token carrying this scope to call the
+            // registry's consent endpoints when CONTROL_PLANE_AUTH=oidc.
+            new ApiScope("registry.consent", "Registry consent broker"),
         };
 
     // ApiResources give the access token its audience (`aud`): the resource name is
@@ -44,6 +48,12 @@ public static class Config
             new ApiResource("sample-api-b", "Sample API B")
             {
                 Scopes = { "sample-api-b:read", "sample-api-b:write" },
+            },
+            // Gives control-plane tokens the audience the registry validates
+            // (CONTROL_PLANE_OIDC_AUDIENCE, default "registry").
+            new ApiResource("registry", "Agent Registry")
+            {
+                Scopes = { "registry.consent" },
             },
         };
 
@@ -73,6 +83,44 @@ public static class Config
                 RedirectUris = { $"{DashboardOrigin}/callback" },
                 PostLogoutRedirectUris = { $"{DashboardOrigin}/" },
                 AllowedScopes = { "openid", "profile" },
+            },
+            // Control-plane clients (CONTROL_PLANE_AUTH=oidc). Unlike the agent
+            // clients above — authenticated via SPIFFE JWT-SVID with a
+            // "placeholder" secret — these are platform services authenticating
+            // with a real client_secret (validated by Duende's default
+            // validator), so they can mint a client-credentials token for the
+            // registry's consent endpoints. Inert unless the registry is run
+            // with CONTROL_PLANE_AUTH=oidc; the local demo leaves it "none".
+            new Client
+            {
+                ClientId = "orchestrator",
+                ClientName = "Spawnly Orchestrator",
+                AllowedGrantTypes = GrantTypes.ClientCredentials,
+                RequireClientSecret = true,
+                ClientSecrets =
+                {
+                    new Secret(
+                        (Environment.GetEnvironmentVariable("ORCHESTRATOR_CLIENT_SECRET") ?? "orchestrator-secret")
+                            .Sha256()),
+                },
+                AllowedScopes = { "registry.consent" },
+            },
+            new Client
+            {
+                // The IdP's CIBA driver (AgentRegistryClient) calling the
+                // registry's consent endpoints — IdentityServer acting as a
+                // client of itself.
+                ClientId = "idp-consent",
+                ClientName = "Spawnly IdP Consent Driver",
+                AllowedGrantTypes = GrantTypes.ClientCredentials,
+                RequireClientSecret = true,
+                ClientSecrets =
+                {
+                    new Secret(
+                        (Environment.GetEnvironmentVariable("IDP_CONSENT_CLIENT_SECRET") ?? "idp-consent-secret")
+                            .Sha256()),
+                },
+                AllowedScopes = { "registry.consent" },
             },
             new Client
             {

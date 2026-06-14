@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/oauth2/clientcredentials"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -400,6 +401,12 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		w.WriteHeader(resp.StatusCode)
 	})
 
+	// controlPlaneBearer yields the bearer the orchestrator (a trusted
+	// control-plane caller) presents on every forwarded consent request. Its
+	// shape follows CONTROL_PLANE_AUTH and is empty in the local demo (the
+	// registry then enforces nothing). Built once; the oidc source auto-refreshes.
+	controlPlaneBearer := controlPlaneBearerSource()
+
 	// forwardToRegistry relays a bodyless request to the registry (which owns
 	// agent lineage, templates, and consents) and copies back the registry's
 	// status and JSON body. path builds the registry path from the inbound
@@ -410,6 +417,9 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			if err != nil {
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
+			}
+			if t := controlPlaneBearer(); t != "" {
+				req2.Header.Set("Authorization", "Bearer "+t)
 			}
 			resp, err := http.DefaultClient.Do(req2)
 			if err != nil {
@@ -519,6 +529,75 @@ func init() {
 	utilruntime.Must(agentv1alpha1.AddToScheme(scheme))
 }
 
+// controlPlaneBearerSource returns a function yielding the current bearer the
+// orchestrator presents to the registry's consent endpoints, selected by
+// CONTROL_PLANE_AUTH (must match the registry's setting):
+//
+//	none/unset    -> "" (no header; the registry runs consent open)
+//	shared-secret -> the static CONTROL_PLANE_TOKEN
+//	oidc          -> a client-credentials access token, fetched and refreshed
+//	                 automatically by the oauth2 TokenSource
+func controlPlaneBearerSource() func() string {
+	switch v := os.Getenv("CONTROL_PLANE_AUTH"); v {
+	case "", "none":
+		return func() string { return "" }
+	case "shared-secret":
+		token := os.Getenv("CONTROL_PLANE_TOKEN")
+		if token == "" {
+			log.Fatalf("CONTROL_PLANE_TOKEN required when CONTROL_PLANE_AUTH=shared-secret")
+		}
+		return func() string { return token }
+	case "oidc":
+		scope := os.Getenv("CONTROL_PLANE_SCOPE")
+		if scope == "" {
+			scope = "registry.consent"
+		}
+		cfg := clientcredentials.Config{
+			ClientID:     os.Getenv("CONTROL_PLANE_CLIENT_ID"),
+			ClientSecret: os.Getenv("CONTROL_PLANE_CLIENT_SECRET"),
+			TokenURL:     os.Getenv("CONTROL_PLANE_TOKEN_URL"),
+			Scopes:       strings.Fields(scope),
+		}
+		if cfg.ClientID == "" || cfg.TokenURL == "" {
+			log.Fatalf("CONTROL_PLANE_CLIENT_ID and CONTROL_PLANE_TOKEN_URL required when CONTROL_PLANE_AUTH=oidc")
+		}
+		ts := cfg.TokenSource(context.Background())
+		return func() string {
+			tok, err := ts.Token()
+			if err != nil {
+				log.Printf("control-plane token fetch failed: %v", err)
+				return ""
+			}
+			return tok.AccessToken
+		}
+	default:
+		log.Fatalf("unknown CONTROL_PLANE_AUTH %q", v)
+		return nil // unreachable
+	}
+}
+
+// waitForRegistrySchema blocks until the registry's GET /v1/schema returns 200,
+// i.e. the registry has applied the SpiceDB schema (Phase 2). It logs and
+// retries indefinitely rather than failing fast: in a fresh cluster the registry
+// and orchestrator start together, so the registry simply may not be up yet, and
+// the orchestrator has nothing useful to do until it is.
+func waitForRegistrySchema(registryURL string) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	for attempt := 1; ; attempt++ {
+		resp, err := client.Get(registryURL + "/v1/schema")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				log.Printf("registry schema ready after %d attempt(s)", attempt)
+				return
+			}
+			err = fmt.Errorf("status %d", resp.StatusCode)
+		}
+		log.Printf("waiting for registry schema (attempt %d): %v", attempt, err)
+		time.Sleep(3 * time.Second)
+	}
+}
+
 func main() {
 	spicedbEndpoint := os.Getenv("SPICEDB_ENDPOINT")
 	if spicedbEndpoint == "" {
@@ -555,6 +634,12 @@ func main() {
 	if registryURL == "" {
 		registryURL = "http://registry:8080"
 	}
+
+	// The registry is the single writer of the SpiceDB schema (Phase 2) and the
+	// orchestrator's spawn-time CheckPermission needs that schema present. Block
+	// until the registry reports it has applied a schema, so a cold-boot spawn
+	// can't hit SpiceDB before any schema exists.
+	waitForRegistrySchema(registryURL)
 
 	mux := buildMux(k8s, clientset, sdb, registryURL)
 	log.Println("orchestrator listening on :8080")

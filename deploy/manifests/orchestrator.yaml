@@ -25,6 +25,24 @@ spec:
               value: "poc-secret"
             - name: REGISTRY_URL
               value: "http://registry:8080"
+            # Control-plane auth the orchestrator presents to the registry's
+            # consent endpoints; must match the registry's CONTROL_PLANE_AUTH.
+            # "none" sends no credential (demo). For "shared-secret" set
+            # CONTROL_PLANE_TOKEN; for "oidc" uncomment the client-credentials
+            # block (the "orchestrator" IdP client).
+            - name: CONTROL_PLANE_AUTH
+              value: "none"
+            # - name: CONTROL_PLANE_TOKEN            # shared-secret tier
+            #   value: "change-me"
+            # --- oidc tier ---
+            # - name: CONTROL_PLANE_TOKEN_URL
+            #   value: "http://identity-server:8080/connect/token"
+            # - name: CONTROL_PLANE_CLIENT_ID
+            #   value: "orchestrator"
+            # - name: CONTROL_PLANE_CLIENT_SECRET
+            #   value: "orchestrator-secret"
+            # - name: CONTROL_PLANE_SCOPE
+            #   value: "registry.consent"
           ports:
             - containerPort: 8080
 ---

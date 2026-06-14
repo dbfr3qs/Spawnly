@@ -494,6 +494,45 @@ type ConsentRequest struct {
   /v1/consent-requests/{id}` — polling is just repeated GET): a driver
   (CIBA or otherwise) polls this until `status != pending`.
 
+#### Securing the consent endpoints (control-plane auth)
+
+The consent-lifecycle endpoints (`/v1/consents*`, `/v1/consent-requests*`) are
+called only by **control-plane services** — the orchestrator (proxying the
+dashboard) and the IdP's CIBA driver — never by agents. They therefore sit
+behind a dedicated auth seam, `internal/controlplane`, separate from the
+agent-registration `internal/registrant` verifier (an agent proves an *agent*
+identity; a control-plane caller proves a *service* identity). Per the platform
+dependency-direction rule, no implementation calls a specific IdP — the OIDC
+tier validates tokens against a *configured* JWKS.
+
+Selected on the registry by `CONTROL_PLANE_AUTH`:
+
+| Tier | Registry checks | Caller presents |
+| --- | --- | --- |
+| `none` (default) | nothing — open behind cluster network isolation (local demo) | nothing |
+| `shared-secret` | `Authorization: Bearer <CONTROL_PLANE_TOKEN>` (constant-time) | the static token |
+| `oidc` | a JWT against `CONTROL_PLANE_OIDC_JWKS_URL`, enforcing audience (`…_AUDIENCE`, default `registry`) + scope (`…_SCOPE`, default `registry.consent`) | a client-credentials access token |
+
+Per-service env (must agree across all three):
+
+- **registry** — `CONTROL_PLANE_AUTH`; for `oidc`: `CONTROL_PLANE_OIDC_JWKS_URL`,
+  `_AUDIENCE`, `_SCOPE`.
+- **orchestrator** — `CONTROL_PLANE_AUTH`; for `oidc`: `CONTROL_PLANE_TOKEN_URL`,
+  `CONTROL_PLANE_CLIENT_ID` (`orchestrator`), `CONTROL_PLANE_CLIENT_SECRET`,
+  `CONTROL_PLANE_SCOPE`. Uses an `oauth2` `clientcredentials.TokenSource`
+  (auto-refresh).
+- **identity-server** — `CONTROL_PLANE_AUTH`; for `oidc`: same client-credentials
+  vars with `CONTROL_PLANE_CLIENT_ID=idp-consent`. The C# `ControlPlaneTokenHandler`
+  fetches + caches the token. Two IdP clients (`orchestrator`, `idp-consent`),
+  one `registry.consent` `ApiScope`, and a `registry` `ApiResource` (audience)
+  are defined in `identityserver/Config.cs`.
+
+This authenticates the *caller*; it layers on top of (does not replace) the
+existing `userId` confused-deputy scoping on approve/deny, which the
+authenticated dashboard asserts from the user's session. The deploy manifests
+ship `CONTROL_PLANE_AUTH=none` with the `shared-secret`/`oidc` env commented
+inline.
+
 #### CIBA as an optional driver
 
 CIBA's role shrinks to: *translate Duende's backchannel-authentication
@@ -809,3 +848,11 @@ A consumer with, say, Auth0:
   notes the dependency and the duplication risk.
 - Multi-tenant scoping of `/v1/consent-requests` beyond what `/v1/consents`
   already does (no new tenant dimension introduced).
+- Per-caller *authorization* in the control-plane auth seam: the OIDC tier
+  authenticates the caller and checks a single shared `registry.consent` scope,
+  but does not yet authorize the `orchestrator` vs `idp-consent` clients
+  differently (e.g. restricting who may `approve`). An mTLS control-plane tier
+  is also not implemented. Both are natural extensions of `internal/controlplane`.
+- Extending control-plane auth to the non-consent registry endpoints
+  (`/v1/agents` list/status, `revoke`/`resume`): the seam is reusable there but
+  this phase gates only the consent lifecycle.

@@ -4,16 +4,20 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/spawnly/platform/internal/controlplane"
 	"github.com/spawnly/platform/internal/events"
 	"github.com/spawnly/platform/internal/registrant"
 	"github.com/spawnly/platform/internal/registry"
@@ -30,6 +34,12 @@ import (
 var defaultSchema string
 
 const defaultSchemaVersion = "v1"
+
+// validAgentID constrains the identifier a registrant.Verifier returns before it
+// is used to build SpiceDB tuple keys and as the AgentRecord primary key. The
+// allowed set covers SPIFFE-derived ids (e.g. "chain-worker-ab12cd") while
+// rejecting ':' / '/' / whitespace that would corrupt "agent:"+id tuples.
+var validAgentID = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 type store struct {
 	mu        sync.RWMutex
@@ -124,12 +134,18 @@ func (s *store) getAgent(id string) registry.AgentRecord {
 	return s.agents[id]
 }
 
-func (s *store) appendEvent(agentID string, e events.Event) {
+// appendEvent stamps and stores an event, returning the stored copy. It returns
+// the value it wrote rather than having callers re-read the tail of the list,
+// so the AppendEvent contract ("returns the stored event") holds without a
+// second locked read — and so a durable backend can return what it persisted
+// instead of relying on an in-process append order.
+func (s *store) appendEvent(agentID string, e events.Event) events.Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e.ID = fmt.Sprintf("%d", time.Now().UnixNano())
 	e.Timestamp = time.Now()
 	s.events[agentID] = append(s.events[agentID], e)
+	return e
 }
 
 func (s *store) getEvents(agentID string) []events.Event {
@@ -579,8 +595,29 @@ func resumeNode(ctx context.Context, s registry.Store, sdb spicedb.Client, id st
 	return true
 }
 
-func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier) *http.ServeMux {
+func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier, cpAuth controlplane.Authenticator) *http.ServeMux {
 	mux := http.NewServeMux()
+
+	// Control-plane caller authentication for the consent lifecycle endpoints.
+	// These are invoked only by trusted control-plane services (the orchestrator
+	// proxying the dashboard, and the IdP's CIBA driver), never by agents — so
+	// they sit behind the pluggable control-plane Authenticator rather than the
+	// agent registrant verifier. The default (AllowAll) runs them open for the
+	// local demo; a shared-secret or OIDC authenticator gates them in
+	// production. The per-user confused-deputy scoping (the userId param,
+	// asserted by the authenticated dashboard) is unchanged and layers on top.
+	cp := func(h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if _, err := cpAuth.Authenticate(r.Context(), r); err != nil {
+				log.Printf("control-plane auth failed: %v", err)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			h(w, r)
+		}
+	}
+	// handleCP registers a consent-lifecycle handler behind the control-plane check.
+	handleCP := func(pattern string, h http.HandlerFunc) { mux.HandleFunc(pattern, cp(h)) }
 
 	mux.HandleFunc("POST /v1/templates", func(w http.ResponseWriter, r *http.Request) {
 		var t registry.AgentTemplate
@@ -660,6 +697,16 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		agentID := identity.AgentID
 		if agentID == "" {
 			http.Error(w, "registrant verifier returned empty agentID", http.StatusInternalServerError)
+			return
+		}
+		// The agentID becomes a SpiceDB object id ("agent:"+id) and the
+		// AgentRecord primary key. SPIFFE ids (path.Base of the SVID) already
+		// conform; this guards the OIDC/mTLS paths, where the id comes from a
+		// consumer-controlled claim or cert SAN — an unconstrained value (':',
+		// '/', whitespace) would corrupt every tuple key written for the agent.
+		if !validAgentID.MatchString(agentID) {
+			log.Printf("rejecting registration: invalid agentID %q (issuer=%s)", agentID, identity.Issuer)
+			http.Error(w, "invalid agent id", http.StatusBadRequest)
 			return
 		}
 		log.Printf("registering agent %s (issuer=%s subject=%s)", agentID, identity.Issuer, identity.Subject)
@@ -1015,7 +1062,7 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	// when the user approves a CIBA request, or auto-renewed on auto-approval).
 	// The expiry is derived here from the parent template's consentTTL so the
 	// policy lives in one place. Replaces any prior record for the same edge.
-	mux.HandleFunc("POST /v1/consents", func(w http.ResponseWriter, r *http.Request) {
+	handleCP("POST /v1/consents", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID     string   `json:"userId"`
 			ParentType string   `json:"parentType"`
@@ -1055,7 +1102,7 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		json.NewEncoder(w).Encode(rec)
 	})
 
-	mux.HandleFunc("GET /v1/consents", func(w http.ResponseWriter, r *http.Request) {
+	handleCP("GET /v1/consents", func(w http.ResponseWriter, r *http.Request) {
 		consents, err := s.ListConsents(r.Context(), r.URL.Query().Get("userId"))
 		if storeErr(w, err) {
 			return
@@ -1069,7 +1116,7 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	// this consent is a separate, explicit /v1/agents/{id}/revoke call. An
 	// optional userId query scopes the revoke to that user's own records
 	// (a mismatch is indistinguishable from an unknown id).
-	mux.HandleFunc("POST /v1/consents/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
+	handleCP("POST /v1/consents/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
 		ok, err := s.RevokeConsent(r.Context(), r.PathValue("id"), r.URL.Query().Get("userId"))
 		if storeErr(w, err) {
 			return
@@ -1085,7 +1132,7 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	// requested scopes right now? Always HTTP 200; IdentityServer's CIBA
 	// notification hook calls this to decide auto-approve vs. prompt-the-user.
 	// Scopes repeat: ?scope=a&scope=b.
-	mux.HandleFunc("GET /v1/consents/check", func(w http.ResponseWriter, r *http.Request) {
+	handleCP("GET /v1/consents/check", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		decision := registry.ConsentDecision{Granted: false, Reason: "no consent on record"}
 		rec, ok, err := s.FindConsent(r.Context(), q.Get("userId"), q.Get("parentType"), q.Get("childType"))
@@ -1108,7 +1155,7 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	// Create (or return the existing open) pending consent request for an edge.
 	// Short-circuits to "approved" with no prompt/webhook when a stored consent
 	// already covers the requested scopes. Fires the notifier webhook otherwise.
-	mux.HandleFunc("POST /v1/consent-requests", func(w http.ResponseWriter, r *http.Request) {
+	handleCP("POST /v1/consent-requests", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			UserID         string   `json:"userId"`
 			ParentType     string   `json:"parentType"`
@@ -1164,7 +1211,7 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		json.NewEncoder(w).Encode(out)
 	})
 
-	mux.HandleFunc("GET /v1/consent-requests", func(w http.ResponseWriter, r *http.Request) {
+	handleCP("GET /v1/consent-requests", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		reqs, err := s.ListConsentRequests(r.Context(), q.Get("userId"), q.Get("status"))
 		if storeErr(w, err) {
@@ -1174,7 +1221,7 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		json.NewEncoder(w).Encode(reqs)
 	})
 
-	mux.HandleFunc("GET /v1/consent-requests/{id}", func(w http.ResponseWriter, r *http.Request) {
+	handleCP("GET /v1/consent-requests/{id}", func(w http.ResponseWriter, r *http.Request) {
 		cr, ok, err := s.GetConsentRequest(r.Context(), r.PathValue("id"))
 		if storeErr(w, err) {
 			return
@@ -1187,7 +1234,7 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		json.NewEncoder(w).Encode(cr)
 	})
 
-	mux.HandleFunc("POST /v1/consent-requests/{id}/approve", func(w http.ResponseWriter, r *http.Request) {
+	handleCP("POST /v1/consent-requests/{id}/approve", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Scopes []string `json:"scopes"`
 		}
@@ -1206,7 +1253,7 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		json.NewEncoder(w).Encode(cr)
 	})
 
-	mux.HandleFunc("POST /v1/consent-requests/{id}/deny", func(w http.ResponseWriter, r *http.Request) {
+	handleCP("POST /v1/consent-requests/{id}/deny", func(w http.ResponseWriter, r *http.Request) {
 		cr, ok, err := s.ResolveConsentRequest(r.Context(), r.PathValue("id"), r.URL.Query().Get("userId"), false, nil)
 		if storeErr(w, err) {
 			return
@@ -1323,7 +1370,10 @@ func loadActiveSchema() (schema, version, source string) {
 		if err != nil {
 			log.Fatalf("SPICEDB_SCHEMA_PATH=%s: %v", p, err)
 		}
-		return string(b), "custom", "override"
+		// Version is a content hash so distinct override files report distinct
+		// versions via GET /v1/schema (a fixed "custom" string would collide).
+		sum := sha256.Sum256(b)
+		return string(b), "sha256:" + hex.EncodeToString(sum[:])[:12], "override"
 	}
 	return defaultSchema, defaultSchemaVersion, "default"
 }
@@ -1395,8 +1445,53 @@ func main() {
 		log.Fatalf("unknown REGISTRANT_VERIFIER %q", v)
 	}
 
-	s := newStore()
-	s.setSchema(activeSchema, schemaVersion, schemaSource)
+	// Control-plane auth is pluggable, mirroring registration auth: it gates the
+	// consent-lifecycle endpoints, which only platform services call. Default
+	// "none" runs them open (local demo); "shared-secret" requires a static
+	// bearer; "oidc" validates a client-credentials access token against a
+	// configured JWKS (any IdP), enforcing audience + scope.
+	cpAuth := buildControlPlaneAuth(ctx)
+
+	s := newStore() // already seeded with the embedded default schema
+	if schemaSource != "default" {
+		// Only an override needs a re-parse; the default was parsed in newStore.
+		s.setSchema(activeSchema, schemaVersion, schemaSource)
+	}
 	log.Printf("registry listening on :8080 (schema source=%s version=%s)", schemaSource, schemaVersion)
-	log.Fatal(http.ListenAndServe(":8080", buildMux(s, sdb, verifier)))
+	log.Fatal(http.ListenAndServe(":8080", buildMux(s, sdb, verifier, cpAuth)))
+}
+
+// buildControlPlaneAuth selects the consent-endpoint authenticator from
+// CONTROL_PLANE_AUTH (none|shared-secret|oidc). It log.Fatals on a
+// misconfiguration so a deployment that intends to gate consent fails loudly
+// rather than silently running open.
+func buildControlPlaneAuth(ctx context.Context) controlplane.Authenticator {
+	switch v := getEnv("CONTROL_PLANE_AUTH", "none"); v {
+	case "none":
+		return controlplane.AllowAll()
+	case "shared-secret":
+		token := getEnv("CONTROL_PLANE_TOKEN", "")
+		if token == "" {
+			log.Fatalf("CONTROL_PLANE_TOKEN required when CONTROL_PLANE_AUTH=shared-secret")
+		}
+		return controlplane.NewSharedSecret(token)
+	case "oidc":
+		cfg := controlplane.OIDCConfig{
+			JWKSURL:               getEnv("CONTROL_PLANE_OIDC_JWKS_URL", ""),
+			Audience:              getEnv("CONTROL_PLANE_OIDC_AUDIENCE", "registry"),
+			RequiredScope:         getEnv("CONTROL_PLANE_OIDC_SCOPE", "registry.consent"),
+			InsecureSkipTLSVerify: getEnv("CONTROL_PLANE_OIDC_INSECURE_SKIP_TLS_VERIFY", "false") == "true",
+		}
+		if cfg.JWKSURL == "" {
+			log.Fatalf("CONTROL_PLANE_OIDC_JWKS_URL required when CONTROL_PLANE_AUTH=oidc")
+		}
+		auth, err := controlplane.NewOIDC(ctx, cfg)
+		if err != nil {
+			log.Fatalf("control-plane OIDC init: %v", err)
+		}
+		return auth
+	default:
+		log.Fatalf("unknown CONTROL_PLANE_AUTH %q", v)
+		return nil // unreachable
+	}
 }

@@ -5,9 +5,42 @@ namespace IdentityServer;
 public class AgentRegistryClient
 {
     private readonly string _baseUrl;
-    private readonly HttpClient _http = new();
+    private readonly HttpClient _http;
 
-    public AgentRegistryClient(string baseUrl) => _baseUrl = baseUrl;
+    public AgentRegistryClient(string baseUrl)
+    {
+        _baseUrl = baseUrl;
+        // The IdP's CIBA driver is a trusted control-plane caller of the
+        // registry's consent endpoints. CONTROL_PLANE_AUTH selects how it
+        // authenticates, matching the registry's setting:
+        //   none/unset    -> no header (local demo; registry enforces nothing)
+        //   shared-secret -> static CONTROL_PLANE_TOKEN bearer
+        //   oidc          -> client-credentials token, fetched + cached by the
+        //                    ControlPlaneTokenHandler (the "idp-consent" client)
+        switch (Environment.GetEnvironmentVariable("CONTROL_PLANE_AUTH"))
+        {
+            case "oidc":
+                var scope = Environment.GetEnvironmentVariable("CONTROL_PLANE_SCOPE") ?? "registry.consent";
+                _http = new HttpClient(new ControlPlaneTokenHandler(
+                    Environment.GetEnvironmentVariable("CONTROL_PLANE_TOKEN_URL") ?? "",
+                    Environment.GetEnvironmentVariable("CONTROL_PLANE_CLIENT_ID") ?? "",
+                    Environment.GetEnvironmentVariable("CONTROL_PLANE_CLIENT_SECRET") ?? "",
+                    scope));
+                break;
+            case "shared-secret":
+                _http = new HttpClient();
+                var token = Environment.GetEnvironmentVariable("CONTROL_PLANE_TOKEN");
+                if (!string.IsNullOrEmpty(token))
+                {
+                    _http.DefaultRequestHeaders.Authorization =
+                        new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+                }
+                break;
+            default:
+                _http = new HttpClient();
+                break;
+        }
+    }
 
     public async Task<bool> IsActive(string agentId)
     {

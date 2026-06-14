@@ -87,9 +87,7 @@ func (s *store) ListChildren(_ context.Context, parentID string) ([]registry.Age
 }
 
 func (s *store) AppendEvent(_ context.Context, agentID string, e events.Event) (events.Event, error) {
-	s.appendEvent(agentID, e)
-	evts := s.getEvents(agentID)
-	return evts[len(evts)-1], nil
+	return s.appendEvent(agentID, e), nil
 }
 
 func (s *store) GetEvents(_ context.Context, agentID string) ([]events.Event, error) {
