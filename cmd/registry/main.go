@@ -449,14 +449,12 @@ func subtree(ctx context.Context, s registry.Store, id string) []string {
 // depth returns how many agents are in the lineage from id up to the root,
 // counting id itself: a top-level agent is depth 1, its child depth 2, and so
 // on. Used to enforce a template's maxDepth at spawn time. Unknown ids are 0.
-func (s *store) depth(id string) int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func depth(ctx context.Context, s registry.Store, id string) int {
 	d := 0
 	seen := map[string]bool{}
 	for cur := id; cur != "" && !seen[cur]; {
-		rec, ok := s.agents[cur]
-		if !ok {
+		rec, _ := s.GetAgent(ctx, cur)
+		if rec.AgentID == "" {
 			break
 		}
 		seen[cur] = true // cycle guard
@@ -464,6 +462,18 @@ func (s *store) depth(id string) int {
 		cur = rec.ParentID
 	}
 	return d
+}
+
+// storeErr writes a 500 for a Store error and reports whether it did, so a
+// handler can `if storeErr(w, err) { return }`. The in-memory store never
+// errors; this is the path a durable backend (e.g. DynamoDB) uses.
+func storeErr(w http.ResponseWriter, err error) bool {
+	if err != nil {
+		log.Printf("store error: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return true
+	}
+	return false
 }
 
 func mustMarshal(v any) json.RawMessage {
@@ -519,11 +529,14 @@ func relationResourceTypes(tpl registry.AgentTemplate, hasTenant bool) []string 
 // cascade never clobbers a descendant that already exited (completed/failed/
 // killed) — that node keeps its terminal status and resumeNode won't resurrect
 // it. This also makes revoke idempotent.
-func revokeNode(ctx context.Context, s *store, sdb spicedb.Client, id string) bool {
-	if s.getAgent(id).Status != "active" {
+func revokeNode(ctx context.Context, s registry.Store, sdb spicedb.Client, id string) bool {
+	// Best-effort/idempotent: store errors are logged-and-ignored (the in-memory
+	// store never errors; a durable backend's transient error must not abort a
+	// cascade mid-subtree).
+	if rec, _ := s.GetAgent(ctx, id); rec.Status != "active" {
 		return false
 	}
-	s.updateAgent(id, "revoked")
+	s.UpdateAgentStatus(ctx, id, "revoked")
 	// Phase 5a: revoke is reversible, so drop only the agent's `enabled` status
 	// tuple — a single write regardless of template size. The template relations
 	// are deliberately left in place so resumeNode can re-enable in O(1) without
@@ -533,7 +546,7 @@ func revokeNode(ctx context.Context, s *store, sdb spicedb.Client, id string) bo
 	if err := sdb.DeleteRelationship(ctx, "agent:"+id, "enabled", "agent:"+id); err != nil {
 		log.Printf("spicedb revoke (enabled-tuple delete) error for %s: %v", id, err)
 	}
-	s.appendEvent(id, events.Event{
+	s.AppendEvent(ctx, id, events.Event{
 		Source:  events.SourceRegistry,
 		Type:    "agent_revoked",
 		Payload: mustMarshal(map[string]string{"agentId": id}),
@@ -550,15 +563,15 @@ func revokeNode(ctx context.Context, s *store, sdb spicedb.Client, id string) bo
 // relations were never removed by revoke, so re-enabling is a single write that
 // does not depend on the template still existing or matching what it was at
 // registration time (fixing the re-derivation-drift risk of the old approach).
-func resumeNode(ctx context.Context, s *store, sdb spicedb.Client, id string) bool {
-	if s.getAgent(id).Status != "revoked" {
+func resumeNode(ctx context.Context, s registry.Store, sdb spicedb.Client, id string) bool {
+	if rec, _ := s.GetAgent(ctx, id); rec.Status != "revoked" {
 		return false
 	}
-	s.updateAgent(id, "active")
+	s.UpdateAgentStatus(ctx, id, "active")
 	if err := sdb.WriteRelationship(ctx, "agent:"+id, "enabled", "agent:"+id); err != nil {
 		log.Printf("spicedb resume (enabled-tuple write) error for %s: %v", id, err)
 	}
-	s.appendEvent(id, events.Event{
+	s.AppendEvent(ctx, id, events.Event{
 		Source:  events.SourceRegistry,
 		Type:    "agent_resumed",
 		Payload: mustMarshal(map[string]string{"agentId": id}),
@@ -566,7 +579,7 @@ func resumeNode(ctx context.Context, s *store, sdb spicedb.Client, id string) bo
 	return true
 }
 
-func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.ServeMux {
+func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /v1/templates", func(w http.ResponseWriter, r *http.Request) {
@@ -578,11 +591,13 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 		// Reject a template whose relations don't conform to the active schema
 		// before storing it, so a mismatch is caught at registration time rather
 		// than silently failing every tuple write at agent-register time.
-		if err := s.validateTemplate(t); err != nil {
+		if err := s.ValidateTemplate(t); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		s.putTemplate(t)
+		if storeErr(w, s.PutTemplate(r.Context(), t)) {
+			return
+		}
 		w.WriteHeader(http.StatusCreated)
 	})
 
@@ -590,20 +605,17 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 	// version, and whether it's the embedded default or an override. Public
 	// (no SVID) — it's the contract a consumer validates their templates against.
 	mux.HandleFunc("GET /v1/schema", func(w http.ResponseWriter, r *http.Request) {
-		s.mu.RLock()
-		resp := map[string]string{
-			"schema":  s.schemaText,
-			"version": s.schemaVersion,
-			"source":  s.schemaSource,
-		}
-		s.mu.RUnlock()
+		text, version, source := s.Schema()
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		json.NewEncoder(w).Encode(map[string]string{"schema": text, "version": version, "source": source})
 	})
 
 	mux.HandleFunc("GET /v1/templates/", func(w http.ResponseWriter, r *http.Request) {
 		agentType := strings.TrimPrefix(r.URL.Path, "/v1/templates/")
-		t, ok := s.getTemplate(agentType)
+		t, ok, err := s.GetTemplate(r.Context(), agentType)
+		if storeErr(w, err) {
+			return
+		}
 		if !ok {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -626,8 +638,10 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 			return
 		}
 		rec.Status = "pending"
-		s.registerAgent(rec)
-		s.appendEvent(rec.AgentID, events.Event{
+		if storeErr(w, s.RegisterAgent(r.Context(), rec)) {
+			return
+		}
+		s.AppendEvent(r.Context(), rec.AgentID, events.Event{
 			Source:  events.SourceOrchestrator,
 			Type:    "workload_spawning",
 			Payload: mustMarshal(map[string]string{"agentId": rec.AgentID, "agentType": rec.AgentType}),
@@ -636,7 +650,8 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 	})
 
 	mux.HandleFunc("POST /v1/agents", func(w http.ResponseWriter, r *http.Request) {
-		identity, err := verifier.Verify(r.Context(), r)
+		ctx := r.Context()
+		identity, err := verifier.Verify(ctx, r)
 		if err != nil {
 			log.Printf("registration auth failed: %v", err)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -660,7 +675,10 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 			return
 		}
 
-		tpl, ok := s.getTemplate(req.AgentType)
+		tpl, ok, err := s.GetTemplate(ctx, req.AgentType)
+		if storeErr(w, err) {
+			return
+		}
 		if !ok {
 			http.Error(w, "unknown agent type", http.StatusBadRequest)
 			return
@@ -670,7 +688,11 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 		// pod) re-registers on boot. Never let that resurrect a record whose
 		// SpiceDB authority was deliberately dropped — a failed/completed agent
 		// stays terminal and a revoked one stays revoked until /resume.
-		if existing := s.getAgent(agentID); existing.AgentID != "" {
+		existing, err := s.GetAgent(ctx, agentID)
+		if storeErr(w, err) {
+			return
+		}
+		if existing.AgentID != "" {
 			switch existing.Status {
 			case "completed", "failed", "revoked":
 				http.Error(w, fmt.Sprintf("agent %s is %s; re-registration refused", agentID, existing.Status),
@@ -689,8 +711,10 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 			SupportsChat: tpl.Runtime.SupportsChat,
 			ParentID:     req.ParentID,
 		}
-		s.registerAgent(rec)
-		s.appendEvent(agentID, events.Event{
+		if storeErr(w, s.RegisterAgent(ctx, rec)) {
+			return
+		}
+		s.AppendEvent(ctx, agentID, events.Event{
 			Source:  events.SourceRegistry,
 			Type:    "registry_record_created",
 			Payload: mustMarshal(rec),
@@ -710,7 +734,7 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 			}
 			res := substitute(rel.Resource, agentID, req.TenantID)
 			sub := substitute(rel.Subject, agentID, req.TenantID)
-			if err := sdb.WriteRelationship(r.Context(), res, rel.Relation, sub); err != nil {
+			if err := sdb.WriteRelationship(ctx, res, rel.Relation, sub); err != nil {
 				log.Printf("spicedb write error: %v", err)
 			}
 			tuples = append(tuples, relTuple{
@@ -724,11 +748,11 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 		// single tuple is what revoke/resume toggle — the template relations
 		// above are left untouched by a revoke.
 		enabledRes, enabledSub := "agent:"+agentID, "agent:"+agentID
-		if err := sdb.WriteRelationship(r.Context(), enabledRes, "enabled", enabledSub); err != nil {
+		if err := sdb.WriteRelationship(ctx, enabledRes, "enabled", enabledSub); err != nil {
 			log.Printf("spicedb enabled-tuple write error for %s: %v", agentID, err)
 		}
 		tuples = append(tuples, relTuple{Resource: enabledRes, Relation: "enabled", Subject: enabledSub})
-		s.appendEvent(agentID, events.Event{
+		s.AppendEvent(ctx, agentID, events.Event{
 			Source:  events.SourceRegistry,
 			Type:    "spicedb_relations_written",
 			Payload: mustMarshal(tuples),
@@ -740,7 +764,10 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 	})
 
 	mux.HandleFunc("GET /v1/agents", func(w http.ResponseWriter, r *http.Request) {
-		agents := s.listAgents()
+		agents, err := s.ListAgents(r.Context())
+		if storeErr(w, err) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(agents)
 	})
@@ -752,9 +779,10 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		s.appendEvent(agentID, e)
-		evts := s.getEvents(agentID)
-		stored := evts[len(evts)-1]
+		stored, err := s.AppendEvent(r.Context(), agentID, e)
+		if storeErr(w, err) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(stored)
@@ -762,7 +790,10 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 
 	mux.HandleFunc("GET /v1/agents/{id}/events", func(w http.ResponseWriter, r *http.Request) {
 		agentID := r.PathValue("id")
-		evts := s.getEvents(agentID)
+		evts, err := s.GetEvents(r.Context(), agentID)
+		if storeErr(w, err) {
+			return
+		}
 		if evts == nil {
 			evts = []events.Event{}
 		}
@@ -772,7 +803,10 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 
 	mux.HandleFunc("GET /v1/agents/", func(w http.ResponseWriter, r *http.Request) {
 		agentID := strings.TrimPrefix(r.URL.Path, "/v1/agents/")
-		rec := s.getAgent(agentID)
+		rec, err := s.GetAgent(r.Context(), agentID)
+		if storeErr(w, err) {
+			return
+		}
 		if rec.AgentID == "" {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -790,7 +824,12 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if !s.updateAgent(agentID, req.Status) {
+		ctx := r.Context()
+		ok, err := s.UpdateAgentStatus(ctx, agentID, req.Status)
+		if storeErr(w, err) {
+			return
+		}
+		if !ok {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -799,15 +838,15 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 			// template relations (resource types derived per Phase 1) and the
 			// agent's `enabled` status tuple. This is the irreversible
 			// counterpart to revoke, which only toggles `enabled`.
-			rec := s.getAgent(agentID)
+			rec, _ := s.GetAgent(ctx, agentID)
 			var resTypes []string
-			if tpl, ok := s.getTemplate(rec.AgentType); ok {
+			if tpl, ok, _ := s.GetTemplate(ctx, rec.AgentType); ok {
 				resTypes = relationResourceTypes(tpl, rec.TenantID != "")
 			}
-			if err := sdb.DeleteAgentRelationships(r.Context(), agentID, resTypes); err != nil {
+			if err := sdb.DeleteAgentRelationships(ctx, agentID, resTypes); err != nil {
 				log.Printf("spicedb cleanup error for %s: %v", agentID, err)
 			}
-			if err := sdb.DeleteRelationship(r.Context(), "agent:"+agentID, "enabled", "agent:"+agentID); err != nil {
+			if err := sdb.DeleteRelationship(ctx, "agent:"+agentID, "enabled", "agent:"+agentID); err != nil {
 				log.Printf("spicedb enabled-tuple cleanup error for %s: %v", agentID, err)
 			}
 		}
@@ -816,7 +855,11 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 
 	mux.HandleFunc("POST /v1/agents/{id}/dismiss", func(w http.ResponseWriter, r *http.Request) {
 		agentID := r.PathValue("id")
-		if !s.dismissAgent(agentID) {
+		ok, err := s.DismissAgent(r.Context(), agentID)
+		if storeErr(w, err) {
+			return
+		}
+		if !ok {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -881,7 +924,10 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 			MaxDepth        int      `json:"maxDepth"`
 		}{Allowed: false, GrantableScopes: []string{}, MaxDepth: 0}
 
-		tpl, ok := s.getTemplate(parentType)
+		tpl, ok, err := s.GetTemplate(r.Context(), parentType)
+		if storeErr(w, err) {
+			return
+		}
 		if ok {
 			pol := tpl.Delegation
 			for _, ct := range pol.AllowedChildTypes {
@@ -915,13 +961,20 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 		childType := r.URL.Query().Get("childType")
 
 		resp := registry.SpawnDecision{Allowed: false}
+		ctx := r.Context()
 
-		rec := s.getAgent(parentID)
+		rec, err := s.GetAgent(ctx, parentID)
+		if storeErr(w, err) {
+			return
+		}
 		switch {
 		case rec.AgentID == "":
 			resp.Reason = "unknown parent"
 		default:
-			tpl, ok := s.getTemplate(rec.AgentType)
+			tpl, ok, err := s.GetTemplate(ctx, rec.AgentType)
+			if storeErr(w, err) {
+				return
+			}
 			if !ok {
 				resp.Reason = "parent template not found"
 				break
@@ -940,7 +993,7 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 			// positive maxDepth bounds total chain length (maxDepth == 0 means
 			// unset / no limit, matching the delegation-policy default).
 			if max := tpl.Delegation.MaxDepth; max > 0 {
-				if childDepth := s.depth(parentID) + 1; childDepth > max {
+				if childDepth := depth(ctx, s, parentID) + 1; childDepth > max {
 					resp.Allowed = false
 					resp.Reason = fmt.Sprintf("max delegation depth %d reached", max)
 				}
@@ -980,23 +1033,35 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 		if req.Scopes == nil {
 			req.Scopes = []string{}
 		}
+		ctx := r.Context()
 		now := time.Now()
-		rec := s.upsertConsent(registry.ConsentRecord{
+		expiry, err := s.ConsentExpiry(ctx, req.ParentType, req.ChildType, now)
+		if storeErr(w, err) {
+			return
+		}
+		rec, err := s.UpsertConsent(ctx, registry.ConsentRecord{
 			UserID:     req.UserID,
 			ParentType: req.ParentType,
 			ChildType:  req.ChildType,
 			Scopes:     req.Scopes,
 			GrantedAt:  now,
-			ExpiresAt:  s.consentExpiry(req.ParentType, req.ChildType, now),
+			ExpiresAt:  expiry,
 		})
+		if storeErr(w, err) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(rec)
 	})
 
 	mux.HandleFunc("GET /v1/consents", func(w http.ResponseWriter, r *http.Request) {
+		consents, err := s.ListConsents(r.Context(), r.URL.Query().Get("userId"))
+		if storeErr(w, err) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(s.listConsents(r.URL.Query().Get("userId")))
+		json.NewEncoder(w).Encode(consents)
 	})
 
 	// Revoke a stored consent: the next spawn of that edge re-prompts the user.
@@ -1005,7 +1070,11 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 	// optional userId query scopes the revoke to that user's own records
 	// (a mismatch is indistinguishable from an unknown id).
 	mux.HandleFunc("POST /v1/consents/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
-		if !s.revokeConsent(r.PathValue("id"), r.URL.Query().Get("userId")) {
+		ok, err := s.RevokeConsent(r.Context(), r.PathValue("id"), r.URL.Query().Get("userId"))
+		if storeErr(w, err) {
+			return
+		}
+		if !ok {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -1019,7 +1088,11 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 	mux.HandleFunc("GET /v1/consents/check", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		decision := registry.ConsentDecision{Granted: false, Reason: "no consent on record"}
-		if rec, ok := s.findConsent(q.Get("userId"), q.Get("parentType"), q.Get("childType")); ok {
+		rec, ok, err := s.FindConsent(r.Context(), q.Get("userId"), q.Get("parentType"), q.Get("childType"))
+		if storeErr(w, err) {
+			return
+		}
+		if ok {
 			decision = registry.EvaluateConsent(rec, q["scope"], time.Now())
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -1058,18 +1131,27 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 			AgentID: req.AgentID, Scopes: req.Scopes, BindingMessage: req.BindingMessage, ExternalRef: req.ExternalRef,
 		}
 
+		ctx := r.Context()
 		// Short-circuit: an existing covering consent means no human ask needed.
-		if rec, ok := s.findConsent(req.UserID, req.ParentType, req.ChildType); ok {
-			if registry.EvaluateConsent(rec, req.Scopes, time.Now()).Granted {
-				out := s.createApprovedConsentRequest(cr)
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusCreated)
-				json.NewEncoder(w).Encode(out)
+		rec, ok, err := s.FindConsent(ctx, req.UserID, req.ParentType, req.ChildType)
+		if storeErr(w, err) {
+			return
+		}
+		if ok && registry.EvaluateConsent(rec, req.Scopes, time.Now()).Granted {
+			out, err := s.CreateApprovedConsentRequest(ctx, cr)
+			if storeErr(w, err) {
 				return
 			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(out)
+			return
 		}
 
-		out, created := s.createConsentRequest(cr)
+		out, created, err := s.CreateConsentRequest(ctx, cr)
+		if storeErr(w, err) {
+			return
+		}
 		if created {
 			go notifyWebhook(out)
 		}
@@ -1084,12 +1166,19 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 
 	mux.HandleFunc("GET /v1/consent-requests", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
+		reqs, err := s.ListConsentRequests(r.Context(), q.Get("userId"), q.Get("status"))
+		if storeErr(w, err) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(s.listConsentRequests(q.Get("userId"), q.Get("status")))
+		json.NewEncoder(w).Encode(reqs)
 	})
 
 	mux.HandleFunc("GET /v1/consent-requests/{id}", func(w http.ResponseWriter, r *http.Request) {
-		cr, ok := s.getConsentRequest(r.PathValue("id"))
+		cr, ok, err := s.GetConsentRequest(r.Context(), r.PathValue("id"))
+		if storeErr(w, err) {
+			return
+		}
 		if !ok {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -1105,7 +1194,10 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 		// Body is optional — an empty/absent body approves the originally
 		// requested scopes.
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		cr, ok := s.resolveConsentRequest(r.PathValue("id"), r.URL.Query().Get("userId"), true, body.Scopes)
+		cr, ok, err := s.ResolveConsentRequest(r.Context(), r.PathValue("id"), r.URL.Query().Get("userId"), true, body.Scopes)
+		if storeErr(w, err) {
+			return
+		}
 		if !ok {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -1115,7 +1207,10 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 	})
 
 	mux.HandleFunc("POST /v1/consent-requests/{id}/deny", func(w http.ResponseWriter, r *http.Request) {
-		cr, ok := s.resolveConsentRequest(r.PathValue("id"), r.URL.Query().Get("userId"), false, nil)
+		cr, ok, err := s.ResolveConsentRequest(r.Context(), r.PathValue("id"), r.URL.Query().Get("userId"), false, nil)
+		if storeErr(w, err) {
+			return
+		}
 		if !ok {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -1127,7 +1222,11 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 	// Delegation lineage for an agent: the agent itself up to the root via ParentID.
 	mux.HandleFunc("GET /v1/agents/{id}/chain", func(w http.ResponseWriter, r *http.Request) {
 		agentID := r.PathValue("id")
-		rec := s.getAgent(agentID)
+		ctx := r.Context()
+		rec, err := s.GetAgent(ctx, agentID)
+		if storeErr(w, err) {
+			return
+		}
 		if rec.AgentID == "" {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -1157,7 +1256,7 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 			if cur.ParentID == "" {
 				break
 			}
-			parent := s.getAgent(cur.ParentID)
+			parent, _ := s.GetAgent(ctx, cur.ParentID)
 			if parent.AgentID == "" {
 				break // missing parent — include what's resolvable
 			}
@@ -1169,12 +1268,10 @@ func buildMux(s *store, sdb spicedb.Client, verifier registrant.Verifier) *http.
 	})
 
 	mux.HandleFunc("GET /v1/templates", func(w http.ResponseWriter, r *http.Request) {
-		s.mu.RLock()
-		types := make([]string, 0, len(s.templates))
-		for k := range s.templates {
-			types = append(types, k)
+		types, err := s.ListTemplateTypes(r.Context())
+		if storeErr(w, err) {
+			return
 		}
-		s.mu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(types)
 	})

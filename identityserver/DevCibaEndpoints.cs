@@ -8,7 +8,8 @@ namespace IdentityServer;
 /// (backchannel authentication) requests, so the flow can be driven with curl
 /// without a browser session. Mapped only when DEV_CIBA_API=true; never enable
 /// in a real deployment — it lets the caller approve on behalf of any user.
-/// The session-authenticated equivalent is <see cref="CibaConsentApi"/>.
+/// The production approval path is the registry-native consent broker
+/// (POST /v1/consent-requests/{id}/approve), surfaced in the dashboard.
 /// Completion goes through <see cref="CibaCompletionService"/>, so a dev
 /// approval also records the consent in the registry, exactly like a real one.
 /// </summary>

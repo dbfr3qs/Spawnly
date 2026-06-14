@@ -44,11 +44,9 @@ func main() {
 	mux.Handle("/connect/", idProxy)
 	mux.Handle("/.well-known/", idProxy)
 	mux.Handle("/Account/", idProxy)
-	// CIBA consent API: pending spawn-consent requests for the logged-in user.
-	// IdentityServer authenticates these with its own session cookie (which the
-	// browser holds under this origin, since all IS traffic is proxied here),
-	// binding approval to the very user the request asks to authenticate.
-	mux.Handle("/ciba/", idProxy)
+	// Pending spawn-consent is now served by the registry-native broker via the
+	// /api/consent-requests routes below (Phase 5b); the old IdentityServer
+	// /ciba/ browser approval path has been removed.
 
 	// Relying-party routes (public).
 	mux.HandleFunc("GET /login", auth.handleLogin)

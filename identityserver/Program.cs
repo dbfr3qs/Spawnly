@@ -80,10 +80,6 @@ app.UseIdentityServer();
 app.UseAuthorization();
 app.MapRazorPages();
 
-// Pending-consent API for the dashboard, authenticated by the user's own
-// IdentityServer session cookie.
-app.MapCibaConsentApi();
-
 // Dev-only CIBA inspection/completion API (curl-driven spike); see DevCibaEndpoints.
 if (Environment.GetEnvironmentVariable("DEV_CIBA_API") == "true")
 {
