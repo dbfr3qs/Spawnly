@@ -119,8 +119,9 @@ Every directory, by language and purpose:
 | `deploy/secrets/` | YAML | `ai-provider` Secret (`provider`, `api-key`, `model`) consumed by Flue agents |
 | `deploy/spire/` | YAML | SPIRE Helm values and `ClusterSPIFFEID` for automatic agent identity assignment |
 | `deploy/kind/` | YAML | Kind cluster config (single control-plane + worker node) |
-| `scripts/` | Bash | `bootstrap.sh` (one-shot cluster setup), `seed.sh` (template seeding), `demo.sh` (interactive demo) |
+| `scripts/` | Bash | `bootstrap.sh` (one-shot cluster setup), `seed.sh` (template seeding), `demo.sh` (interactive demo), `acc-testbed.sh` (ephemeral registry for provider acceptance tests) |
 | `website/` | Astro / Starlight | The authoring docs site (renders `docs/`) |
+| `terraform-provider-spawnly/` | Go | Terraform provider for managing agent templates as config-as-code, talking directly to the registry control-plane API ([README](terraform-provider-spawnly/README.md)) |
 
 ---
 
@@ -245,6 +246,39 @@ Full design and flow diagrams: [docs/internals/spawn-consent.md](docs/internals/
 
 ---
 
+## Control-plane auth
+
+The registry's **control-plane** endpoints — template create/update/disable/delete and the consent broker — are gated by a shared-secret bearer (`CONTROL_PLANE_AUTH=shared-secret`, the default). `make bootstrap` generates the token once into the `control-plane-auth` Secret and wires it into the registry, orchestrator, IdentityServer, and `seed.sh`, so their tokens match by construction; re-bootstraps reuse the existing token so seeded clients keep working mid-session. Run the registry open with `CONTROL_PLANE_AUTH=none` (the agent-facing self-registration and event paths are authenticated separately by SVID and are never behind this secret). To drive the control plane from outside the cluster, pull the token:
+
+```bash
+export SPAWNLY_TOKEN=$(kubectl get secret control-plane-auth \
+  -o jsonpath='{.data.token}' | base64 -d)
+```
+
+---
+
+## Config-as-code: templates via Terraform
+
+Agent templates can be managed declaratively with the [`terraform-provider-spawnly`](terraform-provider-spawnly/) provider, which talks directly to the registry control-plane API with the shared-secret bearer above. It exposes a `spawnly_agent_template` resource plus `spawnly_agent_template`, `spawnly_agent_templates`, and `spawnly_schema` data sources.
+
+```bash
+cd terraform-provider-spawnly
+make install                              # builds ./bin and writes dev.tfrc
+export TF_CLI_CONFIG_FILE=$(pwd)/dev.tfrc # dev_overrides — skip `terraform init`
+
+kubectl port-forward svc/registry 18080:8080 &
+export SPAWNLY_ENDPOINT=http://localhost:18080
+export SPAWNLY_TOKEN=$(kubectl get secret control-plane-auth -o jsonpath='{.data.token}' | base64 -d)
+
+cd examples/agent-template
+terraform plan && terraform apply
+terraform destroy   # auto-disables, then deletes (the registry blocks deleting an active template)
+```
+
+See [terraform-provider-spawnly/README.md](terraform-provider-spawnly/README.md) for the full provider config, examples, and the seeded-template HCL parity check.
+
+---
+
 ## Authoring agents
 
 Guides for building a new agent from scratch live in [`docs/authoring/`](docs/authoring/).
@@ -269,6 +303,14 @@ make test
 ```
 
 Runs all Go unit tests (`go test ./... -v -count=1`). Tests cover the operator reconciler, registry client, SpiceDB client, sample API handlers, and orchestrator HTTP handlers using mocks — no cluster required.
+
+The Terraform provider lives outside the `go.work` workspace and has its own gate:
+
+```bash
+make test-provider
+```
+
+This runs fmt/vet, the provider's unit tests, its acceptance tests, and a seeded-template HCL parity check against an ephemeral SpiceDB + registry testbed it stands up and tears down ([`scripts/acc-testbed.sh`](scripts/acc-testbed.sh)). Needs `docker` and the `terraform` CLI; no Kind cluster.
 
 ---
 
@@ -374,7 +416,9 @@ make kind-load
 - **Tenancy from presence**: an agent is tenanted if a tenant id is present; the same code path serves global agents by simply omitting the tenant segment, header, and relations.
 - **CIBA for human-in-the-loop spawn consent**: the consent-gated child's own sidecar runs the backchannel grant, so "user approves the spawn" is a standard OAuth flow rather than bespoke plumbing — stored consent auto-approves repeats, and revocation starves the child's token renewal.
 - **Revocation cascades, deletion doesn't**: revoke/resume walk the descendant subtree and drop/re-derive SpiceDB relations in real time (pods keep running and get 403s), while `DELETE` removes a single agent only.
-- **Append-only, filterable event log**: lifecycle events flow into the registry's in-memory store. The dashboard appends new events to the DOM without replacing existing rows (preserving expanded/collapsed state) and filters them per-agent by category (heartbeat hidden by default).
+- **Shared-secret control plane**: the registry's template and consent-broker endpoints sit behind a bootstrap-generated shared secret (`CONTROL_PLANE_AUTH=shared-secret` by default), distinct from the SVID-authenticated agent-facing paths — so config-as-code tooling like the Terraform provider can manage the catalog without a workload identity.
+- **A `Store` seam behind the registry**: registry state lives behind a `Store` interface ([`internal/registry/store.go`](internal/registry/store.go)) whose default implementation is in-memory (resets on restart), leaving room for a durable backend without touching handlers.
+- **Append-only, filterable event log**: lifecycle events flow into the registry's store. The dashboard appends new events to the DOM without replacing existing rows (preserving expanded/collapsed state) and filters them per-agent by category (heartbeat hidden by default).
 
 ---
 

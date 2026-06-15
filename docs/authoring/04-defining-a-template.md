@@ -159,6 +159,12 @@ curl -sf -X POST http://localhost:18080/v1/templates \
   -d @agents/report-builder/template.json
 ```
 
+Or manage the template declaratively with the
+[`terraform-provider-spawnly`](../../terraform-provider-spawnly/README.md)
+provider — `terraform apply` upserts it through the same control-plane API, and
+`terraform destroy` disables-then-deletes it. See
+[Config-as-code with Terraform](../operating/config-as-code.md).
+
 ### 5. Spawn and verify
 
 ```bash
@@ -262,9 +268,10 @@ What the platform expects of a template's `image`:
 
 | Action | How |
 |--------|-----|
-| Register / update | `POST /v1/templates` (upsert by `agentType`). |
+| Register / update | `POST /v1/templates` (upsert by `agentType`); or `terraform apply` via the [provider](../operating/config-as-code.md). |
 | List types | `GET /v1/templates`. |
 | Persist across restarts | Drop a `template.json` next to your agent (`agents/<type>/template.json`); run `make reseed` ([`scripts/seed.sh`](../../scripts/seed.sh)). |
+| Config-as-code | Manage templates declaratively with [`terraform-provider-spawnly`](../operating/config-as-code.md). |
 
 ### Status callouts
 

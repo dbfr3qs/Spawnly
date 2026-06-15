@@ -167,6 +167,10 @@ time. `seed.sh` port-forwards the registry to `localhost:18080`. For the full
 field-by-field schema see [04 — Defining a Template](04-defining-a-template.md);
 for what `authzTemplate`/`delegation` authorise see [05 — Defining Policy](05-defining-policy.md).
 
+> **Prefer config-as-code?** The same template can be managed declaratively with
+> the Terraform provider instead of a raw `POST` — see
+> [Config-as-code with Terraform](../operating/config-as-code.md).
+
 #### `lifecycle` — the one switch that defines the scenario
 
 | `lifecycle` | Operator behaviour | Used by |

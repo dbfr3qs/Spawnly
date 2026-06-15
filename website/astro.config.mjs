@@ -55,6 +55,12 @@ export default defineConfig({
             { slug: 'internals/spawn-consent', label: 'CIBA spawn consent' },
           ],
         },
+        {
+          label: 'Operating',
+          items: [
+            { slug: 'operating/config-as-code', label: 'Config-as-code with Terraform' },
+          ],
+        },
       ],
     }),
   ],
