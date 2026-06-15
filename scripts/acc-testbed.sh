@@ -14,6 +14,11 @@
 # from inside a devcontainer.
 set -euo pipefail
 
+# The registry module requires Go >= 1.25 (root go.mod / go.work). Force the
+# auto toolchain so an older base `go` self-upgrades rather than compiling with
+# a stale std (e.g. crypto/pbkdf2, added in 1.24, used by go-jose).
+export GOTOOLCHAIN=auto
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="${SPAWNLY_ACC_STATE_DIR:-/tmp/spawnly-acc-testbed}"
 SPICEDB_NAME="spawnly-acc-spicedb"
@@ -52,7 +57,12 @@ up() {
   echo "    SpiceDB reachable at $ip:50051"
 
   echo "==> building registry"
-  ( cd "$REPO_ROOT" && go build -o "$REG_BIN" ./cmd/registry )
+  if ! ( cd "$REPO_ROOT" && go build -o "$REG_BIN" ./cmd/registry ); then
+    echo "ERROR: registry build failed. It requires Go >= 1.25 (root go.mod)." >&2
+    echo "       Your go: $(go version); GOTOOLCHAIN=$(go env GOTOOLCHAIN)." >&2
+    echo "       Upgrade Go to >= 1.25, or ensure GOTOOLCHAIN=auto with network access." >&2
+    exit 1
+  fi
   : > "$STATE_DIR/dummy-ca.pem" # mtls verifier only needs the path set; never read at boot
 
   echo "==> starting registry (shared-secret, no SPIRE)"

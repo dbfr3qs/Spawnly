@@ -9,6 +9,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROVIDER_DIR="$REPO_ROOT/terraform-provider-spawnly"
 STATE_DIR="${SPAWNLY_ACC_STATE_DIR:-/tmp/spawnly-acc-testbed}"
 export GOWORK=off # the provider is a standalone module, outside go.work
+# The provider (go 1.25.8) and registry (go 1.25.0) modules require Go >= 1.25.
+# Force auto-toolchain so an older base `go` (e.g. a host with GOTOOLCHAIN=local)
+# self-upgrades instead of failing to compile recent std deps like crypto/pbkdf2.
+export GOTOOLCHAIN=auto
 
 command -v terraform >/dev/null 2>&1 || {
   echo "ERROR: terraform CLI not found (https://developer.hashicorp.com/terraform/install)" >&2
