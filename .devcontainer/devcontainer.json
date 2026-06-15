@@ -17,7 +17,10 @@
       "version": "lts"
     },
     "ghcr.io/devcontainers/features/go:1": {
-      "version": "1.22"
+      "version": "1.25.8"
+    },
+    "ghcr.io/devcontainers/features/terraform:1": {
+      "version": "latest"
     },
     "ghcr.io/devcontainers/features/dotnet:2": {
       "version": "8.0"

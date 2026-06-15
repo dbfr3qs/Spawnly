@@ -1,0 +1,19 @@
+---
+page_title: "Spawnly Provider"
+description: |-
+  Manage Spawnly agent templates in the registry control plane — config-as-code for the agent catalog.
+---
+
+# Spawnly Provider
+
+The Spawnly provider manages **agent templates** in the Spawnly registry's
+control plane: the spawnable definitions of each agent type, as code.
+
+It talks directly to the registry control-plane API using a shared-secret
+bearer token.
+
+## Example Usage
+
+{{ tffile "examples/agent-template/main.tf" }}
+
+{{ .SchemaMarkdown | trimspace }}
