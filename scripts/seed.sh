@@ -24,6 +24,14 @@ if [ "${#found[@]}" -eq 0 ]; then
   exit 1
 fi
 
+# Template writes are a control-plane operation. When the cluster was bootstrapped
+# with shared-secret enforcement the `control-plane-auth` Secret holds the token;
+# present it as a bearer. On an open ("none") cluster the Secret is absent, the
+# token is empty, and we send no auth header — seeding works either way.
+CP_TOKEN=$(kubectl get secret control-plane-auth -o jsonpath='{.data.token}' 2>/dev/null | base64 -d 2>/dev/null || true)
+auth_header=()
+[ -n "$CP_TOKEN" ] && auth_header=(-H "Authorization: Bearer ${CP_TOKEN}")
+
 echo "==> Port-forwarding registry..."
 kubectl port-forward svc/registry 18080:8080 &
 PF_PID=$!
@@ -35,6 +43,7 @@ for f in "${found[@]}"; do
   agent_type=$(jq -r .agentType "$f")
   curl -sf -X POST http://localhost:18080/v1/templates \
     -H 'Content-Type: application/json' \
+    "${auth_header[@]}" \
     --data-binary @"$f" >/dev/null
   echo "  ${agent_type}"
 done

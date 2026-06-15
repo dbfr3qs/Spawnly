@@ -134,6 +134,26 @@ kubectl apply -f deploy/spire/clusterspiffeid.yaml
 echo "==> Applying CRD..."
 kubectl apply -f deploy/crds/agentworkload.yaml
 
+# Control-plane shared secret — gates the registry's template + consent
+# control-plane endpoints (CONTROL_PLANE_AUTH=shared-secret). Created before the
+# services so registry and orchestrator come up already enforcing it; both read
+# it from the same `control-plane-auth` Secret, so their tokens match by
+# construction. Reuse an existing token across re-bootstraps (keeps any seeded
+# clients — seed.sh, a Terraform provider — working mid-session); generate one
+# on first bootstrap.
+echo "==> Ensuring control-plane auth secret..."
+CP_TOKEN=$(kubectl get secret control-plane-auth -o jsonpath='{.data.token}' 2>/dev/null | base64 -d 2>/dev/null || true)
+if [ -z "$CP_TOKEN" ]; then
+  CP_TOKEN=$(openssl rand -hex 32)
+  echo "  generated a new control-plane token"
+else
+  echo "  reusing existing control-plane token"
+fi
+kubectl create secret generic control-plane-auth \
+  --from-literal=auth="shared-secret" \
+  --from-literal=token="${CP_TOKEN}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 echo "==> Deploying services..."
 kubectl apply -f deploy/manifests/rbac.yaml
 kubectl apply -f deploy/manifests/spicedb.yaml

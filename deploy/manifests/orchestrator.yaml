@@ -26,14 +26,25 @@ spec:
             - name: REGISTRY_URL
               value: "http://registry:8080"
             # Control-plane auth the orchestrator presents to the registry's
-            # consent endpoints; must match the registry's CONTROL_PLANE_AUTH.
-            # "none" sends no credential (demo). For "shared-secret" set
-            # CONTROL_PLANE_TOKEN; for "oidc" uncomment the client-credentials
+            # template + consent endpoints; must match the registry's setting.
+            # Both values come from the optional `control-plane-auth` Secret that
+            # bootstrap.sh generates (shared with the registry, so the tokens
+            # match by construction). Absent Secret → env unset → "none" (sends
+            # no credential, demo). For "oidc" instead, drop the secretKeyRefs,
+            # set CONTROL_PLANE_AUTH=oidc, and uncomment the client-credentials
             # block (the "orchestrator" IdP client).
             - name: CONTROL_PLANE_AUTH
-              value: "none"
-            # - name: CONTROL_PLANE_TOKEN            # shared-secret tier
-            #   value: "change-me"
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-auth
+                  key: auth
+                  optional: true
+            - name: CONTROL_PLANE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-auth
+                  key: token
+                  optional: true
             # --- oidc tier ---
             # - name: CONTROL_PLANE_TOKEN_URL
             #   value: "http://identity-server:8080/connect/token"

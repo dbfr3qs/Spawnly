@@ -38,14 +38,25 @@ spec:
             - name: DASHBOARD_CLIENT_SECRET
               value: "dashboard-secret"
             # Control-plane auth the IdP's CIBA driver presents to the registry's
-            # consent endpoints; must match the registry's CONTROL_PLANE_AUTH.
-            # "none" sends no credential (demo). For "oidc" uncomment the
-            # client-credentials block (the "idp-consent" client) — and set
-            # IDP_CONSENT_CLIENT_SECRET to match CONTROL_PLANE_CLIENT_SECRET.
+            # consent endpoints; must match the registry's setting. Both values
+            # come from the optional `control-plane-auth` Secret that bootstrap.sh
+            # generates (shared with the registry, so the tokens match by
+            # construction). Absent Secret → env unset → "none" (sends no
+            # credential, demo). For "oidc" instead, drop the secretKeyRefs, set
+            # CONTROL_PLANE_AUTH=oidc, uncomment the client-credentials block (the
+            # "idp-consent" client), and set IDP_CONSENT_CLIENT_SECRET to match.
             - name: CONTROL_PLANE_AUTH
-              value: "none"
-            # - name: CONTROL_PLANE_TOKEN            # shared-secret tier
-            #   value: "change-me"
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-auth
+                  key: auth
+                  optional: true
+            - name: CONTROL_PLANE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-auth
+                  key: token
+                  optional: true
             # --- oidc tier ---
             # - name: CONTROL_PLANE_TOKEN_URL
             #   value: "http://identity-server:8080/connect/token"
