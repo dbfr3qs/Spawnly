@@ -3,7 +3,9 @@ package provider
 import (
 	"context"
 	"fmt"
+	"reflect"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -12,6 +14,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"github.com/spawnly/terraform-provider-spawnly/internal/client"
@@ -120,6 +123,7 @@ func (r *templateResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Optional:            true,
 				Computed:            true,
 				Default:             stringdefault.StaticString("active"),
+				Validators:          []validator.String{stringvalidator.OneOf("active", "disabled")},
 				MarkdownDescription: "Template status: `active` (spawnable) or `disabled` (hidden, unspawnable). Defaults to `active`.",
 			},
 			"requires_tenant": schema.BoolAttribute{
@@ -196,7 +200,11 @@ func (r *templateResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 						NestedObject: schema.NestedAttributeObject{
 							Attributes: map[string]schema.Attribute{
 								"require_user_consent": schema.BoolAttribute{Optional: true, MarkdownDescription: "Gate this child spawn behind CIBA user consent."},
-								"consent_ttl":          schema.StringAttribute{Optional: true, MarkdownDescription: "Go duration string (e.g. `720h`) a granted consent lasts. Empty means never expires."},
+								"consent_ttl": schema.StringAttribute{
+									Optional:            true,
+									Validators:          []validator.String{goDurationValidator()},
+									MarkdownDescription: "Go duration string (e.g. `720h`) a granted consent lasts. Empty means never expires.",
+								},
 							},
 						},
 					},
@@ -210,6 +218,22 @@ func (r *templateResource) Create(ctx context.Context, req resource.CreateReques
 	var plan templateModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+	// Clobber guard: POST is an upsert, so creating a type that already exists
+	// would silently overwrite a template Terraform doesn't track. Refuse, and
+	// point the user at import instead.
+	agentType := plan.AgentType.ValueString()
+	if _, found, err := r.client.GetTemplate(ctx, agentType); err != nil {
+		resp.Diagnostics.AddError("Failed to check for an existing template", err.Error())
+		return
+	} else if found {
+		resp.Diagnostics.AddError(
+			"Template already exists",
+			fmt.Sprintf("A template with agent_type %q already exists in the registry. "+
+				"Import it into Terraform state instead of recreating it:\n\n"+
+				"  terraform import <resource address> %s", agentType, agentType),
+		)
 		return
 	}
 	if err := r.client.PutTemplate(ctx, toWire(plan)); err != nil {
@@ -240,9 +264,26 @@ func (r *templateResource) Read(ctx context.Context, req resource.ReadRequest, r
 }
 
 func (r *templateResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan templateModel
+	var plan, state templateModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
+		return
+	}
+	// Status-only fast path: if the prior state and the plan differ in nothing
+	// but status, PATCH the status instead of re-POSTing the whole document.
+	// Comparing the wire forms (with status zeroed) is robust to null-vs-empty
+	// representation noise that an in-model comparison would trip over.
+	planWire, stateWire := toWire(plan), toWire(state)
+	planWire.Status, stateWire.Status = "", ""
+	if reflect.DeepEqual(planWire, stateWire) {
+		if plan.Status.ValueString() != state.Status.ValueString() {
+			if err := r.client.SetStatus(ctx, plan.AgentType.ValueString(), plan.Status.ValueString()); err != nil {
+				resp.Diagnostics.AddError("Failed to update template status", err.Error())
+				return
+			}
+		}
+		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 		return
 	}
 	// POST is a full-document upsert, so it carries both spec and status changes.

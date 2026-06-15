@@ -94,6 +94,9 @@ func (p *spawnlyProvider) Resources(_ context.Context) []func() resource.Resourc
 }
 
 func (p *spawnlyProvider) DataSources(_ context.Context) []func() datasource.DataSource {
-	// Data sources are added in a later phase.
-	return nil
+	return []func() datasource.DataSource{
+		NewTemplateDataSource,
+		NewSchemaDataSource,
+		NewTemplatesDataSource,
+	}
 }

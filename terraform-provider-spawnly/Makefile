@@ -10,7 +10,7 @@ BIN_DIR     := $(CURDIR)/bin
 SOURCE_ADDR := registry.terraform.io/spawnly/spawnly
 TFRC        := $(CURDIR)/dev.tfrc
 
-.PHONY: build install tfrc test testacc fmt vet clean
+.PHONY: build install tfrc test testacc docs fmt vet clean
 
 ## build: compile the provider binary into ./bin
 build:
@@ -35,6 +35,13 @@ test:
 ## testacc: acceptance tests against a live registry (needs TF_ACC + SPAWNLY_*)
 testacc:
 	TF_ACC=1 go test ./internal/provider/ -v -timeout 20m
+
+## docs: regenerate the provider docs/ from schema + templates/ + examples/.
+## NOTE: do NOT run this until ALL resources and data sources are wired into the
+## provider — tfplugindocs walks the whole provider and would emit incomplete
+## docs otherwise. This target is the integration-time command, via tools.go.
+docs:
+	go run github.com/hashicorp/terraform-plugin-docs/cmd/tfplugindocs generate --provider-name spawnly
 
 fmt:
 	gofmt -w .
