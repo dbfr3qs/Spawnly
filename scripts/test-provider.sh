@@ -13,6 +13,11 @@ export GOWORK=off # the provider is a standalone module, outside go.work
 # Force auto-toolchain so an older base `go` (e.g. a host with GOTOOLCHAIN=local)
 # self-upgrades instead of failing to compile recent std deps like crypto/pbkdf2.
 export GOTOOLCHAIN=auto
+# Drop any inherited GOROOT (VS Code's Go extension / stale shells often export
+# one pointing at a toolchain that no longer matches the `go` on PATH, causing
+# `compile: version "goX" does not match go tool version "goY"`). Let `go`
+# derive GOROOT from its own binary.
+unset GOROOT
 
 command -v terraform >/dev/null 2>&1 || {
   echo "ERROR: terraform CLI not found (https://developer.hashicorp.com/terraform/install)" >&2

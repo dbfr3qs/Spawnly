@@ -19,6 +19,13 @@ set -euo pipefail
 # a stale std (e.g. crypto/pbkdf2, added in 1.24, used by go-jose).
 export GOTOOLCHAIN=auto
 
+# Drop any inherited GOROOT. VS Code's Go extension (and stale interactive
+# shells) often export GOROOT pointing at a downloaded toolchain that no longer
+# matches the `go` binary on PATH, which makes the build fail with
+# `compile: version "goX" does not match go tool version "goY"`. Letting `go`
+# derive GOROOT from its own binary avoids that skew.
+unset GOROOT
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="${SPAWNLY_ACC_STATE_DIR:-/tmp/spawnly-acc-testbed}"
 SPICEDB_NAME="spawnly-acc-spicedb"
