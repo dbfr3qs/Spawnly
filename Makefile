@@ -13,7 +13,7 @@ NODE_AGENTS   := child-agent parent-agent currency-converter trip-planner chain-
 EXTRA_AGENTS  := identity-server weather-monitor
 SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS) $(EXTRA_AGENTS)
 
-.PHONY: build test docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed print-% e2e-setup e2e
+.PHONY: build test test-provider docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed print-% e2e-setup e2e
 
 # print-<VAR> — echo a make variable so shell scripts can read the authoritative
 # lists instead of re-declaring them. e.g. `make -s print-SERVICES`.
@@ -32,6 +32,13 @@ build:
 
 test:
 	go test ./... -v -count=1
+
+# Full gate for terraform-provider-spawnly: fmt/vet/unit + acceptance + the
+# seeded-template parity check, on an ephemeral SpiceDB+registry testbed
+# (no kind/SPIRE). Needs docker + the terraform CLI. Mirrors the
+# terraform-provider CI workflow.
+test-provider:
+	./scripts/test-provider.sh
 
 docker-build:
 	@for svc in $(filter-out agent-sidecar,$(SERVICES)); do \

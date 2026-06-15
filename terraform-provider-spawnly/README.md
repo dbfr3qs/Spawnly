@@ -59,10 +59,16 @@ terraform destroy   # auto-disables then deletes (registry blocks deleting an ac
 
 ## Tests
 
-`make test` runs the unit tests (no cluster needed). `make testacc` runs the
-acceptance tests, which drive the real resource lifecycle (create → import →
-update → destroy) against a live registry. They are gated on `TF_ACC` and read
-`SPAWNLY_ENDPOINT` / `SPAWNLY_TOKEN` from the environment:
+**One command, no cluster:** from the repo root, `make test-provider` runs the
+full gate — fmt/vet, unit tests, acceptance tests, and the seeded-template
+parity check — against an ephemeral SpiceDB + registry testbed it stands up and
+tears down (`scripts/acc-testbed.sh`). Needs `docker` and the `terraform` CLI.
+This is exactly what the `terraform-provider` CI workflow runs.
+
+Lower-level targets (from this directory): `make test` runs the unit tests (no
+cluster). `make testacc` runs the acceptance tests against a live registry; they
+are gated on `TF_ACC` and read `SPAWNLY_ENDPOINT` / `SPAWNLY_TOKEN` from the
+environment:
 
 ```bash
 export SPAWNLY_ENDPOINT=http://localhost:18080

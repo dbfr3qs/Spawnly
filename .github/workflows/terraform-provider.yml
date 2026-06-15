@@ -1,0 +1,40 @@
+name: terraform-provider
+
+# Gate terraform-provider-spawnly on changes to the provider OR to the registry
+# control-plane contract it depends on (the provider hand-copies the registry's
+# wire types, so a registry change can break it with no compile-time signal).
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - 'terraform-provider-spawnly/**'
+      - 'cmd/registry/**'
+      - 'internal/registry/**'
+      - 'internal/registrant/**'
+      - 'internal/controlplane/**'
+      - 'scripts/acc-testbed.sh'
+      - 'scripts/test-provider.sh'
+      - '.github/workflows/terraform-provider.yml'
+  pull_request:
+    paths: *paths
+
+jobs:
+  provider:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          # Disable the wrapper so terraform's real exit codes reach the
+          # acceptance harness and the parity check (plan -detailed-exitcode).
+          terraform_wrapper: false
+
+      # fmt/vet/unit + acceptance + seeded-template parity, on an ephemeral
+      # SpiceDB+registry testbed. Docker is preinstalled on ubuntu runners.
+      - name: make test-provider
+        run: make test-provider

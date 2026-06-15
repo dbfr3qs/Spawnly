@@ -15,6 +15,7 @@ terraform {
 }
 
 provider "spawnly" {
-  endpoint = "http://localhost:18080" # port-forwarded registry
-  # token from SPAWNLY_TOKEN
+  # endpoint from SPAWNLY_ENDPOINT (e.g. http://localhost:18080 against a
+  # port-forwarded dev-cluster registry, or the acc testbed), token from
+  # SPAWNLY_TOKEN.
 }
