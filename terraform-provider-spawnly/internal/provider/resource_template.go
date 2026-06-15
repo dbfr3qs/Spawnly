@@ -149,9 +149,14 @@ func (r *templateResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			"runtime_spec": schema.SingleNestedBlock{
 				MarkdownDescription: "How the agent pod is built and run.",
 				Attributes: map[string]schema.Attribute{
-					"image":         schema.StringAttribute{Optional: true, MarkdownDescription: "Container image for the agent."},
-					"lifecycle":     schema.StringAttribute{Optional: true, MarkdownDescription: "`short-lived` or `long-lived`."},
-					"supports_chat": schema.BoolAttribute{Optional: true, MarkdownDescription: "Whether the agent serves the chat endpoint (long-lived only)."},
+					"image":     schema.StringAttribute{Optional: true, MarkdownDescription: "Container image for the agent."},
+					"lifecycle": schema.StringAttribute{Optional: true, MarkdownDescription: "`short-lived` or `long-lived`."},
+					"supports_chat": schema.BoolAttribute{
+						Optional:            true,
+						Computed:            true,
+						Default:             booldefault.StaticBool(false),
+						MarkdownDescription: "Whether the agent serves the chat endpoint (long-lived only). Defaults to false.",
+					},
 					"env_defaults": schema.MapAttribute{
 						Optional:            true,
 						ElementType:         types.StringType,

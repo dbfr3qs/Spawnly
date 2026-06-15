@@ -86,7 +86,7 @@ Optional:
 - `image` (String) Container image for the agent.
 - `lifecycle` (String) `short-lived` or `long-lived`.
 - `resources` (Block, Optional) Pod resource limits. (see [below for nested schema](#nestedblock--runtime_spec--resources))
-- `supports_chat` (Boolean) Whether the agent serves the chat endpoint (long-lived only).
+- `supports_chat` (Boolean) Whether the agent serves the chat endpoint (long-lived only). Defaults to false.
 
 <a id="nestedblock--runtime_spec--resources"></a>
 ### Nested Schema for `runtime_spec.resources`
