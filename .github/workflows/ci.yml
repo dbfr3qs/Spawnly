@@ -1,0 +1,129 @@
+name: ci
+
+# Lane 1 — fast, secret-free build + unit-test gate for every PR.
+#
+# Deliberately does NOT spin up Kind/SPIRE or run the e2e suite: those need a
+# real AI key and cost money/time, so they live in a separate gated lane. This
+# workflow only compiles every toolchain and runs the unit tests, so it is safe
+# to run on fork PRs (no secrets are referenced).
+#
+# Not duplicated here (already covered elsewhere):
+#   - terraform-provider-spawnly  -> .github/workflows/terraform-provider.yml
+#   - website/ + docs/            -> .github/workflows/deploy.yml
+
+on:
+  pull_request:
+    paths-ignore:
+      - 'website/**'
+      - 'docs/**'
+      - '**/*.md'
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'website/**'
+      - 'docs/**'
+      - '**/*.md'
+
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref so a new push doesn't queue behind a
+# stale one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: go build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          # setup-go caches the module + build cache keyed on go.sum by default.
+          cache-dependency-path: |
+            go.sum
+            sdks/go/go.sum
+            agents/go-worker/go.sum
+
+      # Root module: compile everything, then the 185-file unit suite (== make test).
+      - name: go build (root module)
+        run: go build ./...
+      - name: go vet (root module)
+        run: go vet ./...
+      - name: make test (root unit tests)
+        run: make test
+
+      # go.work lists three modules; `go test ./...` only covers the module in
+      # cwd, so the other two are built/tested explicitly.
+      - name: go test (sdks/go)
+        run: go test ./... -count=1
+        working-directory: sdks/go
+      - name: go build (agents/go-worker)
+        run: go build ./...
+        working-directory: agents/go-worker
+
+  node:
+    name: node typecheck
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        agent:
+          - child-agent
+          - parent-agent
+          - currency-converter
+          - trip-planner
+          - chain-worker
+          - pi-worker
+          - weather-monitor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The agents depend on @spawnly/sdk via `file:../../sdks/typescript`, so the
+      # SDK must be built (dist/) before any agent can typecheck against it.
+      - name: build @spawnly/sdk
+        run: npm ci && npm run build
+        working-directory: sdks/typescript
+
+      # `npm run build` is `tsc` for every agent except weather-monitor, whose
+      # build is `flue build --target node` — running the real build path on each
+      # mirrors what `make reload-<agent>` does locally.
+      - name: build ${{ matrix.agent }}
+        run: npm ci && npm run build
+        working-directory: agents/${{ matrix.agent }}
+
+  dotnet:
+    name: dotnet build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0'
+      - name: build IdentityServer
+        run: dotnet build identityserver/IdentityServer.csproj -c Release
+
+  manifests:
+    name: validate k8s manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install kubeconform
+        run: |
+          curl -sSLf \
+            https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar -xz kubeconform
+          sudo mv kubeconform /usr/local/bin/
+      # -ignore-missing-schemas: the CRD-typed AgentWorkload resources have no
+      # published schema. -strict catches unknown fields in the core resources.
+      - name: kubeconform deploy/
+        run: |
+          kubeconform -strict -summary -ignore-missing-schemas \
+            -kubernetes-version 1.31.0 \
+            deploy/crds/ deploy/manifests/
