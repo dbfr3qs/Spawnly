@@ -16,6 +16,10 @@ const aiProvider     = process.env.AI_PROVIDER     ?? "openai";
 const aiApiKey       = process.env.AI_API_KEY      ?? "";
 const aiModel        = process.env.AI_MODEL        ?? "openai/gpt-4o";
 const promptTimeoutMs = Number(process.env.PROMPT_TIMEOUT_MS ?? 120000);
+// How long a fetched reading stays fresh. Within this window a repeated ask for
+// the same place is served from the in-process cache below instead of re-hitting
+// the geocoder/forecast APIs.
+const weatherCacheTtlMs = Number(process.env.WEATHER_CACHE_TTL_MS ?? 300_000);
 
 // Open-Meteo — free, no API key. Geocoding resolves a place name to lat/lon;
 // the forecast endpoint returns current conditions for those coordinates.
@@ -120,6 +124,15 @@ async function geocode(location: string): Promise<GeoResult | null> {
   return null;
 }
 
+// Tiny in-process cache so repeated asks for the same place within a short
+// window are idempotent and free. Keyed by normalised place name; entries hold
+// the raw weather body plus when it was fetched. Lost on pod restart.
+interface CachedWeather {
+  fetchedAt: number;
+  payload: Record<string, unknown>;
+}
+const weatherCache = new Map<string, CachedWeather>();
+
 // Tool: resolve a place name and report its current weather (no auth required).
 const getWeather: ToolDef = {
   name: "get_weather",
@@ -140,6 +153,20 @@ const getWeather: ToolDef = {
     const location = String(args.location ?? "").trim();
     if (!location) {
       return JSON.stringify({ error: "no location provided" });
+    }
+
+    // Step 0: serve a still-fresh reading from cache, stamped with its age so the
+    // model can decide whether that's good enough or worth mentioning to the user.
+    const cacheKey = location.toLowerCase();
+    const now = Date.now();
+    const hit = weatherCache.get(cacheKey);
+    if (hit && now - hit.fetchedAt < weatherCacheTtlMs) {
+      return JSON.stringify({
+        ...hit.payload,
+        fetchedAt: new Date(hit.fetchedAt).toISOString(),
+        ageSeconds: Math.round((now - hit.fetchedAt) / 1000),
+        cached: true,
+      });
     }
 
     // Step 1: geocode the place name to coordinates (Open-Meteo, wttr.in fallback).
@@ -166,7 +193,7 @@ const getWeather: ToolDef = {
     const units = wx.current_units ?? {};
     const code = Number(cur.weather_code);
 
-    return JSON.stringify({
+    const payload = {
       location: place.label,
       conditions: WEATHER_CODES[code] ?? `weather code ${code}`,
       temperature: cur.temperature_2m,
@@ -177,15 +204,126 @@ const getWeather: ToolDef = {
         temperature: units.temperature_2m ?? "°C",
         windSpeed: units.wind_speed_10m ?? "km/h",
       },
+    };
+    weatherCache.set(cacheKey, { fetchedAt: now, payload });
+
+    return JSON.stringify({ ...payload, fetchedAt: new Date(now).toISOString(), ageSeconds: 0, cached: false });
+  },
+};
+
+// Separate cache for daily forecasts, keyed by place + day count (a 3-day and a
+// 7-day ask for the same place are different results).
+const forecastCache = new Map<string, CachedWeather>();
+
+// Tool: resolve a place name and report its multi-day daily forecast. Distinct
+// from get_weather (current conditions) so the model can call both for a question
+// that spans "now" and a future day.
+const getForecast: ToolDef = {
+  name: "get_forecast",
+  description:
+    "Look up the daily weather forecast for a location by name, for the next few days. " +
+    "Returns one entry per day (the first entry is today, the second is tomorrow, and so on) with " +
+    "the date, a short conditions description, min/max temperature, chance of precipitation and max wind speed. " +
+    "Use this for questions about tomorrow or any future day; use get_weather for current conditions.",
+  parameters: {
+    type: "object",
+    properties: {
+      location: {
+        type: "string",
+        description: "Place name to look up, e.g. 'Paris', 'Dunedin, New Zealand'.",
+      },
+      days: {
+        type: "number",
+        description: "How many days to return, counting today as day 1 (1-7). Defaults to 3.",
+      },
+    },
+    required: ["location"],
+  },
+  execute: async (args: Record<string, unknown>) => {
+    const location = String(args.location ?? "").trim();
+    if (!location) {
+      return JSON.stringify({ error: "no location provided" });
+    }
+    const days = Math.min(Math.max(Math.round(Number(args.days ?? 3)) || 3, 1), 7);
+
+    const cacheKey = `${location.toLowerCase()}::${days}`;
+    const now = Date.now();
+    const hit = forecastCache.get(cacheKey);
+    if (hit && now - hit.fetchedAt < weatherCacheTtlMs) {
+      return JSON.stringify({
+        ...hit.payload,
+        fetchedAt: new Date(hit.fetchedAt).toISOString(),
+        ageSeconds: Math.round((now - hit.fetchedAt) / 1000),
+        cached: true,
+      });
+    }
+
+    const place = await geocode(location);
+    if (!place) {
+      return JSON.stringify({ error: `could not find a location named "${location}"` });
+    }
+
+    // timezone=auto so the daily buckets (and therefore "tomorrow") align with
+    // the location's local calendar day, not UTC.
+    const params = new URLSearchParams({
+      latitude: String(place.latitude),
+      longitude: String(place.longitude),
+      daily: "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max",
+      timezone: "auto",
+      forecast_days: String(days),
     });
+    const wxRes = await fetch(`${forecastUrl}?${params.toString()}`, { signal: AbortSignal.timeout(8000) });
+    if (!wxRes.ok) {
+      return JSON.stringify({ error: `forecast failed: ${wxRes.status}` });
+    }
+    const wx = (await wxRes.json()) as {
+      daily?: Record<string, Array<number | string>>;
+      daily_units?: Record<string, string>;
+    };
+    const d = wx.daily ?? {};
+    const units = wx.daily_units ?? {};
+    const dates = (d.time ?? []) as string[];
+
+    const forecast = dates.map((date, i) => {
+      const code = Number(d.weather_code?.[i]);
+      return {
+        date,
+        conditions: WEATHER_CODES[code] ?? `weather code ${code}`,
+        temperatureMax: d.temperature_2m_max?.[i],
+        temperatureMin: d.temperature_2m_min?.[i],
+        precipitationProbabilityPercent: d.precipitation_probability_max?.[i],
+        windSpeedMax: d.wind_speed_10m_max?.[i],
+      };
+    });
+
+    const payload = {
+      location: place.label,
+      units: {
+        temperature: units.temperature_2m_max ?? "°C",
+        windSpeed: units.wind_speed_10m_max ?? "km/h",
+        precipitationProbability: units.precipitation_probability_max ?? "%",
+      },
+      forecast,
+    };
+    forecastCache.set(cacheKey, { fetchedAt: now, payload });
+
+    return JSON.stringify({ ...payload, fetchedAt: new Date(now).toISOString(), ageSeconds: 0, cached: false });
   },
 };
 
 const SYSTEM_PROMPT =
-  "You are Weather Monitor, a friendly weather assistant. When the user asks about the weather " +
-  "for any place, call the get_weather tool with that location and answer using the values it returns. " +
-  "Keep replies concise and conversational. If the tool reports it could not find a location, say so and " +
-  "ask the user to clarify. For non-weather chit-chat, reply briefly without calling the tool.";
+  "You are Weather Monitor, a friendly weather assistant. You have two tools: " +
+  "get_weather returns the *current* conditions for a place, and get_forecast returns the *daily forecast* " +
+  "for the next few days (its first entry is today, the second is tomorrow, and so on). " +
+  "Break the user's question into every tool call it needs and make them all, then answer from the results. " +
+  "Use get_weather for what it's like right now, and get_forecast for tomorrow or any future day — a question " +
+  "like 'what's it like now and tomorrow?' needs BOTH tools. If the user names several places, call the " +
+  "appropriate tool once per place. " +
+  "If you already have a fresh result for the same place and span earlier in this conversation and the user " +
+  "hasn't implied that time has passed, reuse it instead of calling again; each tool result's ageSeconds tells " +
+  "you how old it is. " +
+  "Keep replies concise and conversational. If a tool reports it could not find a location, say so and " +
+  "ask the user to clarify. For non-weather chit-chat, reply briefly without calling a tool.";
 
 // One Flue session per chat sessionId, so follow-up questions keep context.
 // In-memory only — lost if the pod restarts.
@@ -212,7 +350,7 @@ function getSession(sessionId: string): Promise<FlueSession> {
       defaultStore: new InMemorySessionStore(),
     });
     instrumentFlue(ctx, registryUrl, agentId);
-    const harness = await ctx.init({ model: aiModel, tools: [getWeather], sandbox: local() });
+    const harness = await ctx.init({ model: aiModel, tools: [getWeather, getForecast], sandbox: local() });
     return harness.session();
   })();
 
