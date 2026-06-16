@@ -36,7 +36,21 @@ echo "==> Port-forwarding registry..."
 kubectl port-forward svc/registry 18080:8080 &
 PF_PID=$!
 trap 'kill $PF_PID 2>/dev/null || true' EXIT
-sleep 2
+
+# Wait for the registry to actually accept connections before seeding. The pod can
+# report Ready before its HTTP server is listening (it binds :8080 only after its
+# SpiceDB schema write), and the port-forward itself needs a moment to establish —
+# either races a bare `sleep` and curl hits "connection refused". `curl -s` (no -f)
+# returns 0 on any HTTP response, non-zero only when it couldn't connect.
+echo "==> Waiting for the registry to accept connections..."
+ready=
+for _ in $(seq 1 30); do
+  if curl -s -o /dev/null "http://localhost:18080/v1/templates"; then
+    ready=1; break
+  fi
+  sleep 1
+done
+[ -n "$ready" ] || { echo "ERROR: registry did not start serving on :18080 in time." >&2; exit 1; }
 
 echo "==> Seeding templates..."
 for f in "${found[@]}"; do

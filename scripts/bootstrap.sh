@@ -104,10 +104,32 @@ helm repo update spiffe 2>/dev/null || echo "  Warning: could not refresh spiffe
 helm upgrade --install spire-crds spiffe/spire-crds \
   --namespace spire-system --create-namespace --wait
 
-helm upgrade --install spire spiffe/spire \
-  --namespace spire-system \
-  --values deploy/spire/values.yaml \
-  --wait --timeout=5m
+# Install the SPIRE chart WITHOUT Helm's workload wait. Helm v4's default '--wait'
+# ('watcher') strategy hangs indefinitely against this cluster — it never returns
+# and ignores its own --timeout even when every pod is already Ready (a known v4
+# regression). Omitting --wait falls back to the 'hookOnly' strategy: Helm still
+# blocks on the chart's post-install hook job, then returns promptly. We gate
+# actual workload readiness ourselves with `kubectl rollout status` below, which
+# is reliable here. A coreutils `timeout` + one retry stay as a backstop in case
+# even the apply/hook phase wedges (a killed install leaves the release in
+# pending-install, so it must be uninstalled before the retry's upgrade, which
+# would otherwise refuse with "another operation in progress").
+install_spire() {
+  timeout --kill-after=30s 360 \
+    helm upgrade --install spire spiffe/spire \
+      --namespace spire-system \
+      --values deploy/spire/values.yaml \
+      --timeout=5m
+}
+
+if ! install_spire; then
+  echo "  SPIRE chart install did not finish; clearing the release and retrying once..."
+  helm uninstall spire --namespace spire-system --timeout=90s 2>/dev/null || true
+  if ! install_spire; then
+    echo "  ERROR: SPIRE chart install failed twice. Inspect 'kubectl -n spire-system get pods' and 'helm list -A'." >&2
+    exit 1
+  fi
+fi
 
 # Force-delete any SPIRE pods stuck in Unknown state (can happen after node restart).
 # The agent pod is restarted to ensure it reads the freshly-synced trust bundle.
@@ -122,9 +144,19 @@ done
 # (needed when server restarts rotate the CA before the agent can sync).
 kubectl -n spire-system rollout restart daemonset/spire-agent 2>/dev/null || true
 
-echo "==> Waiting for SPIRE OIDC discovery provider..."
-kubectl -n spire-system wait --for=condition=available \
-  deployment/spire-spiffe-oidc-discovery-provider --timeout=120s
+# Gate on actual workload readiness ourselves (Helm v4's watcher can't be trusted
+# to — see the install note above). This also waits for the agent we just
+# restarted to come back up.
+#
+# Timeout is generous (10m): the SPIRE pods pull a busybox init image from Docker
+# Hub on first start, and on a slow or flaky egress that pull can ImagePullBackOff
+# for several minutes before succeeding. A short timeout here aborts the whole
+# bootstrap over a transient pull, so we wait it out rather than fail fast.
+echo "==> Waiting for SPIRE components to be ready (first start may pull images)..."
+kubectl -n spire-system rollout status statefulset/spire-server --timeout=600s
+kubectl -n spire-system rollout status daemonset/spiffe-csi-driver --timeout=600s
+kubectl -n spire-system rollout status daemonset/spire-agent --timeout=600s
+kubectl -n spire-system rollout status deployment/spire-spiffe-oidc-discovery-provider --timeout=600s
 
 echo "==> Applying ClusterSPIFFEID..."
 kubectl apply -f deploy/spire/clusterspiffeid.yaml

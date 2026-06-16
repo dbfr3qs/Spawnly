@@ -52,6 +52,18 @@ spec:
             #   value: "registry.consent"
           ports:
             - containerPort: 8080
+          # The registry binds :8080 only AFTER it writes its SpiceDB schema on
+          # startup (which retries until SpiceDB is reachable — up to ~30s). Without
+          # a probe the pod reports Ready the instant the process starts, so
+          # `kubectl rollout status` returns and seeding races a not-yet-listening
+          # server (connection refused). A TCP probe on 8080 makes Ready mean
+          # "actually serving."
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 1
+            periodSeconds: 2
+            failureThreshold: 30
 ---
 apiVersion: v1
 kind: Service
