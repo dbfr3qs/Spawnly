@@ -2122,7 +2122,8 @@
     if (!Array.isArray(types) || types.length === 0) return;
     const sel = document.getElementById('f-type');
     if (!sel || sel.tagName !== 'SELECT') return;
-    sel.innerHTML = types.map(t =>
+    const sorted = [...types].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+    sel.innerHTML = sorted.map(t =>
       `<option value="${escHtml(t)}"${t === 'worker' ? ' selected' : ''}>${escHtml(t)}</option>`
     ).join('');
   });
