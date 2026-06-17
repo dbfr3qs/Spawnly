@@ -1,0 +1,119 @@
+name: e2e
+
+# Lane 2 (model-free) — stands up the entire platform on a real Kind cluster via
+# scripts/bootstrap.sh, then runs the subset of the dashboard e2e suite that does
+# NOT need a real LLM. The platform itself never calls a model, and the agents
+# these specs drive are deterministic:
+#   - chain-worker spawns its chain over HTTP (orchestrator/spawn), no reasoning
+#   - ciba-consent gates that same deterministic spawn
+#   - smoke / auth / template-lifecycle are pure dashboard + control-plane flows
+# So this lane runs with a DUMMY ai-provider key and costs nothing per run.
+#
+# Excluded (need a real model — keep them for a future key-gated / fake-model
+# lane): weather-chat, pi-worker, global-worker.
+#
+# Heavy (~15 image builds + SPIRE + SpiceDB), so it does not run on every PR by
+# default: pushes to main, manual dispatch, and PRs labelled `full-e2e`.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'website/**'
+      - 'docs/**'
+      - '**/*.md'
+  pull_request:
+    types: [opened, reopened, synchronize, labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bootstrap-e2e:
+    name: bootstrap + model-free e2e
+    runs-on: ubuntu-latest
+    # On PRs, only run when explicitly opted in via the `full-e2e` label (this
+    # lane is slow). Always runs on push/main and manual dispatch.
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'full-e2e')
+    timeout-minutes: 60
+    env:
+      # Bootstrap creates the ai-provider secret from this. No model is called by
+      # the model-free subset, so a placeholder is sufficient.
+      ANTHROPIC_API_KEY: dummy-key-not-used-by-model-free-e2e
+      # Force bootstrap's native-host path (CI runner is not a devcontainer): use
+      # Kind's default 127.0.0.1 kubeconfig instead of the control-plane IP.
+      BOOTSTRAP_IN_CONTAINER: '0'
+    steps:
+      - uses: actions/checkout@v4
+
+      # ~14GB of free disk isn't enough headroom for 15 images + SPIRE/SpiceDB.
+      # Drop host toolchains the in-Docker builds don't use to reclaim space.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker image prune -af || true
+          df -h /
+
+      - name: Install kind, kubectl, helm
+        run: |
+          curl -sSLo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          chmod +x ./kind && sudo mv ./kind /usr/local/bin/kind
+          curl -sSLo ./kubectl "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl && sudo mv ./kubectl /usr/local/bin/kubectl
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          kind version && kubectl version --client && helm version
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Brings up the whole platform: Kind cluster, all images built + loaded,
+      # SPIRE, CRD, control-plane secret, every deployment, seeded templates.
+      - name: Bootstrap the platform
+        run: ./scripts/bootstrap.sh
+
+      - name: Install Playwright + Chromium
+        run: cd e2e && npm ci && npx playwright install --with-deps chromium
+
+      # Run only the model-free specs. Playwright still runs the `setup` (login)
+      # and `cleanup` (teardown) projects because the chromium project depends on
+      # them — file filters don't apply to dependency/teardown projects.
+      - name: Run model-free e2e subset
+        run: |
+          cd e2e && npx playwright test \
+            tests/smoke.spec.ts \
+            tests/auth.spec.ts \
+            tests/template-lifecycle.spec.ts \
+            tests/chain-worker.spec.ts \
+            tests/ciba-consent.spec.ts
+
+      # Diagnostics — on failure the bootstrap or a spec broke; cluster state and
+      # the Playwright report are what you need to triage.
+      - name: Dump cluster state on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl get agentworkloads -A || true
+          kubectl describe pods -l 'agent-type' || true
+          for d in registry orchestrator agent-operator identity-server dashboard; do
+            echo "===== logs: deploy/$d ====="
+            kubectl logs "deploy/$d" --tail=100 --all-containers || true
+          done
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 7
