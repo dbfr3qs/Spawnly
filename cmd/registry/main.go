@@ -1510,11 +1510,23 @@ func main() {
 		}
 	}
 
-	// Registration auth is pluggable (Phase 3): the verifier identifies the
-	// caller registering an agent. Default is SPIFFE-SVID (SPIRE); consumers
-	// without SPIRE can select OIDC-JWT or mTLS via REGISTRANT_VERIFIER.
+	// Registration auth is pluggable: the verifier identifies the caller
+	// registering an agent. It follows the platform-wide ATTESTOR selector by
+	// default (spiffe -> spiffe-svid, aws-sts -> oidc), but REGISTRANT_VERIFIER
+	// can override it explicitly for mixed-attestor deployments. Whatever is
+	// chosen, its AgentID derivation MUST match the IdentityServer verifier's,
+	// or minted tokens won't line up with registry records.
+	var attestorDefault string
+	switch a := getEnv("ATTESTOR", "spiffe"); a {
+	case "spiffe":
+		attestorDefault = "spiffe-svid"
+	case "aws-sts":
+		attestorDefault = "aws-sts"
+	default:
+		log.Fatalf("unknown ATTESTOR %q", a)
+	}
 	var verifier registrant.Verifier
-	switch v := getEnv("REGISTRANT_VERIFIER", "spiffe-svid"); v {
+	switch v := getEnv("REGISTRANT_VERIFIER", attestorDefault); v {
 	case "spiffe-svid":
 		jwksValidator, err := spiffe.NewJWKSValidator(ctx, spireJWKSURL)
 		if err != nil {
@@ -1535,6 +1547,10 @@ func main() {
 		if err != nil {
 			log.Fatalf("OIDC verifier init: %v", err)
 		}
+	case "aws-sts":
+		// Registration credential is a presigned STS GetCallerIdentity request;
+		// the verifier replays it and derives AgentID from the session name.
+		verifier = registrant.NewAwsStsVerifier(nil)
 	case "mtls":
 		if getEnv("MTLS_CLIENT_CA_PATH", "") == "" {
 			log.Fatalf("MTLS_CLIENT_CA_PATH required when REGISTRANT_VERIFIER=mtls")

@@ -16,9 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/spiffe/go-spiffe/v2/svid/jwtsvid"
-	"github.com/spiffe/go-spiffe/v2/workloadapi"
-
+	"github.com/spawnly/platform/internal/attestor"
 	"github.com/spawnly/platform/internal/events"
 	"github.com/spawnly/platform/internal/registry"
 )
@@ -32,29 +30,15 @@ type config struct {
 	registryURL string
 	isTokenURL  string
 	socketPath  string
+	// source fetches the attestation credential the sidecar presents to the
+	// IdentityServer (a JWT-SVID under SPIFFE/SPIRE). Pluggable per ATTESTOR.
+	source attestor.Source
 	// consentRequired (CONSENT_REQUIRED=true, stamped by the orchestrator from
 	// the parent template) gates the agent's tokens behind a CIBA backchannel
 	// authentication approved by the spawning user. consentScopes is the
 	// template-declared scope set that consent covers.
 	consentRequired bool
 	consentScopes   string
-}
-
-func fetchJWT(ctx context.Context, socketPath, audience string) (string, error) {
-	var svid *jwtsvid.SVID
-	var err error
-	for i := 0; i < 10; i++ {
-		svid, err = workloadapi.FetchJWTSVID(ctx,
-			jwtsvid.Params{Audience: audience},
-			workloadapi.WithAddr(socketPath),
-		)
-		if err == nil {
-			return svid.Marshal(), nil
-		}
-		log.Printf("waiting for SPIRE identity (attempt %d/10): %v", i+1, err)
-		time.Sleep(3 * time.Second)
-	}
-	return "", err
 }
 
 func selfRegister(ctx context.Context, cfg config, svid string) (string, error) {
@@ -99,11 +83,10 @@ func mustMarshal(v any) json.RawMessage {
 }
 
 type tokenCache struct {
-	mu         sync.Mutex
-	token      string
-	expiry     time.Time
-	cfg        config
-	socketPath string
+	mu     sync.Mutex
+	token  string
+	expiry time.Time
+	cfg    config
 }
 
 func (tc *tokenCache) get(ctx context.Context, scope string) (string, int, error) {
@@ -114,16 +97,16 @@ func (tc *tokenCache) get(ctx context.Context, scope string) (string, int, error
 		return tc.token, int(time.Until(tc.expiry).Seconds()), nil
 	}
 
-	svid, err := fetchJWT(ctx, tc.socketPath, tc.cfg.isTokenURL)
+	cred, err := tc.cfg.source.Fetch(ctx, tc.cfg.isTokenURL)
 	if err != nil {
-		return "", 0, fmt.Errorf("fetch SVID: %w", err)
+		return "", 0, fmt.Errorf("fetch credential: %w", err)
 	}
 
 	form := url.Values{
 		"grant_type":            {"client_credentials"},
 		"client_id":             {tc.cfg.agentType},
-		"client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
-		"client_assertion":      {svid},
+		"client_assertion_type": {cred.AssertionType},
+		"client_assertion":      {cred.Value},
 		"scope":                 {scope},
 	}
 	req, err := http.NewRequestWithContext(ctx, "POST", tc.cfg.isTokenURL,
@@ -165,21 +148,21 @@ func (tc *tokenCache) get(ctx context.Context, scope string) (string, int, error
 // exchanged for a fresh token, with this agent's SVID as the actor token so the
 // resulting token carries an extended `act` chain. Exchanged tokens bypass the
 // cache: they are short-lived and request-specific (audience/scope vary).
-func exchangeToken(ctx context.Context, cfg config, socketPath, subjectToken, audience, scope string) (string, int, error) {
-	svid, err := fetchJWT(ctx, socketPath, cfg.isTokenURL)
+func exchangeToken(ctx context.Context, cfg config, subjectToken, audience, scope string) (string, int, error) {
+	cred, err := cfg.source.Fetch(ctx, cfg.isTokenURL)
 	if err != nil {
-		return "", 0, fmt.Errorf("fetch SVID: %w", err)
+		return "", 0, fmt.Errorf("fetch credential: %w", err)
 	}
 
 	form := url.Values{
 		"grant_type":            {"urn:ietf:params:oauth:grant-type:token-exchange"},
 		"subject_token":         {subjectToken},
 		"subject_token_type":    {"urn:ietf:params:oauth:token-type:access_token"},
-		"actor_token":           {svid},
+		"actor_token":           {cred.Value},
 		"actor_token_type":      {"urn:ietf:params:oauth:token-type:jwt"},
 		"client_id":             {cfg.agentType},
-		"client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
-		"client_assertion":      {svid},
+		"client_assertion_type": {cred.AssertionType},
+		"client_assertion":      {cred.Value},
 	}
 	if audience != "" {
 		form.Set("audience", audience)
@@ -223,16 +206,16 @@ func exchangeToken(ctx context.Context, cfg config, socketPath, subjectToken, au
 // audience. Used to obtain a delegation token (audience="delegation") that a
 // parent hands to a child as the subject_token of a later exchange. Not cached:
 // audience/scope are request-specific.
-func clientCredentialsToken(ctx context.Context, cfg config, socketPath, scope, audience string) (string, int, error) {
-	svid, err := fetchJWT(ctx, socketPath, cfg.isTokenURL)
+func clientCredentialsToken(ctx context.Context, cfg config, scope, audience string) (string, int, error) {
+	cred, err := cfg.source.Fetch(ctx, cfg.isTokenURL)
 	if err != nil {
-		return "", 0, fmt.Errorf("fetch SVID: %w", err)
+		return "", 0, fmt.Errorf("fetch credential: %w", err)
 	}
 	form := url.Values{
 		"grant_type":            {"client_credentials"},
 		"client_id":             {cfg.agentType},
-		"client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
-		"client_assertion":      {svid},
+		"client_assertion_type": {cred.AssertionType},
+		"client_assertion":      {cred.Value},
 		"scope":                 {scope},
 	}
 	if audience != "" {
@@ -268,11 +251,12 @@ func clientCredentialsToken(ctx context.Context, cfg config, socketPath, scope, 
 }
 
 func run(ctx context.Context, cfg config) error {
-	// 1. Fetch SVID for registry
-	regSVID, err := fetchJWT(ctx, cfg.socketPath, "registry")
+	// 1. Fetch the attestation credential for registry self-registration.
+	regCred, err := cfg.source.Fetch(ctx, "registry")
 	if err != nil {
-		return fmt.Errorf("fetch registry SVID: %w", err)
+		return fmt.Errorf("fetch registry credential: %w", err)
 	}
+	regSVID := regCred.Value
 
 	// 2. Self-register; agentID may come from env or be assigned by registry
 	agentID := cfg.agentID
@@ -379,7 +363,7 @@ func run(ctx context.Context, cfg config) error {
 	}
 
 	// 5. Start HTTP server (registration already succeeded at this point)
-	tc := &tokenCache{cfg: cfg, socketPath: cfg.socketPath}
+	tc := &tokenCache{cfg: cfg}
 
 	mux := http.NewServeMux()
 
@@ -405,12 +389,12 @@ func run(ctx context.Context, cfg config) error {
 		if subjectToken != "" {
 			// RFC 8693 token exchange: re-exchange an upstream caller's token,
 			// adding this agent to the act chain.
-			tok, expiresIn, err = exchangeToken(r.Context(), cfg, cfg.socketPath, subjectToken, audience, scope)
+			tok, expiresIn, err = exchangeToken(r.Context(), cfg, subjectToken, audience, scope)
 		} else if audience != "" {
 			// Client-credentials with an explicit audience — used to mint a
 			// delegation token (audience=delegation) to hand to a child. Not
 			// cached: audience/scope are request-specific.
-			tok, expiresIn, err = clientCredentialsToken(r.Context(), cfg, cfg.socketPath, scope, audience)
+			tok, expiresIn, err = clientCredentialsToken(r.Context(), cfg, scope, audience)
 		} else if ciba != nil {
 			// Consent-gated agent: plain tokens come from the CIBA grant, so
 			// every renewal re-checks the stored consent — revoking it stops
@@ -516,6 +500,22 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+
+	// Select the attestation credential source. Default is SPIFFE/SPIRE
+	// (JWT-SVID via the workload API); other attestors (e.g. AWS IRSA) plug in
+	// here behind the ATTESTOR selector.
+	switch v := os.Getenv("ATTESTOR"); v {
+	case "", "spiffe":
+		cfg.source = &attestor.SpiffeSource{SocketPath: cfg.socketPath}
+	case "aws-sts":
+		src, err := attestor.NewAwsSource(ctx)
+		if err != nil {
+			log.Fatalf("AWS STS source init: %v", err)
+		}
+		cfg.source = src
+	default:
+		log.Fatalf("unknown ATTESTOR %q", v)
+	}
 
 	if err := run(ctx, cfg); err != nil {
 		log.Fatalf("sidecar error: %v", err)

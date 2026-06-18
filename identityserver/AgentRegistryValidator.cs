@@ -1,5 +1,5 @@
 using Duende.IdentityServer.Validation;
-using Microsoft.IdentityModel.JsonWebTokens; // JsonWebTokenHandler, JsonClaimValueTypes
+using Microsoft.IdentityModel.JsonWebTokens; // JsonClaimValueTypes
 using System.Security.Claims;
 using System.Text.Json;
 
@@ -16,8 +16,13 @@ namespace IdentityServer;
 public class AgentRegistryValidator : ICustomTokenRequestValidator
 {
     private readonly AgentRegistryClient _registry;
+    private readonly IAgentCredentialVerifier _verifier;
 
-    public AgentRegistryValidator(AgentRegistryClient registry) => _registry = registry;
+    public AgentRegistryValidator(AgentRegistryClient registry, IAgentCredentialVerifier verifier)
+    {
+        _registry = registry;
+        _verifier = verifier;
+    }
 
     public async Task ValidateAsync(CustomTokenRequestValidationContext context)
     {
@@ -31,19 +36,19 @@ public class AgentRegistryValidator : ICustomTokenRequestValidator
         // it (real-time revocation has no CIBA-shaped gap).
         if (request.GrantType == Config.CibaGrantType)
         {
-            var cibaAssertion = SpireClientSecretValidator.ValidatedAssertion(request.Raw);
+            var cibaAssertion = AgentClientSecretValidator.ValidatedAssertion(request.Raw);
             if (cibaAssertion is not null)
             {
-                var cibaSpiffeId = new JsonWebTokenHandler().ReadJsonWebToken(cibaAssertion).Subject;
-                var cibaAgentId = cibaSpiffeId.Split('/').Last();
-                var cibaAgent = await _registry.GetAgent(cibaAgentId);
+                var cibaIdentity = await _verifier.Verify(cibaAssertion);
+                if (cibaIdentity is null) { Reject(context, "invalid client_assertion"); return; }
+                var cibaAgent = await _registry.GetAgent(cibaIdentity.AgentId);
                 if (cibaAgent?.Status is not ("active" or "pending" or "awaiting-consent"))
                 {
-                    Reject(context, $"agent {cibaAgentId} is {cibaAgent?.Status ?? "not registered"}");
+                    Reject(context, $"agent {cibaIdentity.AgentId} is {cibaAgent?.Status ?? "not registered"}");
                     return;
                 }
                 var cibaActJson = JsonSerializer.Serialize(
-                    new Dictionary<string, string> { ["sub"] = cibaSpiffeId });
+                    new Dictionary<string, string> { ["sub"] = cibaIdentity.Subject });
                 request.ClientClaims?.Add(new Claim("act", cibaActJson, JsonClaimValueTypes.Json));
             }
             return;
@@ -56,13 +61,12 @@ public class AgentRegistryValidator : ICustomTokenRequestValidator
             return;
         }
 
-        var assertion = SpireClientSecretValidator.ValidatedAssertion(request.Raw);
+        var assertion = AgentClientSecretValidator.ValidatedAssertion(request.Raw);
         if (assertion is null) { Reject(context, "missing client_assertion"); return; }
 
-        var handler = new JsonWebTokenHandler();
-        var jwt = handler.ReadJsonWebToken(assertion);
-        var spiffeId = jwt.Subject;
-        var agentId = spiffeId.Split('/').Last();
+        var identity = await _verifier.Verify(assertion);
+        if (identity is null) { Reject(context, "invalid client_assertion"); return; }
+        var agentId = identity.AgentId;
 
         var agent = await _registry.GetAgent(agentId);
         if (agent is null || agent.Status != "active")
@@ -83,9 +87,9 @@ public class AgentRegistryValidator : ICustomTokenRequestValidator
         // sub = user:<userId> — the human principal the agent acts for.
         claims.Add(new Claim("sub", $"user:{agent.UserId}"));
 
-        // act = { "sub": "<spiffe URI>" } — the agent is the actor.
+        // act = { "sub": "<verified subject>" } — the agent is the actor.
         // Must serialize as a nested JSON object, so tag the claim value type as JSON.
-        var actJson = JsonSerializer.Serialize(new Dictionary<string, string> { ["sub"] = spiffeId });
+        var actJson = JsonSerializer.Serialize(new Dictionary<string, string> { ["sub"] = identity.Subject });
         claims.Add(new Claim("act", actJson, JsonClaimValueTypes.Json));
 
         // audience=delegation → a delegation-only token a parent hands to a child

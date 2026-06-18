@@ -41,6 +41,13 @@ public static class Config
     public static IEnumerable<ApiResource> ApiResources =>
         new List<ApiResource>
         {
+            // Backs the "sample-api" scope so tokens requesting it carry
+            // aud="sample-api" (the audience the sample-api resource server
+            // enforces). Without this, scope-only tokens have an empty aud.
+            new ApiResource("sample-api", "Sample API")
+            {
+                Scopes = { "sample-api" },
+            },
             new ApiResource("sample-api-a", "Sample API A")
             {
                 Scopes = { "sample-api-a:read", "sample-api-a:write" },
@@ -72,7 +79,7 @@ public static class Config
                 RequirePkce = true,
                 RequireConsent = false,
                 // Real secret (env-overridable for the deployed manifest). The
-                // SpireClientSecretValidator delegates non-SPIFFE requests to
+                // AgentClientSecretValidator delegates non-SPIFFE requests to
                 // Duende's default validator, which checks this hash.
                 ClientSecrets =
                 {
@@ -128,7 +135,7 @@ public static class Config
                 AllowedGrantTypes = GrantTypes.ClientCredentials,
                 RequireClientSecret = true,
                 // Placeholder so Duende's config validator is satisfied;
-                // actual auth is via SpireClientSecretValidator (client_assertion JWT-SVID).
+                // actual auth is via AgentClientSecretValidator (client_assertion JWT-SVID).
                 ClientSecrets = { new Secret("placeholder".Sha256()) },
                 AlwaysSendClientClaims = true,
                 ClientClaimsPrefix = "",
@@ -160,7 +167,7 @@ public static class Config
                 AllowedGrantTypes = GrantTypes.ClientCredentials,
                 RequireClientSecret = true,
                 // Placeholder so Duende's config validator is satisfied;
-                // actual auth is via SpireClientSecretValidator (client_assertion JWT-SVID).
+                // actual auth is via AgentClientSecretValidator (client_assertion JWT-SVID).
                 ClientSecrets = { new Secret("placeholder".Sha256()) },
                 AlwaysSendClientClaims = true,
                 ClientClaimsPrefix = "",

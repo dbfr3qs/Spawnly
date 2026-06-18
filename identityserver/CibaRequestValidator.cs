@@ -49,7 +49,7 @@ public class CibaRequestValidator : ICustomBackchannelAuthenticationValidator
         // Only an assertion that client authentication signature-checked
         // against SPIRE may anchor the edge; a raw form read would let a
         // secret-authenticated caller smuggle in a forged SVID.
-        var assertion = SpireClientSecretValidator.ValidatedAssertion(request.Raw);
+        var assertion = AgentClientSecretValidator.ValidatedAssertion(request.Raw);
         if (assertion is null)
         {
             // Non-SVID client authentication only exists off-cluster (local dev

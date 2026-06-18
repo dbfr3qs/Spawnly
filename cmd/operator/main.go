@@ -50,6 +50,22 @@ func main() {
 	apiBURL := getenv("API_B_URL", "http://sample-api-b:8080")
 	orchestratorURL := getenv("ORCHESTRATOR_URL", "http://orchestrator:8080")
 
+	// Select how workload identity is delivered into agent pods. Default is
+	// SPIRE (csi.spiffe.io); other attestors plug in behind ATTESTOR.
+	var identityInjector operator.IdentityInjector
+	switch v := getenv("ATTESTOR", "spiffe"); v {
+	case "spiffe":
+		identityInjector = operator.SpiffeInjector{}
+	case "aws-sts":
+		identityInjector = operator.AwsInjector{
+			ServiceAccount: getenv("AWS_AGENT_SERVICE_ACCOUNT", "spawnly-agent"),
+			Region:         getenv("AWS_REGION", ""),
+		}
+	default:
+		setupLog.Error(nil, "unknown ATTESTOR", "value", v)
+		os.Exit(1)
+	}
+
 	cfg := ctrl.GetConfigOrDie()
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
@@ -68,17 +84,19 @@ func main() {
 	}
 
 	if err = (&operator.AgentWorkloadReconciler{
-		Client:          mgr.GetClient(),
-		Scheme:          mgr.GetScheme(),
-		Registry:        registry.New(registryURL),
-		RegistryURL:     registryURL,
-		ISTokenURL:      isTokenURL,
-		SampleAPIURL:    sampleAPIURL,
-		APIAUrl:         apiAURL,
-		APIBUrl:         apiBURL,
-		OrchestratorURL: orchestratorURL,
-		EventsClient:    events.New(registryURL),
-		Clientset:       clientset,
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		Registry:         registry.New(registryURL),
+		RegistryURL:      registryURL,
+		ISTokenURL:       isTokenURL,
+		SampleAPIURL:     sampleAPIURL,
+		APIAUrl:          apiAURL,
+		APIBUrl:          apiBURL,
+		OrchestratorURL:  orchestratorURL,
+		EventsClient:     events.New(registryURL),
+		Clientset:        clientset,
+		IdentityInjector: identityInjector,
+		SidecarImage:     getenv("SIDECAR_IMAGE", "agent-sidecar:latest"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentWorkload")
 		os.Exit(1)

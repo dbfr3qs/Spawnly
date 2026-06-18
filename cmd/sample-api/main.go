@@ -64,8 +64,12 @@ func authorize(w http.ResponseWriter, r *http.Request, sdb spicedb.Client, valid
 		return tokenvalidator.Claims{}, false
 	}
 
-	if !claims.HasScope(requiredScope) {
-		log.Printf("rejecting token: missing scope %q (have %v)", requiredScope, claims.Scopes)
+	// A token holding the bare scopePrefix (the single "backward compat" scope,
+	// e.g. "sample-api") satisfies any read/write requirement. The ":read"/
+	// ":write" split only constrains scopes that actually issue it (sample-api-a/-b,
+	// whose agents never hold the bare scope), so this doesn't loosen those.
+	if !claims.HasScope(requiredScope) && !claims.HasScope(cfg.scopePrefix) {
+		log.Printf("rejecting token: missing scope %q or %q (have %v)", requiredScope, cfg.scopePrefix, claims.Scopes)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return tokenvalidator.Claims{}, false
 	}

@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/spawnly/platform/internal/attestor"
 	"github.com/spawnly/platform/internal/registry"
 )
 
@@ -39,8 +40,9 @@ var (
 type cibaTokenSource struct {
 	cfg     config
 	cibaURL string
-	// fetchSVID is injectable for tests; defaults to the SPIRE workload API.
-	fetchSVID func(ctx context.Context) (string, error)
+	// source fetches the attestation credential presented on the backchannel
+	// (client_assertion). Injectable for tests; defaults to cfg.source.
+	source attestor.Source
 
 	mu        sync.Mutex
 	token     string
@@ -57,9 +59,7 @@ func newCibaTokenSource(cfg config) *cibaTokenSource {
 		cfg: cfg,
 		// The backchannel endpoint lives next to the token endpoint.
 		cibaURL: strings.Replace(cfg.isTokenURL, "/connect/token", "/connect/ciba", 1),
-		fetchSVID: func(ctx context.Context) (string, error) {
-			return fetchJWT(ctx, cfg.socketPath, cfg.isTokenURL)
-		},
+		source:  cfg.source,
 	}
 }
 
@@ -80,14 +80,14 @@ func (cs *cibaTokenSource) covered(requested string) bool {
 
 // initiate opens a fresh backchannel authentication request. Callers hold mu.
 func (cs *cibaTokenSource) initiate(ctx context.Context) error {
-	svid, err := cs.fetchSVID(ctx)
+	cred, err := cs.source.Fetch(ctx, cs.cfg.isTokenURL)
 	if err != nil {
-		return fmt.Errorf("fetch SVID: %w", err)
+		return fmt.Errorf("fetch credential: %w", err)
 	}
 	form := url.Values{
 		"client_id":             {cs.cfg.agentType},
-		"client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
-		"client_assertion":      {svid},
+		"client_assertion_type": {cred.AssertionType},
+		"client_assertion":      {cred.Value},
 		"scope":                 {cs.scopes()},
 		"login_hint":            {"user:" + cs.cfg.userID},
 		"binding_message":       {fmt.Sprintf("%s requests %s", cs.cfg.agentType, cs.scopes())},
@@ -129,16 +129,16 @@ func (cs *cibaTokenSource) initiate(ctx context.Context) error {
 // Returns nil when the token was granted, errConsentPending while waiting,
 // or a terminal error (denied / expired). Callers hold mu.
 func (cs *cibaTokenSource) pollOnce(ctx context.Context) error {
-	svid, err := cs.fetchSVID(ctx)
+	cred, err := cs.source.Fetch(ctx, cs.cfg.isTokenURL)
 	if err != nil {
-		return fmt.Errorf("fetch SVID: %w", err)
+		return fmt.Errorf("fetch credential: %w", err)
 	}
 	form := url.Values{
 		"grant_type":            {"urn:openid:params:grant-type:ciba"},
 		"auth_req_id":           {cs.authReqID},
 		"client_id":             {cs.cfg.agentType},
-		"client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
-		"client_assertion":      {svid},
+		"client_assertion_type": {cred.AssertionType},
+		"client_assertion":      {cred.Value},
 	}
 	req, err := http.NewRequestWithContext(ctx, "POST", cs.cfg.isTokenURL, strings.NewReader(form.Encode()))
 	if err != nil {

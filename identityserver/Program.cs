@@ -23,9 +23,21 @@ builder.Services.AddSingleton(new AgentRegistryClient(registryUrl));
 // Razor pages host the interactive login UI (machine clients never touch these).
 builder.Services.AddRazorPages();
 
-// Shared SPIRE JWT-SVID validator (client_assertion + actor_token).
+// SPIRE JWT-SVID validator (used by the SPIFFE credential verifier).
 builder.Services.AddSingleton(sp =>
     new SpireSvidValidator(sp.GetRequiredService<IHttpClientFactory>(), spireJwksUrl));
+
+// Pluggable attestation: the verifier authenticates an agent's credential
+// (client_assertion / actor_token) and derives its identity. Default is
+// SPIFFE/SPIRE; other attestors (AWS IRSA, ...) select in here via ATTESTOR.
+// Its AgentId derivation MUST match the registry's registrant.Verifier.
+var attestor = Environment.GetEnvironmentVariable("ATTESTOR") ?? "spiffe";
+builder.Services.AddSingleton<IAgentCredentialVerifier>(sp => attestor switch
+{
+    "" or "spiffe" => new SpireCredentialVerifier(sp.GetRequiredService<SpireSvidValidator>()),
+    "aws-sts" => new StsCredentialVerifier(sp.GetRequiredService<IHttpClientFactory>()),
+    _ => throw new InvalidOperationException($"unknown ATTESTOR '{attestor}'"),
+});
 
 builder.Services.AddIdentityServer(options =>
     {
@@ -63,14 +75,14 @@ builder.Services.AddTransient<
 // for each tracked pending CIBA request and completes/fails it on resolution.
 builder.Services.AddHostedService<ConsentCompletionPoller>();
 
-// Concrete default secret validator — SpireClientSecretValidator delegates to it
-// for non-SPIFFE (normal client_secret) requests, e.g. the dashboard's code flow.
+// Concrete default secret validator — AgentClientSecretValidator delegates to it
+// for non-attestation (normal client_secret) requests, e.g. the dashboard's code flow.
 builder.Services.AddTransient<ClientSecretValidator>();
 
 builder.Services.AddTransient<IClientSecretValidator>(sp =>
-    new SpireClientSecretValidator(
+    new AgentClientSecretValidator(
         sp.GetRequiredService<IClientStore>(),
-        sp.GetRequiredService<SpireSvidValidator>(),
+        sp.GetRequiredService<IAgentCredentialVerifier>(),
         sp.GetRequiredService<ClientSecretValidator>()));
 
 var app = builder.Build();

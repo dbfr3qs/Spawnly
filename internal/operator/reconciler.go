@@ -30,16 +30,37 @@ const finalizer = "agent-platform.io/cleanup"
 
 type AgentWorkloadReconciler struct {
 	client.Client
-	Scheme          *runtime.Scheme
-	Registry        registry.Client
-	RegistryURL     string
-	ISTokenURL      string
-	SampleAPIURL    string
-	APIAUrl         string
-	APIBUrl         string
-	OrchestratorURL string
-	EventsClient    events.Client // may be nil
-	Clientset       kubernetes.Interface
+	Scheme           *runtime.Scheme
+	Registry         registry.Client
+	RegistryURL      string
+	ISTokenURL       string
+	SampleAPIURL     string
+	APIAUrl          string
+	APIBUrl          string
+	OrchestratorURL  string
+	EventsClient     events.Client // may be nil
+	Clientset        kubernetes.Interface
+	IdentityInjector IdentityInjector // nil defaults to SpiffeInjector
+	// SidecarImage is the image for the agent-sidecar init container. Empty
+	// defaults to "agent-sidecar:latest" (kind); on EKS it is the ECR-qualified
+	// reference so agent pods can pull it.
+	SidecarImage string
+}
+
+func (r *AgentWorkloadReconciler) sidecarImage() string {
+	if r.SidecarImage == "" {
+		return "agent-sidecar:latest"
+	}
+	return r.SidecarImage
+}
+
+// identityInjector returns the configured injector, defaulting to SPIRE so
+// existing callers (and tests) that leave the field nil keep today's behavior.
+func (r *AgentWorkloadReconciler) identityInjector() IdentityInjector {
+	if r.IdentityInjector == nil {
+		return SpiffeInjector{}
+	}
+	return r.IdentityInjector
 }
 
 func mustMarshal(v any) json.RawMessage {
@@ -258,7 +279,6 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 		{Name: "SAMPLE_API_URL", Value: r.SampleAPIURL},
 		{Name: "API_A_URL", Value: r.APIAUrl},
 		{Name: "API_B_URL", Value: r.APIBUrl},
-		{Name: "SPIFFE_ENDPOINT_SOCKET", Value: "unix:///spiffe-workload-api/spire-agent.sock"},
 	}, sharedEnv...)
 	optional := func() *bool { b := true; return &b }()
 	for _, kv := range []struct{ env, key string }{
@@ -292,9 +312,8 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 		}
 	}
 
-	readOnly := true
 	restartAlways := corev1.ContainerRestartPolicyAlways
-	return &corev1.Pod{
+	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      aw.Name + "-pod",
 			Namespace: aw.Namespace,
@@ -304,7 +323,6 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 				"tenant-id":                 aw.Spec.TenantID,
 				"user-id":                   aw.Spec.UserID,
 				"agent-platform.io/managed": "true",
-				"agent-platform.io/scope":   scopeLabel(aw.Spec.TenantID),
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -313,16 +331,11 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 			// keeps the sidecar running alongside the main container but does not block pod
 			// completion when the main container exits.
 			InitContainers: []corev1.Container{{
-				Name:            "agent-sidecar",
-				Image:           "agent-sidecar:latest",
+				Name:            sidecarContainerName,
+				Image:           r.sidecarImage(),
 				ImagePullPolicy: corev1.PullIfNotPresent,
 				RestartPolicy:   &restartAlways,
 				Env:             sharedEnv,
-				VolumeMounts: []corev1.VolumeMount{{
-					Name:      "spiffe-workload-api",
-					MountPath: "/spiffe-workload-api",
-					ReadOnly:  true,
-				}},
 			}},
 			Containers: []corev1.Container{{
 				Name:            "agent",
@@ -331,17 +344,13 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 				Env:             agentEnv,
 				Resources:       resources,
 			}},
-			Volumes: []corev1.Volume{{
-				Name: "spiffe-workload-api",
-				VolumeSource: corev1.VolumeSource{
-					CSI: &corev1.CSIVolumeSource{
-						Driver:   "csi.spiffe.io",
-						ReadOnly: &readOnly,
-					},
-				},
-			}},
 		},
 	}
+
+	// Delegate identity delivery (volumes, sidecar mount/env, attestor labels)
+	// to the configured attestor strategy — keeps this builder attestor-neutral.
+	r.identityInjector().Apply(pod, aw)
+	return pod
 }
 
 func (r *AgentWorkloadReconciler) SetupWithManager(mgr ctrl.Manager) error {
