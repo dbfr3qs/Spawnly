@@ -1,3 +1,8 @@
+---
+title: Running on AWS with STS attestation
+description: Stand up Spawnly on EKS using the AWS-STS attestor instead of SPIRE — IRSA wiring, one-command up/down scripts, and an end-to-end smoke test that proves attestation with zero SPIRE in the cluster.
+---
+
 # Running Spawnly on AWS with STS attestation
 
 This runbook stands up Spawnly on **EKS** using the **AWS-STS attestor** instead
