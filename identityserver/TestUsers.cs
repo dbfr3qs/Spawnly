@@ -6,7 +6,7 @@ namespace IdentityServer;
 /// <summary>
 /// Interactive (human) users for the example dashboard's OIDC login. This is the
 /// machine-vs-human split: agents authenticate with SPIFFE JWT-SVIDs (see
-/// <see cref="SpireClientSecretValidator"/>), while a person logs in here with a
+/// <see cref="AgentClientSecretValidator"/>), while a person logs in here with a
 /// username/password. Demo-grade only — a single seeded user, in memory.
 /// </summary>
 public static class TestUsers

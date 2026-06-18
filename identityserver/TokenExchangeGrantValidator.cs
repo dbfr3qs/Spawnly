@@ -38,16 +38,16 @@ public class TokenExchangeGrantValidator : IExtensionGrantValidator
     private const string AccessTokenType = "urn:ietf:params:oauth:token-type:access_token";
     private const string JwtTokenType = "urn:ietf:params:oauth:token-type:jwt";
 
-    private readonly SpireSvidValidator _svid;
+    private readonly IAgentCredentialVerifier _verifier;
     private readonly IKeyMaterialService _keys;
     private readonly IIssuerNameService _issuer;
     private readonly AgentRegistryClient _registry;
 
     public TokenExchangeGrantValidator(
-        SpireSvidValidator svid, IKeyMaterialService keys, IIssuerNameService issuer,
+        IAgentCredentialVerifier verifier, IKeyMaterialService keys, IIssuerNameService issuer,
         AgentRegistryClient registry)
     {
-        _svid = svid;
+        _verifier = verifier;
         _keys = keys;
         _issuer = issuer;
         _registry = registry;
@@ -88,13 +88,14 @@ public class TokenExchangeGrantValidator : IExtensionGrantValidator
             return;
         }
 
-        // 1. actor_token must be a valid SPIRE SVID. Its subject is the new actor.
-        var actorSpiffe = await _svid.ValidateAndGetSpiffeId(actorToken);
-        if (actorSpiffe is null)
+        // 1. actor_token must be a valid attestation credential. Its subject is the new actor.
+        var actorIdentity = await _verifier.Verify(actorToken);
+        if (actorIdentity is null)
         {
-            context.Result = Error("invalid actor_token (SVID validation failed)");
+            context.Result = Error("invalid actor_token (credential validation failed)");
             return;
         }
+        var actorSpiffe = actorIdentity.Subject;
 
         // 2. subject_token must be a token THIS IdentityServer issued.
         var subject = await ValidateSubjectToken(subjectToken);
@@ -145,8 +146,8 @@ public class TokenExchangeGrantValidator : IExtensionGrantValidator
         //     registry policy for that (parentType -> childType) edge gates whether the edge is
         //     allowed, caps the scopes that may be carried across it, and bounds chain depth.
 
-        // Resolve the child (the actor doing the exchange): last path segment of its SPIFFE URI.
-        var childAgentId = LastPathSegment(actorSpiffe);
+        // Resolve the child (the actor doing the exchange): the verifier-derived agent id.
+        var childAgentId = actorIdentity.AgentId;
         // Resolve the parent (the immediate delegator): outermost act.sub of the subject_token.
         var parentSpiffe = OutermostActSub(subject);
         if (string.IsNullOrEmpty(parentSpiffe))

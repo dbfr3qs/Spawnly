@@ -1,0 +1,77 @@
+# AWS-STS deploy overlay. Deploys the platform on EKS with the AWS-STS attestor
+# instead of SPIRE: no SPIRE/CSI components, ATTESTOR=aws-sts on the identity
+# touchpoints, and the IRSA-annotated agent ServiceAccount.
+#
+# Usage:
+#   1. terraform apply (deploy/aws/terraform) — note agent_role_arn, ecr_registry.
+#   2. Set the SA annotation: edit serviceaccount.yaml with the agent_role_arn.
+#   3. Point images at ECR, e.g.:
+#        kustomize edit set image \
+#          agent-registry=$ECR/agent-registry:latest \
+#          agent-orchestrator=$ECR/agent-orchestrator:latest \
+#          agent-operator=$ECR/agent-operator:latest \
+#          agent-dashboard=$ECR/agent-dashboard:latest \
+#          agent-identity-server=$ECR/agent-identity-server:latest \
+#          agent-sidecar=$ECR/agent-sidecar:latest
+#   4. kubectl kustomize --load-restrictor LoadRestrictionsNone deploy/aws | kubectl apply -f -
+#      (kubectl apply -k does NOT accept --load-restrictor; build then pipe.
+#       The flag is required because this overlay references ../manifests.)
+#
+# Set AWS_REGION below to match your terraform region.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../crds/agentworkload.yaml
+  - ../manifests/rbac.yaml
+  - ../manifests/spicedb.yaml
+  - ../manifests/registry.yaml
+  - ../manifests/identityserver.yaml
+  - ../manifests/orchestrator.yaml
+  - ../manifests/operator.yaml
+  - ../manifests/dashboard.yaml
+  - ../manifests/sample-api.yaml
+  - ../manifests/sample-api-a.yaml
+  - ../manifests/sample-api-b.yaml
+  - ../manifests/sample-api-global.yaml
+# Note: the agent ServiceAccount (with its real IAM role ARN) and the
+# ai-provider / control-plane-auth secrets are created by deploy/aws/deploy.sh
+# from your environment — NOT included here, so a re-apply can't clobber the
+# real role-arn annotation with the placeholder.
+
+patches:
+  # Operator: select the AWS injector + region for STS endpoint resolution.
+  - target:
+      kind: Deployment
+      name: agent-operator
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: ATTESTOR
+          value: aws-sts
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: AWS_REGION
+          value: us-east-1
+  # Registry: ATTESTOR drives the registrant verifier to aws-sts.
+  - target:
+      kind: Deployment
+      name: registry
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: ATTESTOR
+          value: aws-sts
+  # IdentityServer: verify credentials via STS GetCallerIdentity.
+  - target:
+      kind: Deployment
+      name: identity-server
+    patch: |
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: ATTESTOR
+          value: aws-sts

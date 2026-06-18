@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/spawnly/platform/internal/attestor"
 )
 
 // fakeIS is a minimal IdentityServer double for the two CIBA endpoints. Its
@@ -72,7 +74,10 @@ func testSource(t *testing.T, f *fakeIS) *cibaTokenSource {
 		isTokenURL:    srv.URL + "/connect/token",
 		consentScopes: "openid sample-api-b:read",
 	})
-	cs.fetchSVID = func(context.Context) (string, error) { return "fake-svid", nil }
+	cs.source = &attestor.MockSource{Cred: attestor.Credential{
+		Value:         "fake-svid",
+		AssertionType: attestor.JWTBearerAssertionType,
+	}}
 	return cs
 }
 
