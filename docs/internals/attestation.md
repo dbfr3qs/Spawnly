@@ -1,3 +1,8 @@
+---
+title: Pluggable attestation
+description: How attestation is abstracted so SPIFFE/SPIRE can be swapped for another mechanism like AWS STS behind a single ATTESTOR selector — the neutral contract, the five touchpoints, and the AgentId-consistency invariant.
+---
+
 # Pluggable attestation
 
 Attestation is how a workload proves *who it is* before the platform mints it any
