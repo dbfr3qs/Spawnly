@@ -1,0 +1,2 @@
+# Rendered policy carries a real account id — never commit.
+terraform-principal-policy.rendered.json
