@@ -24,22 +24,41 @@ fenced to one region, while the powerful IAM/ECR grants are resource-scoped.
 - It bootstraps Terraform itself, so attach it **manually** (console or CLI)
   before the first `apply` — it can't be a Terraform-managed resource.
 
-## Attach it
+## Render + create it
+
+`render-policy.sh` fills the `ACCOUNT_ID`/`REGION` placeholders from the
+environment (account id defaults to `aws sts get-caller-identity`, region to
+`AWS_REGION`), so the committed template stays placeholder-only and your real
+account id never lands in git. The rendered file
+(`terraform-principal-policy.rendered.json`) is gitignored.
 
 ```bash
-# Replace the two placeholders first:
-sed -i "s/ACCOUNT_ID/$(aws sts get-caller-identity --query Account --output text)/g; s/REGION/us-east-1/g" \
-  terraform-principal-policy.json
+# render only:
+AWS_REGION=us-east-1 ./render-policy.sh
 
-aws iam create-policy \
-  --policy-name spawnly-terraform \
-  --policy-document file://terraform-principal-policy.json
-
-# Then attach the returned ARN to your user or role:
-aws iam attach-user-policy  --user-name <you>  --policy-arn <arn>   # for an IAM user
-# or
-aws iam attach-role-policy  --role-name <role> --policy-arn <arn>   # for an assumed role
+# render + create (or update, as a new default version) the managed policy:
+AWS_REGION=us-east-1 ./render-policy.sh --apply
 ```
+
+Then attach the policy (`arn:aws:iam::<account>:policy/spawnly-terraform`) to
+your Terraform principal:
+
+```bash
+aws iam attach-user-policy  --user-name <you>  --policy-arn <arn>   # an IAM user
+# or
+aws iam attach-role-policy  --role-name <role> --policy-arn <arn>   # an assumed role
+```
+
+## Region for Terraform
+
+The Terraform itself takes region via its `region` variable, which Terraform
+reads from the `TF_VAR_region` env var — no edit needed:
+
+```bash
+export TF_VAR_region=us-east-1     # keep this in sync with the policy's region
+```
+
+Account id is **not** a Terraform input — it's derived from your credentials.
 
 ## Tightening further (optional)
 
