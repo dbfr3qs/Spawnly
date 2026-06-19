@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Deploy the Spawnly platform onto EKS with the AWS-STS attestor (no SPIRE).
-# Run AFTER `terraform apply` (deploy/aws/terraform) and after pushing images
-# (deploy/aws/push-images.sh). Assumes kubectl is pointed at the EKS cluster.
+# Deploy the Spawnly platform onto EKS with the hardened aws-stsweb attestor
+# (EKS Pod Identity + STS GetWebIdentityToken; no SPIRE). Run AFTER
+# `terraform apply` (deploy/aws/terraform) and after pushing images
+# (deploy/aws/push-images.sh). Assumes kubectl is pointed at the EKS cluster,
+# and that outbound web identity federation is enabled on the account.
 #
 # Required env:
 #   AI_API_KEY (or ANTHROPIC_API_KEY / OPENAI_API_KEY)  — for agents to run
@@ -15,7 +17,27 @@ REGION="${AWS_REGION:-us-east-1}"
 TAG="${IMAGE_TAG:-latest}"
 TF="terraform -chdir=deploy/aws/terraform"
 ECR="${ECR_REGISTRY:-$($TF output -raw ecr_registry)}"
-AGENT_ROLE_ARN="${AGENT_ROLE_ARN:-$($TF output -raw agent_role_arn)}"
+AGENT_SA="$($TF output -raw agent_service_account)"
+CLUSTER_ARN="$($TF output -raw cluster_arn)"
+STSWEB_AUDIENCE="${STSWEB_AUDIENCE:-spawnly}"
+# The account STS issuer (from enabling outbound web identity federation) — the
+# JWKS the verifiers validate web-identity tokens against.
+STSWEB_ISSUER="${STSWEB_ISSUER:-$(aws iam get-outbound-web-identity-federation-info --query IssuerIdentifier --output text 2>/dev/null || true)}"
+if [ -z "$STSWEB_ISSUER" ] || [ "$STSWEB_ISSUER" = "None" ]; then
+  echo "ERROR: outbound web identity federation is not enabled on this account." >&2
+  echo "       Run: aws iam enable-outbound-web-identity-federation" >&2
+  exit 1
+fi
+
+# Guard: deployments pull from ECR. Fail early with a clear message if the images
+# aren't there (e.g. running deploy.sh standalone on a freshly recreated, empty
+# ECR — terraform destroy force-deletes the repos). up.sh chains push-images first.
+if ! aws ecr describe-images --repository-name agent-registry \
+     --image-ids imageTag="$TAG" --region "$REGION" >/dev/null 2>&1; then
+  echo "ERROR: agent-registry:$TAG not found in ECR — push images first:" >&2
+  echo "       ./deploy/aws/push-images.sh    (or just use ./deploy/aws/up.sh)" >&2
+  exit 1
+fi
 
 # ── 1. Control-plane shared secret (reuse if it already exists) ────────────────
 echo "==> control-plane-auth secret"
@@ -38,12 +60,11 @@ kubectl create secret generic ai-provider \
   --from-literal=provider="$_AI_PROVIDER" --from-literal=api-key="$_AI_API_KEY" --from-literal=model="$_AI_MODEL" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# ── 3. Bind the agent ServiceAccount to the IAM role ──────────────────────────
-echo "==> agent ServiceAccount role annotation"
-sed "s#REPLACE_WITH_terraform_output_agent_role_arn#${AGENT_ROLE_ARN}#" \
-  deploy/aws/serviceaccount.yaml | kubectl apply -f -
+# ── 3. Agent ServiceAccount (Pod Identity binds it to the role; no annotation) ──
+echo "==> agent ServiceAccount $AGENT_SA"
+kubectl create serviceaccount "$AGENT_SA" --dry-run=client -o yaml | kubectl apply -f -
 
-# ── 4. Apply the AWS overlay (ATTESTOR=aws-sts, no SPIRE) ──────────────────────
+# ── 4. Apply the AWS overlay (ATTESTOR=aws-stsweb, no SPIRE) ───────────────────
 echo "==> applying platform manifests"
 # `kubectl apply -k` doesn't accept --load-restrictor; build with `kubectl
 # kustomize` (which does) and pipe. The flag is needed because the overlay
@@ -70,12 +91,31 @@ done
 # The agent-sidecar image is injected into agent pods by the operator.
 kubectl set env deployment/agent-operator "SIDECAR_IMAGE=$ECR/agent-sidecar:$TAG"
 
+# ── 5b. Configure the aws-stsweb attestor (dynamic, account-specific values) ───
+echo "==> configuring aws-stsweb env (issuer=$STSWEB_ISSUER)"
+# Operator injects region + audience onto agent sidecars.
+kubectl set env deployment/agent-operator AWS_REGION="$REGION" STSWEB_AUDIENCE="$STSWEB_AUDIENCE"
+# The verifiers validate the web-identity JWT and assert the attested context.
+for d in registry identity-server; do
+  kubectl set env "deployment/$d" \
+    STSWEB_ISSUER="$STSWEB_ISSUER" \
+    STSWEB_AUDIENCE="$STSWEB_AUDIENCE" \
+    STSWEB_NAMESPACE=default \
+    STSWEB_SERVICE_ACCOUNT="$AGENT_SA" \
+    STSWEB_CLUSTER_ARN="$CLUSTER_ARN"
+done
+
 # ── 6. Wait for rollouts ──────────────────────────────────────────────────────
 echo "==> waiting for services"
 kubectl wait --for=condition=ready pod -l app=spicedb --timeout=180s || true
 for d in registry identity-server sample-api sample-api-a sample-api-b \
          sample-api-global agent-operator orchestrator dashboard; do
-  kubectl rollout status "deployment/$d" --timeout=180s
+  if ! kubectl rollout status "deployment/$d" --timeout=180s; then
+    echo "  ERROR: $d did not become Ready. Recent logs:" >&2
+    kubectl logs "deployment/$d" --tail=25 2>&1 | sed 's/^/    /' >&2
+    echo "  (also: kubectl describe pod -l app=$d | tail -20)" >&2
+    exit 1
+  fi
 done
 
 # ── 7. Seed templates (ECR-qualified agent images) ────────────────────────────

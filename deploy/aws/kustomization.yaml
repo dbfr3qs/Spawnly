@@ -49,13 +49,14 @@ patches:
         path: /spec/template/spec/containers/0/env/-
         value:
           name: ATTESTOR
-          value: aws-sts
+          value: aws-stsweb
       - op: add
         path: /spec/template/spec/containers/0/env/-
         value:
           name: AWS_REGION
           value: us-east-1
-  # Registry: ATTESTOR drives the registrant verifier to aws-sts.
+  # Registry: ATTESTOR drives the registrant verifier to aws-stsweb.
+  # (deploy.sh adds the dynamic STSWEB_ISSUER/AUDIENCE/NAMESPACE/SA/CLUSTER_ARN.)
   - target:
       kind: Deployment
       name: registry
@@ -64,8 +65,8 @@ patches:
         path: /spec/template/spec/containers/0/env/-
         value:
           name: ATTESTOR
-          value: aws-sts
-  # IdentityServer: verify credentials via STS GetCallerIdentity.
+          value: aws-stsweb
+  # IdentityServer: verify the web-identity JWT (deploy.sh adds STSWEB_* env).
   - target:
       kind: Deployment
       name: identity-server
@@ -74,4 +75,4 @@ patches:
         path: /spec/template/spec/containers/0/env/-
         value:
           name: ATTESTOR
-          value: aws-sts
+          value: aws-stsweb

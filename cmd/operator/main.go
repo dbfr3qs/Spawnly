@@ -61,6 +61,12 @@ func main() {
 			ServiceAccount: getenv("AWS_AGENT_SERVICE_ACCOUNT", "spawnly-agent"),
 			Region:         getenv("AWS_REGION", ""),
 		}
+	case "aws-stsweb":
+		identityInjector = operator.StsWebInjector{
+			ServiceAccount: getenv("AWS_AGENT_SERVICE_ACCOUNT", "spawnly-agent"),
+			Region:         getenv("AWS_REGION", ""),
+			Audience:       getenv("STSWEB_AUDIENCE", "spawnly"),
+		}
 	default:
 		setupLog.Error(nil, "unknown ATTESTOR", "value", v)
 		os.Exit(1)

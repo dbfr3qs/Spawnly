@@ -53,6 +53,28 @@ func TestAwsInjector_SetsAttestorAndIdentityEnv(t *testing.T) {
 	}
 }
 
+func TestStsWebInjector_SetsAttestorAndServiceAccount(t *testing.T) {
+	pod := podWithSidecar()
+	aw := &agentv1alpha1.AgentWorkload{ObjectMeta: metav1.ObjectMeta{Name: "agent-7e5fc77f"}}
+
+	StsWebInjector{ServiceAccount: "spawnly-agent", Region: "us-east-1", Audience: "spawnly"}.Apply(pod, aw)
+
+	if pod.Spec.ServiceAccountName != "spawnly-agent" {
+		t.Errorf("ServiceAccountName = %q, want spawnly-agent", pod.Spec.ServiceAccountName)
+	}
+	env := sidecarEnv(pod)
+	if env["ATTESTOR"] != "aws-stsweb" {
+		t.Errorf("sidecar ATTESTOR = %q, want aws-stsweb", env["ATTESTOR"])
+	}
+	if env["STSWEB_AUDIENCE"] != "spawnly" {
+		t.Errorf("STSWEB_AUDIENCE = %q, want spawnly", env["STSWEB_AUDIENCE"])
+	}
+	// Pod Identity owns the session — no self-asserted session name.
+	if _, ok := env["AWS_ROLE_SESSION_NAME"]; ok {
+		t.Error("AWS_ROLE_SESSION_NAME must NOT be set under aws-stsweb")
+	}
+}
+
 func TestSpiffeInjector_MountsWorkloadAPIAndScope(t *testing.T) {
 	pod := podWithSidecar()
 	aw := &agentv1alpha1.AgentWorkload{

@@ -32,10 +32,25 @@ builder.Services.AddSingleton(sp =>
 // SPIFFE/SPIRE; other attestors (AWS IRSA, ...) select in here via ATTESTOR.
 // Its AgentId derivation MUST match the registry's registrant.Verifier.
 var attestor = Environment.GetEnvironmentVariable("ATTESTOR") ?? "spiffe";
+
+// aws-stsweb config (STS outbound web identity federation + EKS Pod Identity).
+var stswebIssuer = Environment.GetEnvironmentVariable("STSWEB_ISSUER") ?? "";
+var stswebJwks = Environment.GetEnvironmentVariable("STSWEB_JWKS_URL") ?? "";
+if (string.IsNullOrEmpty(stswebJwks) && !string.IsNullOrEmpty(stswebIssuer))
+    stswebJwks = stswebIssuer.TrimEnd('/') + "/.well-known/jwks.json";
+var stswebOptions = new StsWebOptions(
+    stswebJwks, stswebIssuer,
+    Environment.GetEnvironmentVariable("STSWEB_AUDIENCE") ?? "spawnly",
+    Environment.GetEnvironmentVariable("STSWEB_NAMESPACE") ?? "",
+    Environment.GetEnvironmentVariable("STSWEB_SERVICE_ACCOUNT") ?? "",
+    Environment.GetEnvironmentVariable("STSWEB_CLUSTER_ARN") ?? "",
+    "");
+
 builder.Services.AddSingleton<IAgentCredentialVerifier>(sp => attestor switch
 {
     "" or "spiffe" => new SpireCredentialVerifier(sp.GetRequiredService<SpireSvidValidator>()),
     "aws-sts" => new StsCredentialVerifier(sp.GetRequiredService<IHttpClientFactory>()),
+    "aws-stsweb" => new StsWebCredentialVerifier(sp.GetRequiredService<IHttpClientFactory>(), stswebOptions),
     _ => throw new InvalidOperationException($"unknown ATTESTOR '{attestor}'"),
 });
 

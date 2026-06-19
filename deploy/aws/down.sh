@@ -20,10 +20,14 @@ else
   echo "   (kubectl can't reach a cluster — skipping; terraform destroy will remove it)"
 fi
 
-echo "==> terraform destroy (EKS + VPC + IAM + ECR)"
+echo "==> terraform destroy (EKS + VPC + IAM + ECR + Pod Identity addon/association)"
 terraform -chdir=deploy/aws/terraform destroy -auto-approve
 
 echo ""
 echo "Environment is DOWN. Verify nothing lingers:"
 echo "  aws eks list-clusters --region $AWS_REGION"
 echo "  aws ecr describe-repositories --region $AWS_REGION 2>/dev/null | jq '.repositories[].repositoryName'"
+echo ""
+echo "Note: outbound web identity federation is an account-level capability left"
+echo "      ENABLED (harmless). To revert it explicitly:"
+echo "      aws iam disable-outbound-web-identity-federation"

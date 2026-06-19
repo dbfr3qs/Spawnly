@@ -57,3 +57,16 @@ variable "node_instance_type" {
   type        = string
   default     = "t3.medium"
 }
+
+variable "cluster_admin_principal_arns" {
+  description = <<-EOT
+    IAM principal ARNs to grant cluster-admin via EKS access entries at apply time
+    — avoids the manual create-access-entry / associate-access-policy dance after
+    apply. For an AWS SSO role, use the underlying IAM role ARN including the
+    aws-reserved/sso.amazonaws.com path (find it with:
+    aws iam list-roles --query "Roles[?contains(RoleName,'AWSReservedSSO_<permset>')].Arn").
+    enable_cluster_creator_admin_permissions still covers the apply principal.
+  EOT
+  type        = list(string)
+  default     = []
+}

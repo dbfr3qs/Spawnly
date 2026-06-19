@@ -94,3 +94,39 @@ func (a AwsInjector) Apply(pod *corev1.Pod, aw *agentv1alpha1.AgentWorkload) {
 		)
 	}
 }
+
+// StsWebInjector delivers identity via EKS Pod Identity + STS outbound web
+// identity federation (the hardened AWS attestor). The pod runs as a shared
+// ServiceAccount that has a Pod Identity association to an IAM role holding
+// sts:GetWebIdentityToken; EKS injects the AWS credential env and stamps
+// cluster-attested session tags (kubernetes-pod-name, ...). The sidecar then
+// calls GetWebIdentityToken and presents the resulting JWT. Per-agent identity
+// comes from the attested pod name — no IRSA annotation and no self-asserted
+// session name.
+type StsWebInjector struct {
+	// ServiceAccount is the Pod-Identity-associated ServiceAccount agent pods run as.
+	ServiceAccount string
+	// Region resolves the regional STS endpoint.
+	Region string
+	// Audience is the requested JWT aud (the control-plane audience the verifiers expect).
+	Audience string
+}
+
+// Apply implements IdentityInjector.
+func (a StsWebInjector) Apply(pod *corev1.Pod, aw *agentv1alpha1.AgentWorkload) {
+	pod.Spec.ServiceAccountName = a.ServiceAccount
+
+	for i := range pod.Spec.InitContainers {
+		if pod.Spec.InitContainers[i].Name != sidecarContainerName {
+			continue
+		}
+		env := []corev1.EnvVar{
+			{Name: "ATTESTOR", Value: "aws-stsweb"},
+			{Name: "AWS_REGION", Value: a.Region},
+		}
+		if a.Audience != "" {
+			env = append(env, corev1.EnvVar{Name: "STSWEB_AUDIENCE", Value: a.Audience})
+		}
+		pod.Spec.InitContainers[i].Env = append(pod.Spec.InitContainers[i].Env, env...)
+	}
+}

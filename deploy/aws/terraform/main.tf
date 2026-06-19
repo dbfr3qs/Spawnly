@@ -47,6 +47,20 @@ module "eks" {
   # entry, so your kubectl works immediately after apply (v20 default is false).
   enable_cluster_creator_admin_permissions = true
 
+  # Additional cluster-admins (e.g. an AWS SSO role whose ARN the creator-admin
+  # entry mis-records). Declarative — no post-apply access-entry commands needed.
+  access_entries = {
+    for arn in var.cluster_admin_principal_arns : arn => {
+      principal_arn = arn
+      policy_associations = {
+        admin = {
+          policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = { type = "cluster" }
+        }
+      }
+    }
+  }
+
   eks_managed_node_groups = {
     default = {
       instance_types = [var.node_instance_type]
@@ -63,30 +77,28 @@ module "eks" {
   }
 }
 
-# ── Agent IAM role (IRSA) ─────────────────────────────────────────────────────
-# Federates the cluster OIDC provider; assumable only by the agent ServiceAccount.
-# No permissions policy is attached: attestation only needs sts:GetCallerIdentity,
-# which requires no IAM permissions. Add policies here if agents call AWS APIs.
+# ── EKS Pod Identity ──────────────────────────────────────────────────────────
+# The Pod Identity agent injects AWS credentials into agent pods and stamps the
+# session with cluster-attested tags (kubernetes-pod-name/uid). The hardened
+# attestor (aws-stsweb) reads kubernetes-pod-name from the GetWebIdentityToken
+# JWT to derive the agent id.
+resource "aws_eks_addon" "pod_identity" {
+  cluster_name = module.eks.cluster_name
+  addon_name   = "eks-pod-identity-agent"
+}
+
+# ── Agent IAM role (Pod Identity) ─────────────────────────────────────────────
+# Assumed by the EKS Pod Identity service on behalf of the agent ServiceAccount.
+# The only permission it needs is sts:GetWebIdentityToken (outbound web identity
+# federation); add more here if agents call other AWS APIs.
 data "aws_iam_policy_document" "agent_assume" {
   statement {
     effect  = "Allow"
-    actions = ["sts:AssumeRoleWithWebIdentity"]
+    actions = ["sts:AssumeRole", "sts:TagSession"]
 
     principals {
-      type        = "Federated"
-      identifiers = [module.eks.oidc_provider_arn]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "${module.eks.oidc_provider}:aud"
-      values   = ["sts.amazonaws.com"]
-    }
-
-    condition {
-      test     = "StringEquals"
-      variable = "${module.eks.oidc_provider}:sub"
-      values   = ["system:serviceaccount:${var.agent_namespace}:${var.agent_service_account}"]
+      type        = "Service"
+      identifiers = ["pods.eks.amazonaws.com"]
     }
   }
 }
@@ -94,6 +106,24 @@ data "aws_iam_policy_document" "agent_assume" {
 resource "aws_iam_role" "agent" {
   name               = "${var.cluster_name}-agent"
   assume_role_policy = data.aws_iam_policy_document.agent_assume.json
+}
+
+resource "aws_iam_role_policy" "agent_getwebidentitytoken" {
+  name = "getwebidentitytoken"
+  role = aws_iam_role.agent.id
+  policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = [{ Effect = "Allow", Action = "sts:GetWebIdentityToken", Resource = "*" }]
+  })
+}
+
+# Bind the agent ServiceAccount to the role. One association covers every agent
+# pod; each pod's token still carries its own attested kubernetes-pod-name.
+resource "aws_eks_pod_identity_association" "agent" {
+  cluster_name    = module.eks.cluster_name
+  namespace       = var.agent_namespace
+  service_account = var.agent_service_account
+  role_arn        = aws_iam_role.agent.arn
 }
 
 # ── ECR repositories ──────────────────────────────────────────────────────────

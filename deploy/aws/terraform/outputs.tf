@@ -14,8 +14,13 @@ output "oidc_provider" {
 }
 
 output "agent_role_arn" {
-  description = "IAM role ARN for agents. Annotate the agent ServiceAccount with this (eks.amazonaws.com/role-arn)."
+  description = "IAM role ARN for agents (bound to the agent ServiceAccount via the Pod Identity association)."
   value       = aws_iam_role.agent.arn
+}
+
+output "cluster_arn" {
+  description = "EKS cluster ARN — the expected eks-cluster-arn in the attested principal_tags (STSWEB_CLUSTER_ARN)."
+  value       = module.eks.cluster_arn
 }
 
 output "agent_service_account" {
