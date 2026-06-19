@@ -513,6 +513,12 @@ func main() {
 			log.Fatalf("AWS STS source init: %v", err)
 		}
 		cfg.source = src
+	case "aws-stsweb":
+		src, err := attestor.NewStsWebSource(ctx, os.Getenv("STSWEB_AUDIENCE"))
+		if err != nil {
+			log.Fatalf("AWS STS web-identity source init: %v", err)
+		}
+		cfg.source = src
 	default:
 		log.Fatalf("unknown ATTESTOR %q", v)
 	}

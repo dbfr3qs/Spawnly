@@ -1522,6 +1522,8 @@ func main() {
 		attestorDefault = "spiffe-svid"
 	case "aws-sts":
 		attestorDefault = "aws-sts"
+	case "aws-stsweb":
+		attestorDefault = "aws-stsweb"
 	default:
 		log.Fatalf("unknown ATTESTOR %q", a)
 	}
@@ -1551,6 +1553,29 @@ func main() {
 		// Registration credential is a presigned STS GetCallerIdentity request;
 		// the verifier replays it and derives AgentID from the session name.
 		verifier = registrant.NewAwsStsVerifier(nil)
+	case "aws-stsweb":
+		// Registration credential is an STS web-identity JWT (GetWebIdentityToken)
+		// from a pod under EKS Pod Identity; AgentID comes from the cluster-attested
+		// principal_tags.kubernetes-pod-name.
+		issuer := getEnv("STSWEB_ISSUER", "")
+		jwksURL := getEnv("STSWEB_JWKS_URL", "")
+		if jwksURL == "" && issuer != "" {
+			jwksURL = strings.TrimRight(issuer, "/") + "/.well-known/jwks.json"
+		}
+		if jwksURL == "" {
+			log.Fatalf("STSWEB_ISSUER or STSWEB_JWKS_URL required when ATTESTOR=aws-stsweb")
+		}
+		verifier, err = registrant.NewStsWebVerifier(ctx, registrant.StsWebConfig{
+			JWKSURL:        jwksURL,
+			Issuer:         issuer,
+			Audience:       getEnv("STSWEB_AUDIENCE", "spawnly"),
+			Namespace:      getEnv("STSWEB_NAMESPACE", ""),
+			ServiceAccount: getEnv("STSWEB_SERVICE_ACCOUNT", ""),
+			ClusterARN:     getEnv("STSWEB_CLUSTER_ARN", ""),
+		})
+		if err != nil {
+			log.Fatalf("stsweb verifier init: %v", err)
+		}
 	case "mtls":
 		if getEnv("MTLS_CLIENT_CA_PATH", "") == "" {
 			log.Fatalf("MTLS_CLIENT_CA_PATH required when REGISTRANT_VERIFIER=mtls")

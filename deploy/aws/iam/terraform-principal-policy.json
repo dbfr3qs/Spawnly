@@ -113,9 +113,22 @@
       "Resource": "arn:aws:iam::ACCOUNT_ID:role/spawnly*",
       "Condition": {
         "StringEquals": {
-          "iam:PassedToService": ["eks.amazonaws.com", "ec2.amazonaws.com"]
+          "iam:PassedToService": [
+            "eks.amazonaws.com",
+            "ec2.amazonaws.com",
+            "pods.eks.amazonaws.com"
+          ]
         }
       }
+    },
+    {
+      "Sid": "OutboundWebIdentityFederation",
+      "Effect": "Allow",
+      "Action": [
+        "iam:EnableOutboundWebIdentityFederation",
+        "iam:GetOutboundWebIdentityFederationInfo"
+      ],
+      "Resource": "*"
     },
     {
       "Sid": "IamServiceLinkedRoles",

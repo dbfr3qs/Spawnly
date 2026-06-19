@@ -29,28 +29,38 @@ AWS_REGION=us-east-1 ./deploy/aws/up.sh
 ./deploy/aws/down.sh
 ```
 
-`up.sh` runs `terraform apply` → kubeconfig → push images → deploy → spawns the
-test worker and prints the STS evidence (registry `issuer=aws-sts` registration,
-event timeline, and the worker's authorized `sample-api` result), exiting non-zero
-if any step fails. The sections below document each step individually.
+`up.sh` runs `terraform apply` → kubeconfig → access-entry self-heal → enable
+outbound federation → push images → deploy → spawns the test worker and prints
+the attestation evidence (registry `issuer=aws-stsweb` registration, event
+timeline, and the worker's authorized `sample-api` result), exiting non-zero if
+any step fails. The sections below document each step individually.
 
-## How attestation works here
+## How attestation works here (`aws-stsweb`)
 
-1. The operator runs agent pods as the IRSA-annotated `spawnly-agent`
-   ServiceAccount and sets `AWS_ROLE_SESSION_NAME=<agentId>`.
-2. The EKS IRSA webhook injects `AWS_ROLE_ARN` + a projected web-identity token.
-3. The sidecar assumes the role and presents a **SigV4-presigned
-   `sts:GetCallerIdentity`** request as its credential.
-4. The registry and IdentityServer **replay it against AWS STS**; the returned
-   assumed-role ARN's session name **is** the `AgentId`. AWS is the attestor.
+The deployed attestor is **`aws-stsweb`** — STS outbound web-identity federation
+(`sts:GetWebIdentityToken`) anchored on **EKS Pod Identity**. See
+[attestation-hardening.md](./attestation-hardening.md) for the full design and
+the spike that proved it.
 
-**Trust boundary / caveat:** `RoleSessionName` is set by the workload, so the
-per-agent name is *self-asserted* (AWS attests role possession, not the agentId).
-This matches the demo threat model (platform-controlled agent images), the same
-assumption SPIRE makes about the pod. Production hardening: anchor per-agent
-identity in the cluster-attested projected-token `kubernetes.io.pod` claim (the
-registry could verify that on self-registration) and cross-check it against the
-STS session name via the AgentId-consistency invariant.
+1. The operator runs agent pods (`<agentId>-pod`) as the `spawnly-agent`
+   ServiceAccount, which has an EKS **Pod Identity association** to an IAM role.
+2. EKS injects AWS credentials and stamps **cluster-attested session tags**
+   (`kubernetes-pod-name=<agentId>-pod`, uid, namespace, sa, cluster-arn) — the
+   workload cannot forge these.
+3. The sidecar calls `sts:GetWebIdentityToken` (audience `spawnly`, no caller
+   tags) and presents the AWS-signed JWT as its credential.
+4. The registry and IdentityServer validate the JWT against the account STS
+   issuer's JWKS and derive `AgentId` from
+   `principal_tags.kubernetes-pod-name` minus `-pod`.
+
+**Why it's attested:** EKS sets `kubernetes-pod-name`; a malicious agent's
+caller-supplied tags land in a separate `request_tags` field the verifier
+ignores. This restores parity with SPIRE (the control plane attests the pod),
+unlike the legacy `aws-sts` attestor whose `RoleSessionName` was self-asserted.
+
+> The legacy `aws-sts` attestor (presigned `GetCallerIdentity`, self-asserted
+> session name) remains available behind the selector for non-Pod-Identity
+> environments, but `aws-stsweb` is the recommended, hardened path.
 
 ## Prerequisites
 
