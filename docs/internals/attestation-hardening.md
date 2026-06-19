@@ -90,6 +90,16 @@ AgentId-consistency invariant holds automatically: registry and IS extract the
 same `kubernetes-pod-name`, and it equals the orchestrator's pre-registered
 `aw.Name`.
 
+**Consistency invariant (keep Go ↔ C# in lock step).** The Go
+`registrant.identityFromTags` and the C# `StsWebCredentialVerifier` must derive
+byte-identical `AgentID`/`Subject`/`Issuer` from the same `principal_tags`. Two
+subtleties to preserve when editing either side:
+- The `Subject` is path-style (`<eks-cluster-arn>/agent/<agentId>`) so downstream
+  act-chain handling recovers the agentId via the last path segment.
+- A **missing _or_ empty** `eks-cluster-arn` falls back to the literal `"eks"` on
+  both sides. (Go has no Go test project gap here; the C# side has no unit-test
+  project today — if one is added, lock this with an empty-vs-missing case.)
+
 **Threat model / parity with SPIRE.** EKS (the control plane + Pod Identity
 agent) attests the pod identity, the same trust root SPIRE uses (kubelet/node).
 A container can only obtain its own pod's session, so it can only ever present

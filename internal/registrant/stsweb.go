@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -52,8 +53,8 @@ func NewStsWebVerifier(ctx context.Context, cfg StsWebConfig) (*StsWebVerifier, 
 	if cfg.JWKSURL == "" {
 		return nil, errors.New("StsWebConfig.JWKSURL is required")
 	}
-	if cfg.PodSuffix == "" {
-		cfg.PodSuffix = "-pod"
+	if cfg.ClusterARN == "" {
+		log.Printf("WARN aws-stsweb: ClusterARN unset — accepting tokens from any EKS cluster in the account")
 	}
 	cache := jwk.NewCache(ctx)
 	if err := cache.Register(cfg.JWKSURL); err != nil {

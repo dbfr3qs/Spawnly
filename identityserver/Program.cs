@@ -50,7 +50,9 @@ builder.Services.AddSingleton<IAgentCredentialVerifier>(sp => attestor switch
 {
     "" or "spiffe" => new SpireCredentialVerifier(sp.GetRequiredService<SpireSvidValidator>()),
     "aws-sts" => new StsCredentialVerifier(sp.GetRequiredService<IHttpClientFactory>()),
-    "aws-stsweb" => new StsWebCredentialVerifier(sp.GetRequiredService<IHttpClientFactory>(), stswebOptions),
+    "aws-stsweb" => new StsWebCredentialVerifier(
+        sp.GetRequiredService<IHttpClientFactory>(), stswebOptions,
+        sp.GetRequiredService<ILogger<StsWebCredentialVerifier>>()),
     _ => throw new InvalidOperationException($"unknown ATTESTOR '{attestor}'"),
 });
 
