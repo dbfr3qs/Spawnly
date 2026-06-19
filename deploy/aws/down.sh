@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Tear down the ENTIRE AWS environment so it stops costing money.
-# Deletes the in-cluster resources (best-effort, to avoid orphaned cloud
-# resources) then destroys all Terraform-managed infra (EKS, VPC, IAM, ECR).
+# Tear down the cluster so it stops costing money. Destroys the CLUSTER root only
+# (EKS, VPC, IAM, Pod Identity). The ECR repositories live in their own root
+# (deploy/aws/ecr) and are intentionally LEFT INTACT so images survive — push
+# once, reuse across down/up. To delete the images too: ./deploy/aws/destroy-ecr.sh
 #
 # Not set -e: the kubectl cleanup is best-effort; terraform destroy is the part
 # that must run regardless.
@@ -20,14 +21,15 @@ else
   echo "   (kubectl can't reach a cluster — skipping; terraform destroy will remove it)"
 fi
 
-echo "==> terraform destroy (EKS + VPC + IAM + ECR + Pod Identity addon/association)"
+echo "==> terraform destroy (cluster root: EKS + VPC + IAM + Pod Identity)"
 terraform -chdir=deploy/aws/terraform destroy -auto-approve
 
 echo ""
-echo "Environment is DOWN. Verify nothing lingers:"
+echo "Cluster is DOWN. ECR repositories (deploy/aws/ecr) were KEPT — images persist"
+echo "for the next 'up.sh' (no re-push needed). Verify:"
 echo "  aws eks list-clusters --region $AWS_REGION"
 echo "  aws ecr describe-repositories --region $AWS_REGION 2>/dev/null | jq '.repositories[].repositoryName'"
 echo ""
-echo "Note: outbound web identity federation is an account-level capability left"
-echo "      ENABLED (harmless). To revert it explicitly:"
-echo "      aws iam disable-outbound-web-identity-federation"
+echo "To also delete the images + repos:  ./deploy/aws/destroy-ecr.sh"
+echo "Note: outbound web identity federation is left ENABLED (account-level, harmless)."
+echo "      Revert with: aws iam disable-outbound-web-identity-federation"

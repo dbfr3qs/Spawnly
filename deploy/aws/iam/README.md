@@ -1,8 +1,10 @@
 # Least-privilege policy for the Terraform principal
 
 `terraform-principal-policy.json` is the IAM policy to attach to the user/role
-that runs `terraform apply` in `deploy/aws/terraform`. It avoids
-`AdministratorAccess` by:
+that runs `terraform apply` for both Terraform roots — `deploy/aws/ecr` (image
+repositories) and `deploy/aws/terraform` (the cluster). The same policy covers
+both; the ECR grants are unchanged by the split. It avoids `AdministratorAccess`
+by:
 
 - **Region-boxing the infrastructure services** (`ec2`, `eks`, `elasticloadbalancing`,
   `autoscaling`, `kms`, `logs`) with an `aws:RequestedRegion` condition — broad

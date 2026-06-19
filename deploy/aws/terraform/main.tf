@@ -126,15 +126,5 @@ resource "aws_eks_pod_identity_association" "agent" {
   role_arn        = aws_iam_role.agent.arn
 }
 
-# ── ECR repositories ──────────────────────────────────────────────────────────
-resource "aws_ecr_repository" "this" {
-  for_each = toset(var.ecr_repositories)
-
-  name                 = each.value
-  image_tag_mutability = "MUTABLE"
-  force_delete         = true
-
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-}
+# ECR repositories live in their own root/state (deploy/aws/ecr) so images survive
+# cluster teardown. See deploy/aws/ecr/README.md.

@@ -5,14 +5,14 @@
 #
 # Usage:
 #   AWS_REGION=us-east-1 deploy/aws/push-images.sh [ECR_REGISTRY_HOST]
-# ECR_REGISTRY_HOST defaults to the terraform `ecr_registry` output.
+# ECR_REGISTRY_HOST defaults to the ecr root's `ecr_registry` output.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
 REGION="${AWS_REGION:-us-east-1}"
 TAG="${IMAGE_TAG:-latest}"
-ECR="${1:-$(terraform -chdir=deploy/aws/terraform output -raw ecr_registry)}"
+ECR="${1:-$(terraform -chdir=deploy/aws/ecr output -raw ecr_registry)}"
 
 echo "==> Logging in to ECR ($ECR)"
 aws ecr get-login-password --region "$REGION" \

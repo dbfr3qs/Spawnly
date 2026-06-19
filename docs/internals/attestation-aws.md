@@ -29,11 +29,17 @@ AWS_REGION=us-east-1 ./deploy/aws/up.sh
 ./deploy/aws/down.sh
 ```
 
-`up.sh` runs `terraform apply` → kubeconfig → access-entry self-heal → enable
-outbound federation → push images → deploy → spawns the test worker and prints
-the attestation evidence (registry `issuer=aws-stsweb` registration, event
-timeline, and the worker's authorized `sample-api` result), exiting non-zero if
-any step fails. The sections below document each step individually.
+`up.sh` runs `terraform apply` (ECR root, then cluster root) → kubeconfig →
+access-entry self-heal → enable outbound federation → push images → deploy →
+spawns the test worker and prints the attestation evidence (registry
+`issuer=aws-stsweb` registration, event timeline, and the worker's authorized
+`sample-api` result), exiting non-zero if any step fails. The sections below
+document each step individually.
+
+> **Two Terraform roots.** ECR repositories live in their own root/state
+> (`deploy/aws/ecr`), separate from the cluster (`deploy/aws/terraform`), so
+> `down.sh` destroys only the cluster and the **images persist** — push once,
+> reuse across down/up cycles. See [../../deploy/aws/ecr/README.md](../../deploy/aws/ecr/).
 
 ## How attestation works here (`aws-stsweb`)
 
@@ -71,34 +77,38 @@ unlike the legacy `aws-sts` attestor whose `RoleSessionName` was self-asserted.
   rather than `AdministratorAccess`.
 - Verify access: `aws sts get-caller-identity` returns your account/ARN.
 
-## 1. Provision infrastructure
+## 1. Provision infrastructure (two roots)
 
 ```bash
-cd deploy/aws/terraform
-terraform init
-terraform apply            # ~15 min for EKS
+terraform -chdir=deploy/aws/ecr init && terraform -chdir=deploy/aws/ecr apply        # ECR repos (persist)
+terraform -chdir=deploy/aws/terraform init && terraform -chdir=deploy/aws/terraform apply   # ~15 min for EKS
 ```
 
-Note the outputs: `agent_role_arn`, `ecr_registry`, `region`, and run the
-printed `kubeconfig_command`.
+ECR is a separate root so its repos survive cluster teardown. Note the cluster
+outputs (`agent_role_arn`, `cluster_arn`, `region`) and run the printed
+`kubeconfig_command`. The ECR registry host comes from
+`terraform -chdir=deploy/aws/ecr output -raw ecr_registry`.
 
 ## 2. Build & push images to ECR
 
 Builds every stage from the multi-stage Dockerfile and pushes to ECR (derives
-the registry host from the Terraform output, handles `docker login`):
+the registry host from the ECR root output, handles `docker login`):
 
 ```bash
 AWS_REGION=us-east-1 ./deploy/aws/push-images.sh
 ```
 
+Because ECR is its own state, you only push when an image actually changes —
+images survive `down.sh`/`up.sh`.
+
 ## 3. Deploy the platform
 
 One script does it all: the `control-plane-auth` secret, the `ai-provider`
-secret (from your env), the IRSA ServiceAccount annotation, the AWS overlay
-(`ATTESTOR=aws-sts`, **no SPIRE / no `csi.spiffe.io`**), repointing images at
-ECR, waiting for rollouts, and seeding templates with ECR-qualified agent
-images. The registry writes its own SpiceDB schema on startup, so there is no
-manual schema step.
+secret (from your env), the agent ServiceAccount (Pod Identity-bound — no IRSA
+annotation), the AWS overlay (`ATTESTOR=aws-stsweb`, **no SPIRE / no
+`csi.spiffe.io`**), repointing images at ECR, the dynamic `STSWEB_*` env, waiting
+for rollouts, and seeding templates with ECR-qualified agent images. The registry
+writes its own SpiceDB schema on startup, so there is no manual schema step.
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...      # or AI_API_KEY / OPENAI_API_KEY
@@ -107,14 +117,20 @@ AWS_REGION=us-east-1 ./deploy/aws/deploy.sh
 
 ## 4. Verify
 
-Port-forward the dashboard/orchestrator and run a spawn → token → work flow (or
-the e2e suite) with **zero SPIRE components present**. Confirm an agent's
-`token_issued` event and a successful `sample-api` call: that is the AWS-STS
-attestor end to end.
+```bash
+AWS_REGION=us-east-1 ./deploy/aws/smoke-test.sh
+```
+Confirms `issuer=aws-stsweb` (agent id from the attested `kubernetes-pod-name`),
+`token_issued`, and an authorized `sample-api` call — with **zero SPIRE present**.
 
 ## 5. Teardown
 
 ```bash
-kubectl kustomize --load-restrictor LoadRestrictionsNone deploy/aws | kubectl delete -f -
-cd deploy/aws/terraform && terraform destroy
+./deploy/aws/down.sh          # destroys the cluster; KEEPS ECR (images persist for next up.sh)
+```
+
+To also delete the image repositories:
+
+```bash
+./deploy/aws/destroy-ecr.sh
 ```

@@ -28,30 +28,6 @@ variable "agent_service_account" {
   default     = "spawnly-agent"
 }
 
-variable "ecr_repositories" {
-  description = "Container image repositories to create in ECR (platform services + agents)."
-  type        = list(string)
-  # Image names match the Dockerfile stages (agent-<stage>, except agent-sidecar).
-  # Mirrors `make print-SERVICES`.
-  default = [
-    "agent-operator",
-    "agent-orchestrator",
-    "agent-registry",
-    "agent-sample-api",
-    "agent-sidecar",
-    "agent-dashboard",
-    "agent-go-worker",
-    "agent-child-agent",
-    "agent-parent-agent",
-    "agent-currency-converter",
-    "agent-trip-planner",
-    "agent-chain-worker",
-    "agent-pi-worker",
-    "agent-identity-server",
-    "agent-weather-monitor",
-  ]
-}
-
 variable "node_instance_type" {
   description = "EC2 instance type for the managed node group."
   type        = string
