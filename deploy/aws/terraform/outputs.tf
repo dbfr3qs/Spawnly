@@ -23,6 +23,11 @@ output "cluster_arn" {
   value       = module.eks.cluster_arn
 }
 
+output "vpc_id" {
+  description = "VPC id (passed to the AWS Load Balancer Controller)."
+  value       = module.vpc.vpc_id
+}
+
 output "agent_service_account" {
   description = "ServiceAccount name agents run as."
   value       = var.agent_service_account

@@ -20,7 +20,7 @@ export AWS_REGION="${AWS_REGION:-us-east-1}"
 TF="terraform -chdir=deploy/aws/terraform"
 
 echo "==> Preflight: tools + AWS credentials"
-for t in terraform kubectl docker aws jq; do
+for t in terraform kubectl docker aws jq helm; do
   command -v "$t" >/dev/null || { echo "ERROR: missing required tool: $t" >&2; exit 1; }
 done
 CALLER_PREFLIGHT=$(aws sts get-caller-identity --query Arn --output text 2>/dev/null) \
@@ -85,6 +85,15 @@ echo "==> Ensuring outbound web identity federation is enabled"
 aws iam enable-outbound-web-identity-federation >/dev/null 2>&1 || true
 export STSWEB_ISSUER=$(aws iam get-outbound-web-identity-federation-info --query IssuerIdentifier --output text)
 echo "    STS issuer: $STSWEB_ISSUER"
+
+# Public edge controllers — only when the DNS root is set up (public exposure is
+# opt-in: applying deploy/aws/dns is what turns it on).
+if terraform -chdir=deploy/aws/dns output -raw acm_certificate_arn >/dev/null 2>&1; then
+  echo "==> Installing public-edge controllers (ALB controller + external-dns)"
+  ./deploy/aws/install-edge.sh
+else
+  echo "==> Skipping edge controllers (deploy/aws/dns not applied — public exposure off)"
+fi
 
 echo "==> Building & pushing images to ECR"
 ./deploy/aws/push-images.sh

@@ -34,6 +34,12 @@ variable "node_instance_type" {
   default     = "t3.medium"
 }
 
+variable "domain" {
+  description = "Domain whose Route53 zone (managed in deploy/aws/dns) external-dns is scoped to."
+  type        = string
+  default     = "spawnly.run"
+}
+
 variable "cluster_admin_principal_arns" {
   description = <<-EOT
     IAM principal ARNs to grant cluster-admin via EKS access entries at apply time
