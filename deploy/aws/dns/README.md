@@ -5,7 +5,8 @@ and the `docs.<domain>` → GitHub Pages CNAME live in this **own root/state**,
 **independent of the cluster** — like `deploy/aws/ecr`. The registrar delegates
 nameservers here, so this must persist across cluster `down`/`up`.
 
-- **Applied by** `up.sh` (idempotent).
+- **Applied once, manually** via `terraform` (see first-time setup below) — not
+  by `up.sh`. It rarely changes after the one-time NS cutover.
 - **NOT destroyed by** `down.sh`. It is only torn down by an explicit full
   teardown: `./deploy/aws/down.sh --all` (which also breaks the registrar NS
   delegation — you'd re-delegate on the next setup).

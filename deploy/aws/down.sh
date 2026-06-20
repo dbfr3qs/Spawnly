@@ -39,9 +39,13 @@ echo "==> terraform destroy (cluster root: EKS + VPC + IAM + Pod Identity)"
 terraform -chdir=deploy/aws/terraform destroy -auto-approve
 
 if [ "$ALL" = true ]; then
+  # init first: these persistent roots aren't applied by up.sh, and .terraform/
+  # is gitignored, so a fresh checkout has no provider plugins to destroy with.
   echo "==> --all: terraform destroy (ECR images)"
+  terraform -chdir=deploy/aws/ecr init -input=false >/dev/null
   terraform -chdir=deploy/aws/ecr destroy -auto-approve
   echo "==> --all: terraform destroy (DNS + TLS)  [breaks registrar NS delegation]"
+  terraform -chdir=deploy/aws/dns init -input=false >/dev/null
   terraform -chdir=deploy/aws/dns destroy -auto-approve
   echo ""
   echo "FULL teardown complete — nothing should be billing. Note: the domain's"
