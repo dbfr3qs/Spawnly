@@ -20,7 +20,7 @@ export AWS_REGION="${AWS_REGION:-us-east-1}"
 TF="terraform -chdir=deploy/aws/terraform"
 
 echo "==> Preflight: tools + AWS credentials"
-for t in terraform kubectl docker aws jq; do
+for t in terraform kubectl docker aws jq helm; do
   command -v "$t" >/dev/null || { echo "ERROR: missing required tool: $t" >&2; exit 1; }
 done
 CALLER_PREFLIGHT=$(aws sts get-caller-identity --query Arn --output text 2>/dev/null) \
@@ -33,6 +33,15 @@ case "$CALLER_PREFLIGHT" in
     echo "             If a step fails with 'session expired', run: aws sso login --profile \"\${AWS_PROFILE:-}\"" >&2
     echo "             A static-key IAM user avoids this entirely." >&2 ;;
 esac
+
+# Public exposure is opt-in: it's ON only when the persistent DNS root
+# (deploy/aws/dns) is applied. This single flag gates the edge IAM (Terraform),
+# the controller install, and the ingress — so a plain deploy provisions no edge
+# and never tries to resolve the (absent) hosted zone.
+EDGE=false
+terraform -chdir=deploy/aws/dns output -raw acm_certificate_arn >/dev/null 2>&1 && EDGE=true
+export TF_VAR_enable_public_edge="$EDGE"
+echo "==> Public edge: $([ "$EDGE" = true ] && echo 'ON (DNS root applied)' || echo 'off (deploy/aws/dns not applied)')"
 
 # ECR lives in its own root/state so images survive `down.sh` (push once, reuse).
 # Idempotent: a no-op when the repos already exist from a previous cycle.
@@ -85,6 +94,12 @@ echo "==> Ensuring outbound web identity federation is enabled"
 aws iam enable-outbound-web-identity-federation >/dev/null 2>&1 || true
 export STSWEB_ISSUER=$(aws iam get-outbound-web-identity-federation-info --query IssuerIdentifier --output text)
 echo "    STS issuer: $STSWEB_ISSUER"
+
+# Public edge controllers — gated on the same flag computed above.
+if [ "$EDGE" = true ]; then
+  echo "==> Installing public-edge controllers (ALB controller + external-dns)"
+  ./deploy/aws/install-edge.sh
+fi
 
 echo "==> Building & pushing images to ECR"
 ./deploy/aws/push-images.sh

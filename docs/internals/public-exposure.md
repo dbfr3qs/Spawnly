@@ -44,7 +44,10 @@ Three Terraform roots with different lifecycles:
 `docs.<domain>` CNAME → Pages. One-time NS cutover at the registrar (see that
 root's README). `down.sh --all` tears it down.
 
-### Phase 2 — Cluster edge controllers (cluster root + deploy)
+### Phase 2 — Cluster edge controllers (cluster root + deploy) — IMPLEMENTED
+Provisioned in `deploy/aws/terraform/edge.tf` (IAM + Pod Identity) and installed
+by `deploy/aws/install-edge.sh` (Helm). `up.sh` runs the installer **only when the
+DNS root is applied** (public exposure is opt-in).
 - **AWS Load Balancer Controller**: the AWS-published IAM policy (as a `spawnly-lbc`
   customer-managed policy), an IAM role + Pod Identity association, install via
   Helm/EKS addon.
@@ -52,7 +55,14 @@ root's README). `down.sh --all` tears it down.
   role + Pod Identity association, install via Helm (`--domain-filter`,
   `--txt-owner-id`, `--policy=sync`).
 
-### Phase 3 — Ingress + routing (AWS overlay)
+### Phase 3 — Ingress + routing — IMPLEMENTED
+`deploy/aws/ingress.yaml` (applied by `deploy.sh` when the DNS root is set up; it
+injects the ACM `certificate-arn`). external-dns writes the records from the rule
+hosts. **Phase 4 (issuer env + cookie/ForwardedHeaders code) is still required for
+a working browser login** — until then the apps are reachable at the ALB but the
+OIDC flow isn't wired to the public hostnames.
+
+Original phase notes:
 One ALB Ingress (`target-type: ip`, `scheme: internet-facing`, HTTP→HTTPS
 redirect, `certificate-arn` = the dns root's ACM ARN):
 `spawnly.run → dashboard:8080`, `auth.spawnly.run → identity-server:8080`, with

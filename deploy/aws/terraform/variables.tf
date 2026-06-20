@@ -34,6 +34,24 @@ variable "node_instance_type" {
   default     = "t3.medium"
 }
 
+variable "domain" {
+  description = "Domain whose Route53 zone (managed in deploy/aws/dns) external-dns is scoped to."
+  type        = string
+  default     = "spawnly.run"
+}
+
+variable "enable_public_edge" {
+  description = <<-EOT
+    Provision the public-edge IAM (AWS LB Controller + external-dns) in edge.tf.
+    Requires the DNS root (deploy/aws/dns) to be applied — the external-dns scope
+    looks up that hosted zone. up.sh sets TF_VAR_enable_public_edge=true only when
+    the DNS root exists, so a plain (non-public) deploy creates nothing here and
+    never tries to resolve the zone.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "cluster_admin_principal_arns" {
   description = <<-EOT
     IAM principal ARNs to grant cluster-admin via EKS access entries at apply time

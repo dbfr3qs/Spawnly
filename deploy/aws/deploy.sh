@@ -122,5 +122,20 @@ done
 echo "==> seeding templates"
 ECR_REGISTRY="$ECR" IMAGE_TAG="$TAG" deploy/aws/seed-aws.sh
 
+# ── 8. Public ingress (only when the DNS root is set up) ──────────────────────
+# Provisions the ALB (via the AWS LB Controller, installed by up.sh) and routes
+# spawnly.run/auth.spawnly.run. NOTE: the public OIDC issuer wiring + the
+# IdP/dashboard cookie+ForwardedHeaders code is Phase 4 — until then the apps are
+# reachable at the ALB but the browser login flow isn't fully wired.
+CERT_ARN="$(terraform -chdir=deploy/aws/dns output -raw acm_certificate_arn 2>/dev/null || true)"
+if [ -n "$CERT_ARN" ] && [ "$CERT_ARN" != "None" ]; then
+  echo "==> applying public ingress (ACM cert)"
+  # Render the cert into the manifest so the object is complete on first reconcile
+  # (avoids the LB Controller building the 443 listener before the cert lands).
+  sed "s|\${CERT_ARN}|${CERT_ARN}|g" deploy/aws/ingress.yaml | kubectl apply -f -
+else
+  echo "==> skipping public ingress (deploy/aws/dns not applied — see its README)"
+fi
+
 echo ""
 echo "Deploy complete. Port-forward the dashboard:  kubectl port-forward svc/dashboard 8090:8080"

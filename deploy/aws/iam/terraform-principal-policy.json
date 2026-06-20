@@ -10,12 +10,19 @@
         "autoscaling:*",
         "eks:*",
         "kms:*",
-        "logs:*"
+        "logs:*",
+        "acm:*"
       ],
       "Resource": "*",
       "Condition": {
         "StringEquals": { "aws:RequestedRegion": "REGION" }
       }
+    },
+    {
+      "Sid": "Route53Global",
+      "Effect": "Allow",
+      "Action": "route53:*",
+      "Resource": "*"
     },
     {
       "Sid": "EcrAuthToken",
