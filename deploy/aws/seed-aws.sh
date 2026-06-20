@@ -7,8 +7,7 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 TAG="${IMAGE_TAG:-latest}"
-TF="terraform -chdir=deploy/aws/terraform"
-ECR="${ECR_REGISTRY:-$($TF output -raw ecr_registry)}"
+ECR="${ECR_REGISTRY:-$(terraform -chdir=deploy/aws/ecr output -raw ecr_registry)}"
 
 templates=(agents/*/template.json)
 found=()

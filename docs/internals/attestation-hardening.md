@@ -194,9 +194,15 @@ expiry, mitigated by TTL + `aud` binding — not worse than SPIRE.
 - Mark `aws-sts` (GetCallerIdentity / RoleSessionName) legacy: readable but
   self-asserted; keep behind the selector for non-Pod-Identity environments.
 
-## Open items to resolve during implementation
-- Go SDK `GetWebIdentityToken` availability (Phase 0).
-- Whether the AWS Terraform provider has a native resource for enabling outbound
-  federation, or we use `local-exec` + `external` for the issuer.
-- Final claim path/casing for `principal_tags` once decoded by the Go/C# JSON
-  libraries (the namespaced key `https://sts.amazonaws.com/`).
+## Status
+
+Implemented and **verified end-to-end on EKS** (`issuer=aws-stsweb`,
+`token_issued`, `work_ok`, no SPIRE), including a spoof test proving a forged
+`request_tags.kubernetes-pod-name` is ignored. Resolved during implementation:
+Go SDK `v1.43.3` already has `GetWebIdentityToken`; outbound federation is enabled
+via `up.sh` (not Terraform); the Go verifier needs
+`jws.WithInferAlgorithmFromKey(true)` because the AWS STS JWKS RSA key omits `alg`.
+
+ECR now lives in its own Terraform root (`deploy/aws/ecr`) so images persist
+across `down.sh`/`up.sh` — `down.sh` destroys only the cluster root. (Done; was a
+backlog item.)

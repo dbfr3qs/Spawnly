@@ -34,7 +34,13 @@ case "$CALLER_PREFLIGHT" in
     echo "             A static-key IAM user avoids this entirely." >&2 ;;
 esac
 
-echo "==> Terraform apply (EKS + IAM + ECR; first run ~15 min)"
+# ECR lives in its own root/state so images survive `down.sh` (push once, reuse).
+# Idempotent: a no-op when the repos already exist from a previous cycle.
+echo "==> Terraform apply (ECR repositories)"
+terraform -chdir=deploy/aws/ecr init -input=false >/dev/null
+terraform -chdir=deploy/aws/ecr apply -auto-approve
+
+echo "==> Terraform apply (EKS + IAM; first run ~15 min)"
 $TF init -input=false >/dev/null
 $TF apply -auto-approve
 
