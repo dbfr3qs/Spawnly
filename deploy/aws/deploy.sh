@@ -130,9 +130,9 @@ ECR_REGISTRY="$ECR" IMAGE_TAG="$TAG" deploy/aws/seed-aws.sh
 CERT_ARN="$(terraform -chdir=deploy/aws/dns output -raw acm_certificate_arn 2>/dev/null || true)"
 if [ -n "$CERT_ARN" ] && [ "$CERT_ARN" != "None" ]; then
   echo "==> applying public ingress (ACM cert)"
-  kubectl apply -f deploy/aws/ingress.yaml
-  kubectl annotate ingress spawnly -n default \
-    alb.ingress.kubernetes.io/certificate-arn="$CERT_ARN" --overwrite
+  # Render the cert into the manifest so the object is complete on first reconcile
+  # (avoids the LB Controller building the 443 listener before the cert lands).
+  sed "s|\${CERT_ARN}|${CERT_ARN}|g" deploy/aws/ingress.yaml | kubectl apply -f -
 else
   echo "==> skipping public ingress (deploy/aws/dns not applied — see its README)"
 fi

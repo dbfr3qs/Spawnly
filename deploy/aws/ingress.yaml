@@ -15,8 +15,9 @@ metadata:
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
     alb.ingress.kubernetes.io/ssl-redirect: '443'
-    # alb.ingress.kubernetes.io/certificate-arn is injected by deploy.sh from the
-    # deploy/aws/dns ACM output.
+    # deploy.sh substitutes ${CERT_ARN} (from the deploy/aws/dns ACM output) before
+    # a single apply, so the object is complete on the controller's first reconcile.
+    alb.ingress.kubernetes.io/certificate-arn: "${CERT_ARN}"
 spec:
   ingressClassName: alb
   rules:

@@ -34,6 +34,15 @@ case "$CALLER_PREFLIGHT" in
     echo "             A static-key IAM user avoids this entirely." >&2 ;;
 esac
 
+# Public exposure is opt-in: it's ON only when the persistent DNS root
+# (deploy/aws/dns) is applied. This single flag gates the edge IAM (Terraform),
+# the controller install, and the ingress — so a plain deploy provisions no edge
+# and never tries to resolve the (absent) hosted zone.
+EDGE=false
+terraform -chdir=deploy/aws/dns output -raw acm_certificate_arn >/dev/null 2>&1 && EDGE=true
+export TF_VAR_enable_public_edge="$EDGE"
+echo "==> Public edge: $([ "$EDGE" = true ] && echo 'ON (DNS root applied)' || echo 'off (deploy/aws/dns not applied)')"
+
 # ECR lives in its own root/state so images survive `down.sh` (push once, reuse).
 # Idempotent: a no-op when the repos already exist from a previous cycle.
 echo "==> Terraform apply (ECR repositories)"
@@ -86,13 +95,10 @@ aws iam enable-outbound-web-identity-federation >/dev/null 2>&1 || true
 export STSWEB_ISSUER=$(aws iam get-outbound-web-identity-federation-info --query IssuerIdentifier --output text)
 echo "    STS issuer: $STSWEB_ISSUER"
 
-# Public edge controllers — only when the DNS root is set up (public exposure is
-# opt-in: applying deploy/aws/dns is what turns it on).
-if terraform -chdir=deploy/aws/dns output -raw acm_certificate_arn >/dev/null 2>&1; then
+# Public edge controllers — gated on the same flag computed above.
+if [ "$EDGE" = true ]; then
   echo "==> Installing public-edge controllers (ALB controller + external-dns)"
   ./deploy/aws/install-edge.sh
-else
-  echo "==> Skipping edge controllers (deploy/aws/dns not applied — public exposure off)"
 fi
 
 echo "==> Building & pushing images to ECR"
