@@ -1,9 +1,9 @@
 name: Deploy docs to GitHub Pages
 
 # Builds the Starlight site in website/ (which globs its content from ../docs)
-# and publishes it to GitHub Pages. The site is served at the apex custom
-# domain spawnly.run; the CNAME ships in website/public/ so the custom domain
-# survives every Actions deploy.
+# and publishes it to GitHub Pages. The site is served at the custom domain
+# docs.spawnly.run; the CNAME ships in website/public/ so the custom domain
+# survives every Actions deploy. (The apex spawnly.run serves the dashboard.)
 
 on:
   push:
