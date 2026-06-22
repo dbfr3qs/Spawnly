@@ -4,11 +4,12 @@ import starlight from '@astrojs/starlight';
 import { remarkStripFirstH1 } from './plugins/remark-strip-first-h1.mjs';
 import { remarkRewriteRepoLinks } from './plugins/remark-rewrite-repo-links.mjs';
 
-// Hosted on GitHub Pages at the apex custom domain spawnly.run, which serves
+// Hosted on GitHub Pages at the custom domain docs.spawnly.run, which serves
 // from the root — so we set `site` (canonical URLs + sitemap) but no `base`.
 // A `base` would only be needed for a project URL like dbfr3qs.github.io/Spawnly.
+// (The apex spawnly.run now serves the dashboard via the EKS ALB.)
 export default defineConfig({
-  site: 'https://spawnly.run',
+  site: 'https://docs.spawnly.run',
   markdown: {
     remarkPlugins: [remarkStripFirstH1, remarkRewriteRepoLinks],
   },
