@@ -118,7 +118,7 @@ func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Bind the state to the browser to defend the callback against CSRF.
 	http.SetCookie(w, &http.Cookie{
 		Name: stateCookie, Value: state, Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 600,
+		HttpOnly: true, Secure: forwardedHTTPS(r), SameSite: http.SameSiteLaxMode, MaxAge: 600,
 	})
 
 	authURL := a.oauth.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier))
@@ -139,7 +139,7 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid state", http.StatusBadRequest)
 		return
 	}
-	clearCookie(w, stateCookie)
+	clearCookie(w, stateCookie, forwardedHTTPS(r))
 
 	a.mu.Lock()
 	pl, ok := a.pending[state]
@@ -191,7 +191,7 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: sid, Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		HttpOnly: true, Secure: forwardedHTTPS(r), SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -208,7 +208,7 @@ func (a *Authenticator) handleLogout(w http.ResponseWriter, r *http.Request) {
 		}
 		a.mu.Unlock()
 	}
-	clearCookie(w, sessionCookie)
+	clearCookie(w, sessionCookie, forwardedHTTPS(r))
 
 	end := a.authority + "/connect/endsession?post_logout_redirect_uri=" +
 		url.QueryEscape(a.authority+"/")
@@ -269,8 +269,17 @@ func (a *Authenticator) gcPendingLocked() {
 	}
 }
 
-func clearCookie(w http.ResponseWriter, name string) {
-	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", HttpOnly: true, MaxAge: -1})
+func clearCookie(w http.ResponseWriter, name string, secure bool) {
+	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", HttpOnly: true, Secure: secure, MaxAge: -1})
+}
+
+// forwardedHTTPS reports whether the original browser request arrived over HTTPS,
+// per the load balancer's X-Forwarded-Proto header. The dashboard listens on plain
+// HTTP behind the TLS-terminating EKS ALB, so it can't read the scheme directly;
+// this is how cookies are marked Secure in production while the local HTTP flow
+// (kind / port-forward, no such header) keeps working.
+func forwardedHTTPS(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 func randToken() string {

@@ -122,17 +122,31 @@ done
 echo "==> seeding templates"
 ECR_REGISTRY="$ECR" IMAGE_TAG="$TAG" deploy/aws/seed-aws.sh
 
-# ── 8. Public ingress (only when the DNS root is set up) ──────────────────────
+# ── 8. Public ingress + OIDC origin (only when the DNS root is set up) ─────────
 # Provisions the ALB (via the AWS LB Controller, installed by up.sh) and routes
-# spawnly.run/auth.spawnly.run. NOTE: the public OIDC issuer wiring + the
-# IdP/dashboard cookie+ForwardedHeaders code is Phase 4 — until then the apps are
-# reachable at the ALB but the browser login flow isn't fully wired.
+# spawnly.run/auth.spawnly.run, then wires the browser-facing OIDC origin.
 CERT_ARN="$(terraform -chdir=deploy/aws/dns output -raw acm_certificate_arn 2>/dev/null || true)"
 if [ -n "$CERT_ARN" ] && [ "$CERT_ARN" != "None" ]; then
   echo "==> applying public ingress (ACM cert)"
   # Render the cert into the manifest so the object is complete on first reconcile
   # (avoids the LB Controller building the 443 listener before the cert lands).
   sed "s|\${CERT_ARN}|${CERT_ARN}|g" deploy/aws/ingress.yaml | kubectl apply -f -
+
+  # Public OIDC origin (Phase 4). Single-origin design: the browser only talks to
+  # the apex, which reverse-proxies /connect,/.well-known,/Account to
+  # identity-server. So OIDC_AUTHORITY (dashboard's authorize redirect + its
+  # client's redirect_uri) and DASHBOARD_ORIGIN (the IdP's allowed redirect/
+  # post-logout URIs for that client) must both be the public https origin —
+  # while ISSUER_URI / IDENTITY_INTERNAL_URL stay in-cluster (the resource
+  # servers validate `iss`). FORWARDED_HEADERS lets the IdP honor the ALB's
+  # X-Forwarded-Proto so its cookies are Secure; the dashboard reads that header
+  # directly for its own cookies.
+  PUBLIC_ORIGIN="https://${PUBLIC_DOMAIN:-spawnly.run}"
+  echo "==> wiring public OIDC origin ($PUBLIC_ORIGIN)"
+  kubectl set env deployment/dashboard OIDC_AUTHORITY="$PUBLIC_ORIGIN"
+  kubectl set env deployment/identity-server DASHBOARD_ORIGIN="$PUBLIC_ORIGIN" FORWARDED_HEADERS=true
+  kubectl rollout status deployment/dashboard --timeout=120s
+  kubectl rollout status deployment/identity-server --timeout=120s
 else
   echo "==> skipping public ingress (deploy/aws/dns not applied — see its README)"
 fi
