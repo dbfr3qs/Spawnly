@@ -226,19 +226,35 @@ func (a *Authenticator) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // require gates a handler behind a valid session. Unauthenticated API calls get
-// 401; unauthenticated browser navigations are redirected to /login.
+// 401; only genuine top-level page navigations are redirected to /login.
 func (a *Authenticator) require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := a.user(r); ok {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/") {
+		// Start the OIDC login only for real page navigations. API calls get 401;
+		// so does every other subresource request (notably the browser's eager
+		// /favicon.ico) — redirecting those to /login would mint a second login
+		// state and overwrite the cookie of the in-flight navigation, surfacing
+		// as an "invalid state" error on the callback.
+		if strings.HasPrefix(r.URL.Path, "/api/") || !isPageNavigation(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		http.Redirect(w, r, "/login", http.StatusFound)
 	})
+}
+
+// isPageNavigation reports whether the request is a top-level browser navigation
+// (a document load) rather than a subresource fetch. Prefers the Fetch Metadata
+// header (Sec-Fetch-Dest: document) modern browsers always send on navigations;
+// falls back to an explicit text/html Accept for older clients.
+func isPageNavigation(r *http.Request) bool {
+	if dest := r.Header.Get("Sec-Fetch-Dest"); dest != "" {
+		return dest == "document"
+	}
+	return strings.Contains(r.Header.Get("Accept"), "text/html")
 }
 
 // user returns the logged-in username for the request, if any.
