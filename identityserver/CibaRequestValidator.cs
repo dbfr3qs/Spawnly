@@ -1,5 +1,4 @@
 using Duende.IdentityServer.Validation;
-using Microsoft.IdentityModel.JsonWebTokens;
 
 namespace IdentityServer;
 
@@ -29,11 +28,14 @@ public class CibaRequestValidator : ICustomBackchannelAuthenticationValidator
         properties.TryGetValue(key, out var v) ? v?.ToString() : null;
 
     private readonly AgentRegistryClient _registry;
+    private readonly IAgentCredentialVerifier _verifier;
     private readonly ILogger<CibaRequestValidator> _log;
 
-    public CibaRequestValidator(AgentRegistryClient registry, ILogger<CibaRequestValidator> log)
+    public CibaRequestValidator(
+        AgentRegistryClient registry, IAgentCredentialVerifier verifier, ILogger<CibaRequestValidator> log)
     {
         _registry = registry;
+        _verifier = verifier;
         _log = log;
     }
 
@@ -67,8 +69,18 @@ public class CibaRequestValidator : ICustomBackchannelAuthenticationValidator
             return;
         }
 
-        var spiffeId = new JsonWebTokenHandler().ReadJsonWebToken(assertion).Subject;
-        var agentId = spiffeId.Split('/').Last();
+        // Derive the agent identity via the pluggable attestation verifier — the
+        // SAME path the token endpoint (AgentRegistryValidator) uses — so the
+        // agentId is correct under any attestor. Re-deriving it from the raw
+        // assertion's JWT `sub` assumes a SPIFFE URI and breaks on aws-stsweb
+        // (whose assertion is an STS web-identity token, not a SPIFFE SVID).
+        var identity = await _verifier.Verify(assertion);
+        if (identity is null)
+        {
+            Reject(context, "invalid client_assertion");
+            return;
+        }
+        var agentId = identity.AgentId;
 
         var agent = await _registry.GetAgent(agentId);
         if (agent is null)
@@ -116,9 +128,13 @@ public class CibaRequestValidator : ICustomBackchannelAuthenticationValidator
             agentId, agent.UserId, parent.AgentType, agent.AgentType);
     }
 
-    private static void Reject(
+    private void Reject(
         CustomBackchannelAuthenticationRequestValidationContext context, string description)
     {
+        // Surface the reason: Duende only logs a generic "custom validation
+        // failed" + the raw request, not our description, which makes CIBA
+        // rejections hard to diagnose from the IdP logs.
+        _log.LogWarning("CIBA backchannel request rejected: {Reason}", description);
         context.ValidationResult = new BackchannelAuthenticationRequestValidationResult(
             context.ValidationResult.ValidatedRequest, "invalid_request", description);
     }
