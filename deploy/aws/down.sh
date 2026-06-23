@@ -26,7 +26,42 @@ if kubectl cluster-info >/dev/null 2>&1; then
   # external-dns removes its Route53 records — otherwise a hard cluster destroy
   # orphans the ALB + leaves DNS records pointing at nothing.
   kubectl delete ingress --all --all-namespaces --ignore-not-found 2>/dev/null || true
-  sleep 10
+
+  # CRITICAL: wait for external-dns to actually delete the Route53 records it owns
+  # for the ALB BEFORE terraform destroy kills it. A blind sleep races the cleanup;
+  # if the cluster is destroyed mid-flight the records are orphaned — left aliased
+  # to the deleted ALB AND missing their ownership TXT, so the next up.sh's
+  # external-dns refuses to adopt them (the apex ALIAS is the usual casualty).
+  # Poll until the ALB-aliased records are gone, with a direct-delete fallback if
+  # external-dns never finishes (e.g. it crashed). zone_id comes from the
+  # persistent DNS root; if it/aws is unavailable, fall back to the old sleep.
+  ZID="$(terraform -chdir=deploy/aws/dns output -raw zone_id 2>/dev/null || true)"
+  if [ -n "$ZID" ] && command -v aws >/dev/null 2>&1; then
+    _alb_records_json() {
+      aws route53 list-resource-record-sets --hosted-zone-id "$ZID" \
+        --query "ResourceRecordSets[?(Type=='A'||Type=='AAAA') && AliasTarget.DNSName!=null && contains(AliasTarget.DNSName,'elb.amazonaws.com')]" \
+        --output json 2>/dev/null || echo '[]'
+    }
+    _alb_count() { _alb_records_json | jq 'length' 2>/dev/null || echo 0; }
+    echo "==> Waiting for external-dns to remove ALB DNS records (clean slate for next up)"
+    for _ in $(seq 1 24); do          # up to ~2 min
+      [ "$(_alb_count)" = "0" ] && break
+      sleep 5
+    done
+    if [ "$(_alb_count)" != "0" ]; then
+      echo "   external-dns didn't finish — deleting leftover ALB records directly"
+      _alb_records_json | jq '{Changes:[.[]|{Action:"DELETE",ResourceRecordSet:.}]}' \
+        > /tmp/spawnly-del-alb.json
+      aws route53 change-resource-record-sets --hosted-zone-id "$ZID" \
+        --change-batch file:///tmp/spawnly-del-alb.json >/dev/null 2>&1 \
+        && echo "   leftover ALB records deleted" \
+        || echo "   WARNING: direct delete failed — check Route53 for stale A/AAAA at the apex"
+    fi
+  else
+    echo "==> (no aws CLI / dns zone_id — best-effort 10s pause for external-dns)"
+    sleep 10
+  fi
+
   kubectl kustomize --load-restrictor LoadRestrictionsNone deploy/aws 2>/dev/null \
     | kubectl delete -f - --ignore-not-found 2>/dev/null || true
   kubectl delete sa spawnly-agent --ignore-not-found 2>/dev/null || true
