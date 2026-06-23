@@ -25,6 +25,9 @@ public class LogoutModel : PageModel
         if (!string.IsNullOrEmpty(ctx?.PostLogoutRedirectUri))
             return Redirect(ctx.PostLogoutRedirectUri);
 
-        return Page();
+        // No client-supplied post-logout URI: instead of rendering a dead-end
+        // "signed out" page, bounce to the app root. The dashboard's session gate
+        // then sends the (now logged-out) browser straight to the /login form.
+        return Redirect("~/");
     }
 }

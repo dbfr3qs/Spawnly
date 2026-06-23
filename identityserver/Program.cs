@@ -60,7 +60,9 @@ builder.Services.AddSingleton<IAgentCredentialVerifier>(sp => attestor switch
 builder.Services.AddIdentityServer(options =>
     {
         options.IssuerUri = issuerUri;
-        options.UserInteraction.LoginUrl = "/Account/Login";
+        // Served at /login (Login.cshtml @page route), proxied by the dashboard
+        // so the browser sees a clean spawnly.run/login URL.
+        options.UserInteraction.LoginUrl = "/login";
         options.UserInteraction.LogoutUrl = "/Account/Logout";
         // This demo runs over plain HTTP. Duende defaults the session cookie to
         // SameSite=None, which browsers drop unless it is also Secure (and Secure

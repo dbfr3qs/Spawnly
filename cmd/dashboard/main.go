@@ -44,16 +44,22 @@ func main() {
 	mux.Handle("/connect/", idProxy)
 	mux.Handle("/.well-known/", idProxy)
 	mux.Handle("/Account/", idProxy)
+	// The IdentityServer login page is served at /login (its Razor @page route);
+	// proxy it (GET render + POST submit) so the browser sees a clean /login URL
+	// on the dashboard origin. The dashboard's own login *initiator* lives at
+	// /signin (below) — it can't also own /login.
+	mux.Handle("/login", idProxy)
 	// Pending spawn-consent is now served by the registry-native broker via the
 	// /api/consent-requests routes below (Phase 5b); the old IdentityServer
 	// /ciba/ browser approval path has been removed.
 
-	// Relying-party routes (public).
-	mux.HandleFunc("GET /login", auth.handleLogin)
+	// Relying-party routes (public). /signin starts the OIDC code+PKCE flow
+	// (require() redirects here); the browser then rests on the /login form above.
+	mux.HandleFunc("GET /signin", auth.handleLogin)
 	mux.HandleFunc("GET /callback", auth.handleCallback)
 	mux.HandleFunc("POST /logout", auth.handleLogout)
 
-	// Static UI behind a session (browser GETs redirect to /login when absent).
+	// Static UI behind a session (browser GETs redirect to /signin when absent).
 	// Method-less so it doesn't conflict with the method-less OIDC proxy
 	// prefixes (Go 1.22 mux rejects a "GET /" catch-all alongside "/connect/").
 	mux.Handle("/", auth.require(http.FileServer(http.FS(staticFS))))

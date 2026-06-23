@@ -226,7 +226,8 @@ func (a *Authenticator) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // require gates a handler behind a valid session. Unauthenticated API calls get
-// 401; only genuine top-level page navigations are redirected to /login.
+// 401; only genuine top-level page navigations are redirected to /signin (which
+// starts the OIDC flow and lands the browser on the /login form).
 func (a *Authenticator) require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := a.user(r); ok {
@@ -235,14 +236,14 @@ func (a *Authenticator) require(next http.Handler) http.Handler {
 		}
 		// Start the OIDC login only for real page navigations. API calls get 401;
 		// so does every other subresource request (notably the browser's eager
-		// /favicon.ico) — redirecting those to /login would mint a second login
+		// /favicon.ico) — redirecting those to /signin would mint a second login
 		// state and overwrite the cookie of the in-flight navigation, surfacing
 		// as an "invalid state" error on the callback.
 		if strings.HasPrefix(r.URL.Path, "/api/") || !isPageNavigation(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		http.Redirect(w, r, "/login", http.StatusFound)
+		http.Redirect(w, r, "/signin", http.StatusFound)
 	})
 }
 
