@@ -186,6 +186,17 @@ kubectl create secret generic control-plane-auth \
   --from-literal=token="${CP_TOKEN}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+# Interactive dashboard login (local demo): alice/alice. The IdP reads these from
+# the `dashboard-user` Secret (optional secretKeyRefs); without it, login is
+# disabled (fail closed). The public AWS deploy generates a strong password
+# instead (deploy/aws/deploy.sh) so the internet-facing dashboard has no
+# guessable login.
+echo "==> Ensuring dashboard login secret (local demo: alice/alice)..."
+kubectl create secret generic dashboard-user \
+  --from-literal=username="alice" \
+  --from-literal=password="alice" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 echo "==> Deploying services..."
 kubectl apply -f deploy/manifests/rbac.yaml
 kubectl apply -f deploy/manifests/spicedb.yaml

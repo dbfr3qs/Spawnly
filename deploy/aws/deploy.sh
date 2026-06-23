@@ -47,6 +47,24 @@ kubectl create secret generic control-plane-auth \
   --from-literal=auth="shared-secret" --from-literal=token="$CP_TOKEN" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+# ── 1b. Dashboard login credential (strong, generated) ────────────────────────
+# The IdP reads DASHBOARD_USER/DASHBOARD_PASSWORD from this Secret (optional
+# secretKeyRefs in identityserver.yaml). This REPLACES the local demo's
+# alice/alice so the internet-facing dashboard has no guessable login. Reuse an
+# existing password across re-deploys; generate a strong one on first deploy.
+# Override the username with DASHBOARD_USER=... in the environment.
+echo "==> dashboard-user secret"
+DASH_USER="${DASHBOARD_USER:-admin}"
+DASH_PW=$(kubectl get secret dashboard-user -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)
+DASH_PW_GENERATED=""
+if [ -z "$DASH_PW" ]; then
+  DASH_PW=$(openssl rand -base64 24)
+  DASH_PW_GENERATED=1
+fi
+kubectl create secret generic dashboard-user \
+  --from-literal=username="$DASH_USER" --from-literal=password="$DASH_PW" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 # ── 2. AI provider secret (from env) ──────────────────────────────────────────
 echo "==> ai-provider secret"
 _AI_PROVIDER="${AI_PROVIDER:-anthropic}"
@@ -153,3 +171,11 @@ fi
 
 echo ""
 echo "Deploy complete. Port-forward the dashboard:  kubectl port-forward svc/dashboard 8090:8080"
+echo ""
+echo "Dashboard login: user '$DASH_USER'"
+if [ -n "$DASH_PW_GENERATED" ]; then
+  echo "  generated password: $DASH_PW"
+  echo "  (stored in the 'dashboard-user' Secret; shown once here)"
+else
+  echo "  password: kubectl get secret dashboard-user -o jsonpath='{.data.password}' | base64 -d ; echo"
+fi

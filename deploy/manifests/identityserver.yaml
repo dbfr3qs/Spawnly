@@ -37,6 +37,23 @@ spec:
             # the dashboard presents the matching OIDC_CLIENT_SECRET).
             - name: DASHBOARD_CLIENT_SECRET
               value: "dashboard-secret"
+            # Interactive login credential, from the optional `dashboard-user`
+            # Secret. Local kind: alice/alice (scripts/bootstrap.sh). Public AWS:
+            # a strong generated password (deploy/aws/deploy.sh). Absent Secret →
+            # env unset → NO interactive user (login disabled), so a public deploy
+            # never ships a guessable default.
+            - name: DASHBOARD_USER
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-user
+                  key: username
+                  optional: true
+            - name: DASHBOARD_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-user
+                  key: password
+                  optional: true
             # Control-plane auth the IdP's CIBA driver presents to the registry's
             # consent endpoints; must match the registry's setting. Both values
             # come from the optional `control-plane-auth` Secret that bootstrap.sh
