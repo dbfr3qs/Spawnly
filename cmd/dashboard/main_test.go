@@ -52,7 +52,8 @@ func TestRequireUnauthenticated(t *testing.T) {
 		t.Errorf("/api/spawn status = %d, want 401", rec.Code)
 	}
 
-	// A real top-level page navigation is redirected to /login.
+	// A real top-level page navigation is redirected to /signin (the OIDC
+	// initiator; the browser then lands on the /login form).
 	rec = httptest.NewRecorder()
 	nav := httptest.NewRequest("GET", "/", nil)
 	nav.Header.Set("Sec-Fetch-Dest", "document")
@@ -60,8 +61,8 @@ func TestRequireUnauthenticated(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Errorf("navigation status = %d, want 302", rec.Code)
 	}
-	if loc := rec.Header().Get("Location"); loc != "/login" {
-		t.Errorf("redirect = %q, want /login", loc)
+	if loc := rec.Header().Get("Location"); loc != "/signin" {
+		t.Errorf("redirect = %q, want /signin", loc)
 	}
 
 	// A subresource request while logged out (e.g. the browser's eager favicon
