@@ -2,6 +2,7 @@ using Duende.IdentityServer.Stores;
 using Duende.IdentityServer.Validation;
 using IdentityServer;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.HttpOverrides;
 
 var spireJwksUrl = Environment.GetEnvironmentVariable("SPIRE_JWKS_URL")
     ?? "http://spire-spiffe-oidc-discovery-provider.spire-system/.well-known/jwks.json";
@@ -103,6 +104,25 @@ builder.Services.AddTransient<IClientSecretValidator>(sp =>
         sp.GetRequiredService<ClientSecretValidator>()));
 
 var app = builder.Build();
+
+// Behind a TLS-terminating proxy (the EKS ALB → the dashboard's OIDC reverse
+// proxy), honor X-Forwarded-Proto so the request scheme is seen as https. That
+// makes IdentityServer's session/antiforgery cookies Secure over the public
+// origin. Off by default so the local HTTP flow (kind / port-forward) is
+// unaffected; deploy.sh sets FORWARDED_HEADERS=true on the public AWS deploy.
+// KnownNetworks/KnownProxies are cleared because identity-server is a ClusterIP
+// reachable only via in-cluster hops, so the forwarded header is trusted.
+if (Environment.GetEnvironmentVariable("FORWARDED_HEADERS") == "true")
+{
+    var forwardedOptions = new ForwardedHeadersOptions
+    {
+        ForwardedHeaders = ForwardedHeaders.XForwardedProto,
+    };
+    forwardedOptions.KnownNetworks.Clear();
+    forwardedOptions.KnownProxies.Clear();
+    app.UseForwardedHeaders(forwardedOptions);
+}
+
 app.UseStaticFiles();
 app.UseRouting();
 app.UseIdentityServer();
