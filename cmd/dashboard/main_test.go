@@ -52,14 +52,27 @@ func TestRequireUnauthenticated(t *testing.T) {
 		t.Errorf("/api/spawn status = %d, want 401", rec.Code)
 	}
 
-	// Browser navigation is redirected to /login.
+	// A real top-level page navigation is redirected to /login.
 	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	nav := httptest.NewRequest("GET", "/", nil)
+	nav.Header.Set("Sec-Fetch-Dest", "document")
+	h.ServeHTTP(rec, nav)
 	if rec.Code != http.StatusFound {
-		t.Errorf("GET / status = %d, want 302", rec.Code)
+		t.Errorf("navigation status = %d, want 302", rec.Code)
 	}
 	if loc := rec.Header().Get("Location"); loc != "/login" {
 		t.Errorf("redirect = %q, want /login", loc)
+	}
+
+	// A subresource request while logged out (e.g. the browser's eager favicon
+	// fetch) must NOT redirect to /login — that would mint a second login state
+	// and clobber the in-flight navigation's state cookie ("invalid state").
+	rec = httptest.NewRecorder()
+	fav := httptest.NewRequest("GET", "/favicon.ico", nil)
+	fav.Header.Set("Sec-Fetch-Dest", "image")
+	h.ServeHTTP(rec, fav)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("favicon status = %d, want 401 (no redirect)", rec.Code)
 	}
 }
 
