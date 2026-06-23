@@ -245,3 +245,24 @@ FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS identity-server
 WORKDIR /app
 COPY --from=build-identity-server /app/publish .
 ENTRYPOINT ["dotnet", "IdentityServer.dll"]
+
+# travel-tools MCP server — a resource server (validates Spawnly tokens), NOT an
+# agent, so it does not depend on the @spawnly/sdk. Dev deps pruned after build.
+FROM node:22-alpine AS build-travel-tools-node
+WORKDIR /src/mcp/travel-tools
+COPY mcp/travel-tools/package.json mcp/travel-tools/package-lock.json ./
+RUN npm ci
+COPY mcp/travel-tools/tsconfig.json ./tsconfig.json
+COPY mcp/travel-tools/src ./src
+RUN npm run build && npm prune --omit=dev
+
+FROM node:22-slim AS travel-tools
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build-travel-tools-node /src/mcp/travel-tools/package.json ./package.json
+COPY --from=build-travel-tools-node /src/mcp/travel-tools/node_modules ./node_modules
+COPY --from=build-travel-tools-node /src/mcp/travel-tools/dist ./dist
+# Run as the non-root `node` user (uid 1000) baked into the node images.
+USER node
+EXPOSE 8080
+CMD ["node", "dist/index.js"]

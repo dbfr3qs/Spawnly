@@ -96,7 +96,7 @@ for pair in \
   "orchestrator agent-orchestrator" "dashboard agent-dashboard" \
   "agent-operator agent-operator" "sample-api agent-sample-api" \
   "sample-api-a agent-sample-api" "sample-api-b agent-sample-api" \
-  "sample-api-global agent-sample-api"; do
+  "sample-api-global agent-sample-api" "travel-tools agent-travel-tools"; do
   set -- $pair
   kubectl set image "deployment/$1" "*=$ECR/$2:$TAG"
   # Base manifests use imagePullPolicy:Never (a kind side-load convention); on
@@ -127,7 +127,7 @@ done
 echo "==> waiting for services"
 kubectl wait --for=condition=ready pod -l app=spicedb --timeout=180s || true
 for d in registry identity-server sample-api sample-api-a sample-api-b \
-         sample-api-global agent-operator orchestrator dashboard; do
+         sample-api-global travel-tools agent-operator orchestrator dashboard; do
   if ! kubectl rollout status "deployment/$d" --timeout=180s; then
     echo "  ERROR: $d did not become Ready. Recent logs:" >&2
     kubectl logs "deployment/$d" --tail=25 2>&1 | sed 's/^/    /' >&2

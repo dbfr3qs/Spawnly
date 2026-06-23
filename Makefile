@@ -11,7 +11,11 @@ NODE_AGENTS   := child-agent parent-agent currency-converter trip-planner chain-
 # agent-<name> image convention (unlike agent-sidecar), so they need no special
 # casing — they just weren't in any list before.
 EXTRA_AGENTS  := identity-server weather-monitor
-SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS) $(EXTRA_AGENTS)
+# MCP servers: scope-enforcing resource servers exposing real-upstream tools to
+# agents (not agents themselves). Built from their own Dockerfile stage as
+# agent-<name>, same convention as the rest.
+MCP_SERVERS   := travel-tools
+SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS) $(EXTRA_AGENTS) $(MCP_SERVERS)
 
 .PHONY: build test test-provider docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed print-% e2e-setup e2e
 
