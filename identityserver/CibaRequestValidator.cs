@@ -128,9 +128,13 @@ public class CibaRequestValidator : ICustomBackchannelAuthenticationValidator
             agentId, agent.UserId, parent.AgentType, agent.AgentType);
     }
 
-    private static void Reject(
+    private void Reject(
         CustomBackchannelAuthenticationRequestValidationContext context, string description)
     {
+        // Surface the reason: Duende only logs a generic "custom validation
+        // failed" + the raw request, not our description, which makes CIBA
+        // rejections hard to diagnose from the IdP logs.
+        _log.LogWarning("CIBA backchannel request rejected: {Reason}", description);
         context.ValidationResult = new BackchannelAuthenticationRequestValidationResult(
             context.ValidationResult.ValidatedRequest, "invalid_request", description);
     }
