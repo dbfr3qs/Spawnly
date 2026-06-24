@@ -314,5 +314,34 @@ public static class Config
                     "sample-api-a:read",
                 },
             },
+            // travel-tools specialists. Each is a least-privilege MCP-client agent
+            // allowed EXACTLY ONE travel-tools scope (so its token can call only one
+            // tool). client_credentials for direct (phase 3) spawns; CIBA for the
+            // consent-gated spawn the travel-planner template requires (phase 4).
+            // openid is required for the CIBA grant. NOTE: pair each scope with a
+            // template requireUserConsent (phase 4) so the consent->scope->tool
+            // guarantee holds for the real demo.
+            TravelSpecialist("flight-search", "flights:read"),
+            TravelSpecialist("hotel-search", "hotels:read"),
+            TravelSpecialist("fx-converter", "fx:read"),
+        };
+
+    // One least-privilege MCP-client agent: client_credentials + CIBA, allowed
+    // openid + exactly `scope`. Short 120s token lifetime — once these edges are
+    // consent-gated (phase 4), a revoked/expired consent starves the agent within
+    // that window.
+    private static Client TravelSpecialist(string clientId, string scope) =>
+        new Client
+        {
+            ClientId = clientId,
+            AllowedGrantTypes = new List<string> { GrantType.ClientCredentials, CibaGrantType },
+            RequireClientSecret = true,
+            ClientSecrets = { new Secret("placeholder".Sha256()) },
+            AlwaysSendClientClaims = true,
+            ClientClaimsPrefix = "",
+            AccessTokenLifetime = 120,
+            CibaLifetime = 300,
+            PollingInterval = 5,
+            AllowedScopes = { "openid", scope },
         };
 }

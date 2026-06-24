@@ -266,3 +266,24 @@ COPY --from=build-travel-tools-node /src/mcp/travel-tools/dist ./dist
 USER node
 EXPOSE 8080
 CMD ["node", "dist/index.js"]
+
+# travel-specialist — shared MCP-client agent image; the flight-search /
+# hotel-search / fx-converter agent TYPES all run this image with different
+# MCP_TOOL/MCP_SCOPE env (set by their templates). Mirrors the child-agent build.
+FROM node:22-alpine AS build-travel-specialist-node
+WORKDIR /src/agents/app
+COPY sdks/typescript/ /src/sdks/typescript/
+COPY agents/travel-specialist/package*.json ./
+RUN npm ci
+COPY agents/travel-specialist/src ./src
+COPY agents/travel-specialist/tsconfig.json ./tsconfig.json
+RUN npm run build
+
+FROM node:22-slim AS travel-specialist
+WORKDIR /app
+COPY --from=build-travel-specialist-node /src/agents/app/dist ./dist
+COPY --from=build-travel-specialist-node /src/agents/app/node_modules ./node_modules
+COPY sdks/typescript/package.json ./node_modules/@spawnly/sdk/package.json
+COPY --from=build-ts-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
+EXPOSE 8080
+CMD ["node", "dist/index.js"]
