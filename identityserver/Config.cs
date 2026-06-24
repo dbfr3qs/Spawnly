@@ -32,8 +32,10 @@ public static class Config
             new ApiScope("sample-api-b:write", "Write sample-api-b"),
             // travel-tools MCP server scopes — one per tool. The user consents to
             // a sub-agent receiving exactly one of these, which authorizes exactly
-            // one MCP tool. (flights:read / hotels:read arrive in phase 2.)
+            // one MCP tool.
             new ApiScope("fx:read", "Convert currency (travel-tools)"),
+            new ApiScope("flights:read", "Search flights (travel-tools)"),
+            new ApiScope("hotels:read", "Search hotels (travel-tools)"),
             // Control-plane scope: the orchestrator and the IdP's own CIBA driver
             // present a client-credentials token carrying this scope to call the
             // registry's consent endpoints when CONTROL_PLANE_AUTH=oidc.
@@ -64,7 +66,7 @@ public static class Config
             // "travel-tools"; granting any travel-tools scope emits that audience.
             new ApiResource("travel-tools", "Travel Tools MCP server")
             {
-                Scopes = { "fx:read" },
+                Scopes = { "fx:read", "flights:read", "hotels:read" },
             },
             // Gives control-plane tokens the audience the registry validates
             // (CONTROL_PLANE_OIDC_AUDIENCE, default "registry").

@@ -37,7 +37,25 @@ spec:
               value: "travel-tools"
             - name: PORT
               value: "8080"
-            # Phase 2 adds DUFFEL_API_TOKEN / AMADEUS_* from secrets here.
+            # Upstream provider keys for the tools — from the dedicated
+            # travel-tools-secrets Secret (bootstrap.sh / deploy.sh create it from
+            # mcp/travel-tools/.env). optional:true so a missing key just disables
+            # that one tool (it reports "not configured"); the server still serves
+            # the others. These keys are scoped to this Deployment only — never an
+            # agent. search_flights → Duffel; search_hotels → LiteAPI; currency
+            # (Frankfurter) needs none.
+            - name: DUFFEL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: travel-tools-secrets
+                  key: DUFFEL_API_KEY
+                  optional: true
+            - name: LITEAPI_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: travel-tools-secrets
+                  key: LITEAPI_KEY
+                  optional: true
           ports:
             - containerPort: 8080
           readinessProbe:

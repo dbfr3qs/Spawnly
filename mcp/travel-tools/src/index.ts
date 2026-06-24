@@ -4,7 +4,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { SpawnlyTokenVerifier } from "./auth.js";
-import { registerCurrencyTool } from "./tools/currency.js";
+import { configFromEnv } from "./config.js";
+import { registerTools } from "./tools/index.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const ISSUER = process.env.IS_ISSUER ?? "http://identity-server:8080";
@@ -14,14 +15,17 @@ const JWKS_URL =
 const AUDIENCE = process.env.RESOURCE_AUDIENCE ?? "travel-tools";
 
 const verifier = new SpawnlyTokenVerifier({ issuer: ISSUER, jwksUrl: JWKS_URL, audience: AUDIENCE });
+// Upstream config (provider keys, URLs) — read once at startup. Provider keys
+// come from the travel-tools-secrets env in-cluster; for standalone dev run with
+// `node --env-file=.env dist/index.js`.
+const toolConfig = configFromEnv();
 
 // A fresh server per request (stateless transport) lets each tool handler close
 // over THIS request's validated AuthInfo, so per-tool scope checks are exact and
 // there is no cross-request session state to manage.
 function buildServer(auth: AuthInfo | undefined): McpServer {
   const server = new McpServer({ name: "travel-tools", version: "1.0.0" });
-  registerCurrencyTool(server, auth);
-  // Phase 2 adds search_flights / search_hotels here.
+  registerTools(server, auth, toolConfig);
   return server;
 }
 

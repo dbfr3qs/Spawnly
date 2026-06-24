@@ -65,6 +65,25 @@ kubectl create secret generic dashboard-user \
   --from-literal=username="$DASH_USER" --from-literal=password="$DASH_PW" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+# ── 1c. travel-tools MCP upstream keys (Duffel/LiteAPI) ───────────────────────
+# Read from the environment, falling back to mcp/travel-tools/.env (the service's
+# own key file). Scoped to the travel-tools Deployment only; absent keys just
+# disable that tool. Reuse existing values across re-deploys if neither is set.
+echo "==> travel-tools-secrets (Duffel/LiteAPI)"
+TT_ENV="mcp/travel-tools/.env"
+TT_DUFFEL="${DUFFEL_API_KEY:-}"
+TT_LITEAPI="${LITEAPI_KEY:-}"
+if [ -f "$TT_ENV" ]; then
+  [ -z "$TT_DUFFEL" ] && TT_DUFFEL=$(grep -E '^DUFFEL_API_KEY=' "$TT_ENV" | head -1 | cut -d= -f2- | tr -d "\"' ")
+  [ -z "$TT_LITEAPI" ] && TT_LITEAPI=$(grep -E '^LITEAPI_KEY=' "$TT_ENV" | head -1 | cut -d= -f2- | tr -d "\"' ")
+fi
+# Preserve previously-set keys when this run provides none.
+[ -z "$TT_DUFFEL" ] && TT_DUFFEL=$(kubectl get secret travel-tools-secrets -o jsonpath='{.data.DUFFEL_API_KEY}' 2>/dev/null | base64 -d 2>/dev/null || true)
+[ -z "$TT_LITEAPI" ] && TT_LITEAPI=$(kubectl get secret travel-tools-secrets -o jsonpath='{.data.LITEAPI_KEY}' 2>/dev/null | base64 -d 2>/dev/null || true)
+kubectl create secret generic travel-tools-secrets \
+  --from-literal=DUFFEL_API_KEY="$TT_DUFFEL" --from-literal=LITEAPI_KEY="$TT_LITEAPI" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 # ── 2. AI provider secret (from env) ──────────────────────────────────────────
 echo "==> ai-provider secret"
 _AI_PROVIDER="${AI_PROVIDER:-anthropic}"

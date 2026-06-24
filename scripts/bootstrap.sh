@@ -197,6 +197,23 @@ kubectl create secret generic dashboard-user \
   --from-literal=password="alice" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+# travel-tools MCP server upstream keys (Duffel/LiteAPI), from mcp/travel-tools/.env
+# — owned by that one service, kept out of the global .env. Created here so the
+# travel-tools pod has them on first start; absent keys just disable that tool.
+TT_ENV="$REPO_ROOT/mcp/travel-tools/.env"
+echo "==> Ensuring travel-tools-secrets (Duffel/LiteAPI; from mcp/travel-tools/.env)..."
+TT_DUFFEL="" TT_LITEAPI=""
+if [ -f "$TT_ENV" ]; then
+  TT_DUFFEL=$(grep -E '^DUFFEL_API_KEY=' "$TT_ENV" | head -1 | cut -d= -f2- | tr -d "\"' ")
+  TT_LITEAPI=$(grep -E '^LITEAPI_KEY=' "$TT_ENV" | head -1 | cut -d= -f2- | tr -d "\"' ")
+else
+  echo "    (no mcp/travel-tools/.env — flights/hotels tools will report 'not configured')"
+fi
+kubectl create secret generic travel-tools-secrets \
+  --from-literal=DUFFEL_API_KEY="$TT_DUFFEL" \
+  --from-literal=LITEAPI_KEY="$TT_LITEAPI" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 echo "==> Deploying services..."
 kubectl apply -f deploy/manifests/rbac.yaml
 kubectl apply -f deploy/manifests/spicedb.yaml
