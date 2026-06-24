@@ -314,13 +314,27 @@ public static class Config
                     "sample-api-a:read",
                 },
             },
+            // The travel-planner orchestrator calls no protected resource itself (it
+            // only spawns + A2A-calls the specialists), but register a client so any
+            // sidecar token request resolves rather than 400ing, and so the parent
+            // identity is well-formed.
+            new Client
+            {
+                ClientId = "travel-planner",
+                AllowedGrantTypes = new List<string> { GrantType.ClientCredentials },
+                RequireClientSecret = true,
+                ClientSecrets = { new Secret("placeholder".Sha256()) },
+                AlwaysSendClientClaims = true,
+                ClientClaimsPrefix = "",
+                AllowedScopes = { "openid" },
+            },
             // travel-tools specialists. Each is a least-privilege MCP-client agent
             // allowed EXACTLY ONE travel-tools scope (so its token can call only one
             // tool). client_credentials for direct (phase 3) spawns; CIBA for the
             // consent-gated spawn the travel-planner template requires (phase 4).
-            // openid is required for the CIBA grant. NOTE: pair each scope with a
-            // template requireUserConsent (phase 4) so the consent->scope->tool
-            // guarantee holds for the real demo.
+            // openid is required for the CIBA grant. The template now pairs each
+            // scope with requireUserConsent so the consent->scope->tool guarantee
+            // holds.
             TravelSpecialist("flight-search", "flights:read"),
             TravelSpecialist("hotel-search", "hotels:read"),
             TravelSpecialist("fx-converter", "fx:read"),

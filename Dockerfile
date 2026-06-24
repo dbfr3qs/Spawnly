@@ -287,3 +287,22 @@ COPY sdks/typescript/package.json ./node_modules/@spawnly/sdk/package.json
 COPY --from=build-ts-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
 EXPOSE 8080
 CMD ["node", "dist/index.js"]
+
+# travel-planner — deterministic (no-LLM) orchestrator that fans out to the
+# consent-gated specialists. A plain Node TS build (no Flue runtime).
+FROM node:22-alpine AS build-travel-planner-node
+WORKDIR /src/agents/app
+COPY sdks/typescript/ /src/sdks/typescript/
+COPY agents/travel-planner/package*.json ./
+RUN npm ci
+COPY agents/travel-planner/src ./src
+COPY agents/travel-planner/tsconfig.json ./tsconfig.json
+RUN npm run build
+
+FROM node:22-slim AS travel-planner
+WORKDIR /app
+COPY --from=build-travel-planner-node /src/agents/app/dist ./dist
+COPY --from=build-travel-planner-node /src/agents/app/node_modules ./node_modules
+COPY sdks/typescript/package.json ./node_modules/@spawnly/sdk/package.json
+COPY --from=build-ts-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
+CMD ["node", "dist/index.js"]
