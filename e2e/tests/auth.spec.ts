@@ -58,7 +58,7 @@ test.describe('identity threading', () => {
     await page.goto('/');
     await expect(page.locator('#agent-list')).toBeVisible();
 
-    const id = await spawn(page, 'worker');
+    const id = await spawn(page, 'weather-monitor');
 
     // The orchestrator pre-registers at spawn, so the record (with userId)
     // appears promptly regardless of pod readiness.

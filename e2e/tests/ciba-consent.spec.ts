@@ -87,7 +87,13 @@ test.describe('ciba-consent', () => {
 
     // 4) Revoke the stored consent from the management modal.
     await page.locator('#open-consents-btn').click();
-    const record = page.locator('[data-testid="consent-record"]');
+    // Scope to THIS test's chain-worker edge: the modal lists every consent the
+    // user holds, so unrelated edges (e.g. leftover travel-planner consents on a
+    // shared/persistent cluster) must not be counted or clicked. There is exactly
+    // one chain-worker->chain-worker record (the edge is reused, not duplicated).
+    const record = page
+      .locator('[data-testid="consent-record"]')
+      .filter({ hasText: 'chain-worker' });
     await expect(record).toHaveCount(1, { timeout: 15_000 });
     await record.locator('.btn-deny').click();
     await expect(record.locator('.consent-revoked-tag')).toBeVisible({ timeout: 15_000 });

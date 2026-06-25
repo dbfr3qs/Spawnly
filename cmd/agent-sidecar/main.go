@@ -492,7 +492,7 @@ func main() {
 		log.Fatal("REGISTRY_URL and IS_TOKEN_URL are required")
 	}
 	if cfg.agentType == "" {
-		cfg.agentType = "worker"
+		log.Fatal("AGENT_TYPE is required (it is the OAuth client_id used to mint tokens)")
 	}
 	if cfg.socketPath == "" {
 		cfg.socketPath = "unix:///spiffe-workload-api/spire-agent.sock"

@@ -984,7 +984,7 @@
     <div class="form-group">
       <label>Agent Type</label>
       <select id="f-type">
-        <option value="worker">worker</option>
+        <!-- options are populated dynamically from GET /api/templates -->
       </select>
     </div>
     <div class="form-group">
@@ -1978,7 +1978,7 @@
   }
 
   document.getElementById('spawn-btn').addEventListener('click', async () => {
-    const agentType = document.getElementById('f-type').value.trim() || 'worker';
+    const agentType = document.getElementById('f-type').value.trim();
     const tenantId  = document.getElementById('f-tenant').value.trim() || 'tenant-1';
     const task      = document.getElementById('f-task').value.trim();
 
@@ -2124,7 +2124,7 @@
     if (!sel || sel.tagName !== 'SELECT') return;
     const sorted = [...types].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
     sel.innerHTML = sorted.map(t =>
-      `<option value="${escHtml(t)}"${t === 'worker' ? ' selected' : ''}>${escHtml(t)}</option>`
+      `<option value="${escHtml(t)}">${escHtml(t)}</option>`
     ).join('');
   });
   document.addEventListener('keydown', e => {
