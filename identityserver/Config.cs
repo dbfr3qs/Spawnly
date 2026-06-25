@@ -25,7 +25,6 @@ public static class Config
     public static IEnumerable<ApiScope> ApiScopes =>
         new List<ApiScope>
         {
-            new ApiScope("sample-api", "Sample API"), // backward compat
             new ApiScope("sample-api-a:read", "Read sample-api-a"),
             new ApiScope("sample-api-a:write", "Write sample-api-a"),
             new ApiScope("sample-api-b:read", "Read sample-api-b"),
@@ -47,13 +46,6 @@ public static class Config
     public static IEnumerable<ApiResource> ApiResources =>
         new List<ApiResource>
         {
-            // Backs the "sample-api" scope so tokens requesting it carry
-            // aud="sample-api" (the audience the sample-api resource server
-            // enforces). Without this, scope-only tokens have an empty aud.
-            new ApiResource("sample-api", "Sample API")
-            {
-                Scopes = { "sample-api" },
-            },
             new ApiResource("sample-api-a", "Sample API A")
             {
                 Scopes = { "sample-api-a:read", "sample-api-a:write" },
@@ -149,7 +141,9 @@ public static class Config
                 ClientSecrets = { new Secret("placeholder".Sha256()) },
                 AlwaysSendClientClaims = true,
                 ClientClaimsPrefix = "",
-                AllowedScopes = { "sample-api" },
+                // weather-monitor calls external weather APIs directly (no Spawnly
+                // token), so it requests no resource scope.
+                AllowedScopes = { "openid" },
             },
             new Client
             {

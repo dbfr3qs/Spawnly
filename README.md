@@ -101,7 +101,7 @@ Every directory, by language and purpose:
 | `cmd/operator/` | Go | Kubernetes controller (controller-runtime). Watches `AgentWorkload` CRDs and manages the agent Pod (and Service, for long-lived agents) lifecycle |
 | `cmd/registry/` | Go | In-memory agent and template store. Accepts self-registration, persists lifecycle events, writes SpiceDB relationships |
 | `cmd/agent-sidecar/` | Go | Per-pod native sidecar (`:8089`). Fetches the JWT-SVID, exchanges it for scoped OAuth tokens, and serves `/token` to the agent |
-| `cmd/sample-api/` | Go | Protected HTTP API (`GET /work`, `POST /task`). Validates OAuth 2.0 Bearer tokens and a SpiceDB `work_on` check. Deployed as `sample-api`, `sample-api-a`, `sample-api-b`, and `sample-api-global` (the last with `REQUIRE_TENANT=false`) |
+| `cmd/sample-api/` | Go | Protected HTTP API (`GET /work`, `POST /task`). Validates OAuth 2.0 Bearer tokens and a SpiceDB `work_on` check. Deployed as `sample-api-a` and `sample-api-b` (tenant-checking; a `REQUIRE_TENANT=false` instance serves tenant-agnostic agents) |
 | `cmd/dashboard/` | Go + HTML | Web UI. Polls agents and events, chats with long-lived agents, kills/revokes/resumes agents (revoke cascades to the descendant subtree), renders parent→child chains as a nested tree, filters events per-agent; proxies all requests to the orchestrator |
 | `agents/` | TypeScript | Agent workloads on the `@spawnly/sdk`: `weather-monitor` (Flue chat + tool calls), `chain-worker` (deterministic, no-LLM self-spawning looping worker that demonstrates cascading revocation), and the consent-gated travel demo — `travel-planner` (fan-out orchestrator) plus the `travel-specialist`-image specialists `flight-search` / `hotel-search` / `fx-converter` (least-privilege MCP clients, each scoped to one travel-tools tool) |
 | `mcp/travel-tools/` | TypeScript | Scope-enforcing MCP server exposing `search_flights` / `search_hotels` / `convert_currency` to the travel specialists, backed by real upstream providers (Duffel / LiteAPI / Frankfurter) |
@@ -229,7 +229,7 @@ Agents may be **tenanted** or **global (tenant-less)**, decided by presence of a
 
 - A template's `requiresTenant` field gates spawning. The orchestrator rejects a tenant-less `POST /spawn` for a template with `requiresTenant: true`.
 - A global agent (no `tenantId`) gets a SPIFFE id without the tenant segment and an empty SpiceDB relation set; `tenantHeader()` in the SDK omits the `X-Tenant-ID` header.
-- The sample API's `REQUIRE_TENANT` env var (default `true`) controls whether it enforces a tenant header. `sample-api-global` runs with `REQUIRE_TENANT=false` so global agents can call it.
+- The sample API's `REQUIRE_TENANT` env var (default `true`) controls whether it enforces a tenant header. Run an instance with `REQUIRE_TENANT=false` to serve tenant-agnostic (global) agents.
 
 See [Defining a Template](docs/authoring/04-defining-a-template.md) for the full schema.
 
@@ -373,7 +373,7 @@ curl -X POST http://localhost:8080/v1/agents/<workloadName>/resume
 kubectl logs -l app=orchestrator --follow
 kubectl logs -l app=registry --follow
 kubectl logs -l app=identity-server --follow
-kubectl logs -l app=sample-api --follow
+kubectl logs -l app=sample-api-a --follow
 # Agent pods are ephemeral — find them by name:
 kubectl get pods
 kubectl logs <workloadName>-pod -c agent          # the agent container
@@ -387,7 +387,7 @@ kubectl logs <workloadName>-pod -c agent-sidecar  # the identity/token sidecar
 The Makefile provides targets for the common loops:
 
 ```bash
-# Rebuild + roll a Go service Deployment (orchestrator, registry, dashboard, operator, sample-api):
+# Rebuild + roll a Go service Deployment (orchestrator, registry, dashboard, operator, sample-api-a):
 make redeploy-dashboard
 
 # Rebuild + load a TypeScript agent image into Kind (then spawn a fresh agent to pick it up):

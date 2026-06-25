@@ -219,10 +219,8 @@ kubectl apply -f deploy/manifests/rbac.yaml
 kubectl apply -f deploy/manifests/spicedb.yaml
 kubectl apply -f deploy/manifests/registry.yaml
 kubectl apply -f deploy/manifests/identityserver.yaml
-kubectl apply -f deploy/manifests/sample-api.yaml
 kubectl apply -f deploy/manifests/sample-api-a.yaml
 kubectl apply -f deploy/manifests/sample-api-b.yaml
-kubectl apply -f deploy/manifests/sample-api-global.yaml
 kubectl apply -f deploy/manifests/travel-tools.yaml
 kubectl apply -f deploy/manifests/operator.yaml
 kubectl apply -f deploy/manifests/orchestrator.yaml
@@ -237,18 +235,16 @@ kubectl apply -f deploy/manifests/dashboard.yaml
 echo "==> Restarting platform deployments to pick up freshly loaded images..."
 kubectl rollout restart \
   deployment/registry deployment/identity-server \
-  deployment/sample-api deployment/sample-api-a deployment/sample-api-b \
-  deployment/sample-api-global deployment/travel-tools deployment/agent-operator \
+  deployment/sample-api-a deployment/sample-api-b \
+  deployment/travel-tools deployment/agent-operator \
   deployment/orchestrator deployment/dashboard
 
 echo "==> Waiting for all services to be ready..."
 kubectl wait --for=condition=ready pod -l app=spicedb --timeout=120s
 kubectl rollout status deployment/registry --timeout=120s
 kubectl rollout status deployment/identity-server --timeout=120s
-kubectl rollout status deployment/sample-api --timeout=120s
 kubectl rollout status deployment/sample-api-a --timeout=120s
 kubectl rollout status deployment/sample-api-b --timeout=120s
-kubectl rollout status deployment/sample-api-global --timeout=120s
 kubectl rollout status deployment/travel-tools --timeout=120s
 kubectl rollout status deployment/agent-operator --timeout=120s
 kubectl rollout status deployment/orchestrator --timeout=120s

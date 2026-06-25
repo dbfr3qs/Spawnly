@@ -29,7 +29,7 @@ resource "spawnly_agent_template" "demo" {
     supports_chat = false
 
     env_defaults = {
-      SAMPLE_API_URL = "http://sample-api-global"
+      SAMPLE_API_URL = "http://sample-api-a"
       LOG_LEVEL      = "info"
     }
 

@@ -30,10 +30,8 @@ resources:
   - ../manifests/orchestrator.yaml
   - ../manifests/operator.yaml
   - ../manifests/dashboard.yaml
-  - ../manifests/sample-api.yaml
   - ../manifests/sample-api-a.yaml
   - ../manifests/sample-api-b.yaml
-  - ../manifests/sample-api-global.yaml
   - ../manifests/travel-tools.yaml
 # Note: the agent ServiceAccount (with its real IAM role ARN) and the
 # ai-provider / control-plane-auth secrets are created by deploy/aws/deploy.sh

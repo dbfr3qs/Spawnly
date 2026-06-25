@@ -97,5 +97,5 @@ if [ "$attestor_issuer" = "aws-stsweb" ] \
 fi
 
 echo "❌ FAIL — see the evidence above."
-echo "   Debug: kubectl logs -l app=sample-api --tail=20 ; kubectl logs -l agent-id=$WL -c agent-sidecar"
+echo "   Debug: kubectl logs -l app=sample-api-a --tail=20 ; kubectl logs -l agent-id=$WL -c agent-sidecar"
 exit 1

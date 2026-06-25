@@ -24,6 +24,6 @@ spec:
             - name: IS_TOKEN_URL
               value: "http://identity-server:8080/connect/token"
             - name: SAMPLE_API_URL
-              value: "http://sample-api:8080"
+              value: "http://sample-api-a:8080"
             - name: ORCHESTRATOR_URL
               value: "http://orchestrator:8080"

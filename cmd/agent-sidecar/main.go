@@ -419,7 +419,7 @@ func run(ctx context.Context, cfg config) error {
 			}
 		} else {
 			if scope == "" {
-				scope = "sample-api"
+				scope = "sample-api-a:read"
 			}
 			tok, expiresIn, err = tc.get(r.Context(), scope)
 		}

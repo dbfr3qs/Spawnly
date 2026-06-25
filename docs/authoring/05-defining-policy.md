@@ -339,12 +339,11 @@ rule. A `sample-api` instance reads `REQUIRE_TENANT` (default `true`):
 A tenant-agnostic instance is what a
 [global agent](04-defining-a-template.md#tenanted-vs-global-agents) calls — it
 asserts no tenant and holds no `tenant:` grant, so a tenant-checking instance
-would (correctly) deny it. The `sample-api-global` manifest
-([`deploy/manifests/sample-api-global.yaml`](../../deploy/manifests/sample-api-global.yaml))
-is the tenant-agnostic resource server; a tenant-agnostic agent declares
-`requiresTenant: false` in its template (e.g.
-[`agents/weather-monitor/template.json`](../../agents/weather-monitor/template.json)).
-Setting `REQUIRE_TENANT=false` relaxes **only** the tenant check — authn and
+would (correctly) deny it. Tenant-agnostic serving is a per-instance config knob,
+not a separate deployment: run a `sample-api` instance with `REQUIRE_TENANT=false`
+and a tenant-agnostic agent (one whose template sets `requiresTenant: false`, e.g.
+[`agents/weather-monitor/template.json`](../../agents/weather-monitor/template.json))
+can call it. Setting `REQUIRE_TENANT=false` relaxes **only** the tenant check — authn and
 scope are still enforced.
 
 ### Scopes and audiences catalog
@@ -355,7 +354,6 @@ Defined in IdentityServer ([`Config.cs`](../../identityserver/Config.cs)):
 |-------|--------|
 | `sample-api-a:read` / `sample-api-a:write` | read / write `sample-api-a` |
 | `sample-api-b:read` / `sample-api-b:write` | read / write `sample-api-b` |
-| `sample-api` | legacy, backward-compat |
 
 | Audience (`aud`) | Meaning |
 |------------------|---------|
