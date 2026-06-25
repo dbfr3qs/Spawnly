@@ -28,22 +28,22 @@ The agent never talks to IdentityServer directly. It asks its **sidecar** for a
 scoped token through the SDK's `TokenClient`:
 
 ```ts
-const accessToken = await tokens.getToken('sample-api-a:write');
+const accessToken = await tokens.getToken('sample-api-a:read');
 ```
 
-That call hits the sidecar's local endpoint, `GET /token?scope=sample-api-a:write`.
+That call hits the sidecar's local endpoint, `GET /token?scope=sample-api-a:read`.
 In the handler ([`cmd/agent-sidecar/main.go`](../../cmd/agent-sidecar/main.go)),
 a request with **no `subject_token` and no `audience`** falls through to the
 default branch — a cached **`client_credentials`** mint (`tc.get(scope)`). The
 other two branches are the delegation paths (exchange, and minting a
 delegation token) and are not used here.
 
-The scope itself comes from the agent's contract. For `global-worker` it is the
+The scope itself comes from the agent's contract. For `chain-worker` it is the
 `SCOPE` env default in its template
-([`agents/global-worker/template.json`](../../agents/global-worker/template.json)):
+([`agents/chain-worker/template.json`](../../agents/chain-worker/template.json)):
 
 ```json
-"envDefaults": { "SCOPE": "sample-api-a:write" }
+"envDefaults": { "SCOPE": "sample-api-a:read" }
 ```
 
 ## 2. The request
@@ -60,17 +60,17 @@ spiffe://cluster.local/agent/{tenant-id}/{user-id}/{agent-type}/{agent-id}
 ```
 
 So the SVID's subject is, for example,
-`spiffe://cluster.local/agent/tenant-1/alice/global-worker/agent-22962c27`.
+`spiffe://cluster.local/agent/tenant-1/alice/chain-worker/agent-22962c27`.
 
 **POST to `/connect/token`** with the SVID as the client credential (RFC 7523
 "private_key_jwt"–style client authentication):
 
 ```
 grant_type=client_credentials
-client_id=global-worker          # the agentType
+client_id=chain-worker           # the agentType
 client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer
 client_assertion=<the JWT-SVID>
-scope=sample-api-a:write
+scope=sample-api-a:read
 ```
 
 The password-style `ClientSecrets` in
@@ -84,8 +84,8 @@ IdentityServer processes the request in two custom stages, then emits the token.
 **Authenticate the client.**
 [`SpireClientSecretValidator`](../../identityserver/SpireClientSecretValidator.cs)
 sees the `jwt-bearer` `client_assertion`, verifies the SVID against SPIRE's JWKS,
-and resolves the client (`global-worker`), whose `AllowedScopes` in
-[`Config.cs`](../../identityserver/Config.cs) include `sample-api-a:write`.
+and resolves the client (`chain-worker`), whose `AllowedScopes` in
+[`Config.cs`](../../identityserver/Config.cs) include `sample-api-a:read`.
 (Requests that carry a normal secret instead — e.g. the dashboard's human login —
 are delegated to Duende's built-in validator.)
 
@@ -105,10 +105,10 @@ are delegated to Duende's built-in validator.)
 ([`Program.cs`](../../identityserver/Program.cs) — the in-cluster
 `http://identity-server:8080`, which the resource servers validate against),
 `aud` from the **ApiResource** that owns the granted scope (`sample-api-a` owns
-`sample-api-a:write`, per [`Config.cs`](../../identityserver/Config.cs)), a
-default `exp`, and a random `jti`.
+`sample-api-a:read`, per [`Config.cs`](../../identityserver/Config.cs)), an
+`exp` (this client pins a short one — see below), and a random `jti`.
 
-## 4. Worked example: the `global-worker` token
+## 4. Worked example: the `chain-worker` token
 
 A token minted by this flow, decoded:
 
@@ -116,14 +116,14 @@ A token minted by this flow, decoded:
 {
   "iss": "http://identity-server:8080",
   "aud": "sample-api-a",
-  "scope": ["sample-api-a:write"],
-  "client_id": "global-worker",
+  "scope": ["sample-api-a:read"],
+  "client_id": "chain-worker",
   "sub": "user:alice",
   "act": {
-    "sub": "spiffe://cluster.local/agent/tenant-1/alice/global-worker/agent-22962c27"
+    "sub": "spiffe://cluster.local/agent/tenant-1/alice/chain-worker/agent-22962c27"
   },
   "iat": 1781052922,
-  "exp": 1781056522,
+  "exp": 1781053042,
   "jti": "43246C4DC2CB46EBAC446647EFEA59AE"
 }
 ```
@@ -133,12 +133,12 @@ Where each claim comes from:
 | Claim | Source |
 | --- | --- |
 | `iss` | IdentityServer's configured issuer ([`Program.cs`](../../identityserver/Program.cs)) |
-| `client_id: global-worker` | the `client_id` in the request — the agentType |
-| `scope: sample-api-a:write` | template `SCOPE` → sidecar `/token?scope=` → form `scope` |
+| `client_id: chain-worker` | the `client_id` in the request — the agentType |
+| `scope: sample-api-a:read` | template `SCOPE` → sidecar `/token?scope=` → form `scope` |
 | `aud: sample-api-a` | the ApiResource owning that scope ([`Config.cs`](../../identityserver/Config.cs)) |
 | `sub: user:alice` | `AgentRegistryValidator`, from the registry record's `userId` (set at spawn) |
-| `act.sub: spiffe://…/tenant-1/alice/global-worker/agent-22962c27` | the SVID's own `sub`, shaped by the [ClusterSPIFFEID](../../deploy/spire/clusterspiffeid.yaml) template from pod labels |
-| `exp − iat = 3600` | Duende's default token lifetime (this client sets no override) |
+| `act.sub: spiffe://…/tenant-1/alice/chain-worker/agent-22962c27` | the SVID's own `sub`, shaped by the [ClusterSPIFFEID](../../deploy/spire/clusterspiffeid.yaml) template from pod labels |
+| `exp − iat = 120` | `chain-worker` pins `AccessTokenLifetime = 120` ([`Config.cs`](../../identityserver/Config.cs)) — a short revocation backstop so a revoked link can't keep using an in-flight token |
 
 The payoff: the resource server can see both *who* (`sub = user:alice`) and
 *what is acting on their behalf* (`act` = the agent's SPIFFE identity), from a

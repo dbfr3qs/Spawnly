@@ -46,7 +46,6 @@ jobs:
           cache-dependency-path: |
             go.sum
             sdks/go/go.sum
-            agents/go-worker/go.sum
 
       # Root module: compile everything, then the 185-file unit suite (== make test).
       - name: go build (root module)
@@ -56,14 +55,11 @@ jobs:
       - name: make test (root unit tests)
         run: make test
 
-      # go.work lists three modules; `go test ./...` only covers the module in
-      # cwd, so the other two are built/tested explicitly.
+      # go.work lists two modules; `go test ./...` only covers the module in
+      # cwd, so the other one is built/tested explicitly.
       - name: go test (sdks/go)
         run: go test ./... -count=1
         working-directory: sdks/go
-      - name: go build (agents/go-worker)
-        run: go build ./...
-        working-directory: agents/go-worker
 
   node:
     name: node typecheck
@@ -72,13 +68,10 @@ jobs:
       fail-fast: false
       matrix:
         agent:
-          - child-agent
-          - parent-agent
-          - currency-converter
-          - trip-planner
           - chain-worker
-          - pi-worker
           - weather-monitor
+          - travel-specialist
+          - travel-planner
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

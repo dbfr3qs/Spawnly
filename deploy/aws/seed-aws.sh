@@ -34,8 +34,8 @@ done
 echo "==> seeding templates (images -> $ECR)"
 for f in "${found[@]}"; do
   agent_type=$(jq -r .agentType "$f")
-  # Prepend the ECR host to runtimeSpec.image (e.g. agent-go-worker:latest ->
-  # <ECR>/agent-go-worker:latest). The image tag in the template is preserved.
+  # Prepend the ECR host to runtimeSpec.image (e.g. agent-chain-worker:latest ->
+  # <ECR>/agent-chain-worker:latest). The image tag in the template is preserved.
   jq --arg ecr "$ECR" '.runtimeSpec.image = ($ecr + "/" + .runtimeSpec.image)' "$f" \
     | curl -sf -X POST http://localhost:18080/v1/templates \
         -H 'Content-Type: application/json' "${auth_header[@]}" --data-binary @- >/dev/null

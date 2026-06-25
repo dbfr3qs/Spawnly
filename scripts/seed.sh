@@ -3,8 +3,8 @@
 # Run after redeploying the registry (which resets its in-memory store).
 #
 # Templates are co-located with their agents as `template.json` files
-# (agents/<type>/template.json, including the worker at agents/go-worker/).
-# To add a new agent type, drop a template.json next to it — no edits here.
+# (agents/<type>/template.json). To add a new agent type, drop a template.json
+# next to it — no edits here.
 set -euo pipefail
 
 # Resolve globs relative to the repo root regardless of where we're invoked from.

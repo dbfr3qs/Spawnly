@@ -28,7 +28,7 @@ resource "spawnly_agent_template" "coordinator" {
   }
 
   runtime_spec {
-    image         = "agent-go-worker:latest"
+    image         = "agent-chain-worker:latest"
     lifecycle     = "long-lived"
     supports_chat = true
 

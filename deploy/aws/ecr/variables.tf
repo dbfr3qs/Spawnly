@@ -16,14 +16,11 @@ variable "ecr_repositories" {
     "agent-sample-api",
     "agent-sidecar",
     "agent-dashboard",
-    "agent-go-worker",
-    "agent-child-agent",
-    "agent-parent-agent",
-    "agent-currency-converter",
-    "agent-trip-planner",
     "agent-chain-worker",
-    "agent-pi-worker",
     "agent-identity-server",
     "agent-weather-monitor",
+    "agent-travel-specialist",
+    "agent-travel-planner",
+    "agent-travel-tools",
   ]
 }

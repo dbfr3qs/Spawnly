@@ -5,8 +5,9 @@ IMAGE_TAG     := latest
 GO_SERVICES   := operator orchestrator registry sample-api agent-sidecar dashboard
 # Separate-module Go agents: their own go.mod (not the root module), so they
 # build via `cd agents/<name> && go build .` and map to image agent-<name>.
-GO_MODULE_AGENTS := go-worker
-NODE_AGENTS   := child-agent parent-agent currency-converter trip-planner chain-worker pi-worker travel-specialist travel-planner
+# (None at present — listed here so the build/Docker plumbing stays in place.)
+GO_MODULE_AGENTS :=
+NODE_AGENTS   := chain-worker travel-specialist travel-planner
 # Demo agents built from their own Dockerfile stage. They follow the standard
 # agent-<name> image convention (unlike agent-sidecar), so they need no special
 # casing — they just weren't in any list before.
@@ -91,7 +92,7 @@ redeploy-%:
 	kubectl rollout status deployment/$$DEPLOY --timeout=60s
 
 # reload-% — rebuild + load an agent image (not a Deployment) into Kind.
-# Use this for parent-agent, child-agent, weather-monitor, etc.
+# Use this for chain-worker, weather-monitor, travel-planner, etc.
 # Compiles TypeScript first if the agent directory has a tsconfig.json.
 # After running, spawn a new agent from the dashboard to pick up the new image.
 reload-%:
@@ -118,7 +119,7 @@ reload-sidecar:
 	@echo "  agent-sidecar:$(IMAGE_TAG) reloaded. Spawn a new agent to pick it up."
 
 # logs-% — stream logs from the most recently spawned pod of a given agent type.
-# Usage: make logs-parent-agent
+# Usage: make logs-chain-worker
 logs-%:
 	@POD=$$(kubectl get pods -l agent-type=$* --sort-by=.metadata.creationTimestamp \
 	  -o jsonpath='{.items[-1].metadata.name}' 2>/dev/null); \

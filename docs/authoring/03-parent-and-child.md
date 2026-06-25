@@ -1,260 +1,262 @@
 ---
-title: "Scenario 3 — Parent → Child: Trip Planner & Currency Converter"
-description: Agent-to-agent orchestration over A2A, with delegated and attenuated authority — plus an own-authority handoff variant.
+title: "Scenario 3 — Parent → Child: Consent-Gated Fan-Out"
+description: Agent-to-agent orchestration over A2A — a planner fans out to least-privilege specialists, each gated by its own user consent and scoped to exactly one tool — plus the token-exchange delegation path.
 ---
 
-# Scenario 3 — Parent → Child: Trip Planner & Currency Converter
+# Scenario 3 — Parent → Child: Consent-Gated Fan-Out
 
 > **Prerequisite:** [Anatomy of an Agent](00-anatomy.md). This scenario builds on
-> both earlier ones — the parent does a job and exits (Scenario 1), the child is
+> both earlier ones — the parent does a job and exits (Scenario 1), each child is
 > a long-lived A2A server (Scenario 2 lifecycle).
 >
-> **Reference implementations:** [`agents/parent-agent`](../../agents/parent-agent)
-> and [`agents/child-agent`](../../agents/child-agent), whose templates live beside
-> them as `template.json` (seeded by [`scripts/seed.sh`](../../scripts/seed.sh)).
+> **Reference implementations:** [`agents/travel-planner`](../../agents/travel-planner)
+> (the orchestrator) and [`agents/travel-specialist`](../../agents/travel-specialist)
+> (the shared image behind the `flight-search`, `hotel-search`, and `fx-converter`
+> types), with the [`travel-tools`](../../mcp/travel-tools) MCP server as the
+> protected resource. Templates live beside each agent as `template.json` (seeded
+> by [`scripts/seed.sh`](../../scripts/seed.sh)).
 
 ## The personalities
 
-The **Trip Planner** (parent) spins up and does its own work, then needs a narrow
-sub-task done — converting an amount between currencies. Rather than acquire that
-capability itself, it **spawns a Currency Converter** (child), **delegates a
-read-only, narrowly-scoped task** to it over A2A, collects the result, and tears
-the child down. Then the parent reports and exits.
+The **Travel Planner** (parent) spins up and needs three narrow sub-tasks done —
+search flights, search hotels, convert a budget between currencies. Rather than
+acquire all three capabilities itself, it **spawns three specialists**, hands
+each one task over A2A, collects the real results, assembles an itinerary, tears
+the children down, and exits.
 
-The **Currency Converter** (child) is a long-lived A2A server. On request it
-**exchanges the delegation token it was handed** for a token scoped to the
-currency API and performs the conversion. Crucially, the token it receives is
-*attenuated*: it can **read** the currency API but **cannot write** it — the
-platform enforces least privilege across the agent boundary.
+Each **specialist** (child) is a long-lived A2A server and a **least-privilege
+MCP client**: it holds a Spawnly token scoped to **exactly one** travel-tools
+scope (`flights:read`, `hotels:read`, or `fx:read`) and can call **exactly one**
+MCP tool with it. The provider API keys (Duffel, LiteAPI, Frankfurter) live in
+the MCP server, never in the agent — the agent only ever holds a scope-limited
+token.
 
-This is the shape for any "lead agent that fans work out to specialists":
-research lead → researcher, planner → tool-specialist, orchestrator → worker —
-with delegation that hands down *only* the authority the sub-task needs.
+Two properties make this the interesting case:
+
+1. **Each specialist is a *different* spawn edge**, so the user gets **three
+   independent consent prompts** — one per capability — that do not collapse into
+   one. Consent to flight search is not consent to currency conversion.
+2. **Attenuation is by least privilege, enforced at the resource server.** Each
+   specialist's IdentityServer client allows only its single scope, and the
+   travel-tools MCP server rejects any tool call whose token lacks that tool's
+   scope. The planner grants the children **no** authority of its own
+   (`grantableScopes: []`) — each child's authority is its own, minimal, and
+   gated by consent.
+
+This is the shape for any "lead agent that fans work out to specialists" where
+each capability should be **independently authorized**: research lead →
+researchers, planner → tool-specialists, orchestrator → workers.
 
 ## The two halves
 
-### Parent — an orchestrator that exits
+### Parent — an orchestrator that fans out and exits
 
-The parent is a job-and-exit agent (Scenario 1) whose "job" is to drive a child.
-It exposes four tools to its LLM session, all implemented in
-[`agents/parent-agent/src/index.ts`](../../agents/parent-agent/src/index.ts):
+The parent is a deterministic (no-LLM) job-and-exit agent (Scenario 1) whose
+"job" is to drive three children concurrently. The full implementation is
+[`agents/travel-planner/src/index.ts`](../../agents/travel-planner/src/index.ts);
+each specialist run is a four-step cycle:
 
-| Tool | Does |
+| Step | Does |
 |------|------|
-| `spawn_child_agent` | `POST /spawn` on the orchestrator with `agentType: "currency-converter"`, `parentId: AGENT_ID`. Returns the child's id. |
-| `wait_for_child_ready` | Polls `http://<childId>-svc:8080/.well-known/agent.json` until the child's A2A server answers. |
-| `call_child_agent` | Opens an A2A client to `http://<childId>-svc:8080` and `sendMessage(...)`, carrying the **delegation token in message metadata**. |
-| `kill_child_agent` | `DELETE /v1/agents/<childId>` on the orchestrator. |
+| `spawnSpecialist` | `POST /spawn` on the orchestrator with the specialist's `agentType` and `parentId: AGENT_ID`. Returns the child's id. |
+| `waitReady` | Polls `http://<childId>-svc:8080/.well-known/agent.json` until the child's A2A server answers. |
+| `callSpecialist` | Opens an A2A client to `http://<childId>-svc:8080` and `sendMessage(...)`, passing the tool args in `metadata.params`. **This is when the child mints its scoped token — and, because the edge is consent-gated, when the user's consent prompt appears.** Blocks until consent resolves. |
+| `killSpecialist` | `DELETE /v1/agents/<childId>` on the orchestrator. |
 
-Before handing control to the LLM, the parent does its delegation setup
-*deterministically* (so the acceptance path doesn't depend on model behaviour):
+The three runs fan out concurrently with `Promise.allSettled` — a denied consent
+or a failed specialist must not abort the others, and every branch tears its
+child down in a `finally`:
 
 ```ts
-// 1. Do the parent's own privileged work (read+write on its own API).
-await callApiADirect();                       // POST /work on API-A
-
-// 2. Mint a delegation token, attenuated to read-only on the child's API.
-delegationToken = await getSidecarToken({
-  audience: 'delegation',
-  scope: 'sample-api-b:read',                 // read only — no write
-});
-await postEvent(registryUrl, agentId, 'delegation_token_minted', { scope: 'sample-api-b:read' });
+const [flightsR, hotelsR, fxR] = await Promise.allSettled([
+  runSpecialist("flight-search", { origin, destination, departureDate, adults: 1, cabin: "economy" }),
+  runSpecialist("hotel-search",  { cityName, countryCode, checkIn, checkOut, adults: 1, currency }),
+  runSpecialist("fx-converter",  { amount: budget, from: homeCurrency, to: "AUD" }),
+]);
+// assemble an itinerary from whatever real results came back; a denied branch
+// simply contributes nothing.
 ```
-
-The token is then passed to the child via A2A message metadata
-(`metadata: { delegationToken }`) in `call_child_agent`. See
-[`parent-agent/src/index.ts`](../../agents/parent-agent/src/index.ts) lines around
-`mintDelegationToken()` and `callChildAgent`.
 
 The parent's template is short-lived (it exits after the round-trip) **and**
-carries the delegation policy:
+carries the delegation policy — here, a per-child **consent** gate rather than a
+scope grant:
 
 ```json
 {
-  "agentType": "trip-planner",
+  "agentType": "travel-planner",
   "version": "1.0.0",
   "status": "active",
-  "meta": {"displayName": "Trip Planner", "description": "Spawns a currency converter, delegates a read-only conversion, then exits"},
-  "runtimeSpec": {"image": "agent-trip-planner:latest", "resources": {"cpuLimits": "500m", "memoryLimits": "256Mi"}, "envDefaults": {}},
-  "authzTemplate": {
-    "spiceDbRelations": [
-      {"resource": "tenant:{{tenant_id}}", "relation": "agent", "subject": "agent:{{agent_id}}"}
-    ]
-  },
-  "delegation": {"allowedChildTypes": ["currency-converter"], "grantableScopes": ["sample-api-b:read"], "maxDepth": 3}
-}
-```
-
-The `delegation` block is the policy gate: the parent may only spawn the listed
-child types and may only grant the listed scopes. It is what makes
-`scope: 'sample-api-b:read'` legal and `sample-api-b:write` impossible to grant.
-See [05 — Defining Policy](05-defining-policy.md#part-2--delegation) for the full
-delegation model and enforcement points.
-
-### Child — a long-lived A2A server
-
-The child is a long-lived agent (so it gets a `<id>-svc` Service) that runs an
-A2A server. The full implementation is
-[`agents/child-agent/src/index.ts`](../../agents/child-agent/src/index.ts); the
-essentials:
-
-1. **Publishes an agent card** at `/.well-known/agent.json` (how the parent's
-   `wait_for_child_ready` discovers it) describing its skill.
-2. **On each message, extracts the delegation token** from message metadata
-   (`extractDelegationToken`).
-3. **Exchanges it** at the sidecar for a token scoped to the currency API
-   (`exchangeDelegationToken`, RFC 8693 — passing `subject_token=<delegation>`),
-   then calls the API and replies over A2A.
-
-The attenuation is the headline. With the read-only delegated token the child
-sees:
-
-```ts
-// GET succeeds — the delegated scope permits reads.
-const read  = await fetch(`${apiBUrl}/work`, { method: 'GET',  headers: { Authorization: `Bearer ${exchanged}`, 'X-Tenant-ID': tenantId }});
-// status 200
-
-// POST is denied — the same token cannot write. Least privilege, enforced.
-const write = await fetch(`${apiBUrl}/work`, { method: 'POST', headers: { Authorization: `Bearer ${exchanged}`, 'X-Tenant-ID': tenantId }});
-// status 403  (expected)
-```
-
-The child's template is long-lived (it must be reachable as a Service):
-
-```json
-{
-  "agentType": "currency-converter",
-  "version": "1.0.0",
-  "status": "active",
-  "meta": {"displayName": "Currency Converter", "description": "Long-lived A2A server that performs a delegated, read-only conversion"},
-  "runtimeSpec": {"image": "agent-currency-converter:latest", "lifecycle": "long-lived", "resources": {"cpuLimits": "500m", "memoryLimits": "256Mi"}, "envDefaults": {}},
-  "authzTemplate": {
-    "spiceDbRelations": [
-      {"resource": "tenant:{{tenant_id}}", "relation": "agent", "subject": "agent:{{agent_id}}"}
-    ]
+  "requiresTenant": false,
+  "meta": {"displayName": "Travel Planner", "description": "Fans out to three consent-gated specialists and returns an itinerary"},
+  "runtimeSpec": {"image": "agent-travel-planner:latest", "resources": {"cpuLimits": "1", "memoryLimits": "512Mi"}, "envDefaults": {}},
+  "authzTemplate": {"spiceDbRelations": []},
+  "delegation": {
+    "allowedChildTypes": ["flight-search", "hotel-search", "fx-converter"],
+    "grantableScopes": [],
+    "maxDepth": 2,
+    "childPolicies": {
+      "flight-search": {"requireUserConsent": true, "consentTTL": "720h"},
+      "hotel-search":  {"requireUserConsent": true, "consentTTL": "720h"},
+      "fx-converter":  {"requireUserConsent": true, "consentTTL": "720h"}
+    }
   }
 }
 ```
 
+The `delegation` block is the policy gate: the parent may only spawn the listed
+child types (deny-by-default), and each `childPolicies` entry sets
+`requireUserConsent: true` so each spawn edge is gated by a CIBA consent prompt
+keyed on `(user, travel-planner, <childType>)`. `grantableScopes: []` means the
+parent flows **no** authority down — the children are not delegated tokens; they
+mint their own. See [05 — Defining Policy](05-defining-policy.md#part-2--delegation)
+for the full model and enforcement points, and the
+[CIBA consent flow](05-defining-policy.md) for how a prompt is approved, stored
+for `consentTTL`, and re-prompted on revocation.
+
+### Child — a long-lived least-privilege MCP client
+
+Each specialist is a long-lived agent (so it gets a `<id>-svc` Service) running
+an A2A server. All three run the **same image** ([`agents/travel-specialist`](../../agents/travel-specialist));
+the type they register as, and the one tool/scope they may use, come from their
+template's `envDefaults`. The implementation is
+[`agents/travel-specialist/src/index.ts`](../../agents/travel-specialist/src/index.ts);
+the essentials:
+
+1. **Publishes an agent card** at `/.well-known/agent.json` (how the planner's
+   `waitReady` discovers it).
+2. **On each message, reads the tool args** from `metadata.params`.
+3. **Mints a scope-limited token** — `tokens.getToken(MCP_SCOPE)`. It requests
+   *only* the scope, never an explicit audience: the token's `aud` is derived
+   from the scope's `ApiResource` (`travel-tools`), so a `flights:read` token can
+   only ever address the travel-tools server.
+4. **Calls its one MCP tool** — `client.callTool({ name: MCP_TOOL, arguments })`
+   against the travel-tools MCP server, and replies over A2A.
+
+The attenuation is the headline, and it is enforced server-side. A `flight-search`
+specialist holding a `flights:read` token can call `search_flights`, but the same
+token presented to `convert_currency` (which requires `fx:read`) is rejected by
+the MCP server's scope gate. Each specialist's IdentityServer client
+([`identityserver/Config.cs`](../../identityserver/Config.cs)) allows only its one
+scope, so it cannot even mint a broader token.
+
+The specialist template is long-lived and declares its single scope plus the
+tool/scope wiring (here, `flight-search`):
+
+```json
+{
+  "agentType": "flight-search",
+  "version": "1.0.0",
+  "status": "active",
+  "requiresTenant": false,
+  "oauthScopes": ["openid", "flights:read"],
+  "meta": {"displayName": "Flight Search", "description": "Least-privilege specialist: searches flights via the travel-tools search_flights tool"},
+  "runtimeSpec": {
+    "image": "agent-travel-specialist:latest",
+    "lifecycle": "long-lived",
+    "resources": {"cpuLimits": "500m", "memoryLimits": "256Mi"},
+    "envDefaults": {"MCP_URL": "http://travel-tools/mcp", "MCP_TOOL": "search_flights", "MCP_SCOPE": "flights:read"}
+  },
+  "authzTemplate": {"spiceDbRelations": []}
+}
+```
+
+`hotel-search` and `fx-converter` are the same template with
+`hotels:read`/`search_hotels` and `fx:read`/`convert_currency` respectively.
+
 ## The end-to-end flow
 
 ```
-Trip Planner (parent)                         Currency Converter (child)
-  │  callApiADirect()  (own read+write work)
-  │  mint delegation token (sample-api-b:read)
-  │  spawn_child_agent ───────────────────────►  pod + <id>-svc created (long-lived)
-  │  wait_for_child_ready  ── GET agent.json ──►  A2A server ready
-  │  call_child_agent  ── A2A msg + token ─────►  extract + exchange token
-  │                                               GET  API-B  -> 200  (read ok)
-  │                                               POST API-B  -> 403  (write denied)
-  │  ◄──────────── A2A reply (result) ──────────  reply over A2A
-  │  kill_child_agent ── DELETE /v1/agents ────►  pod torn down
-  │  report + exit (Completed)
+Travel Planner (parent)                       flight/hotel/fx specialists (children)
+  │  spawnSpecialist ×3 ───────────────────────►  3 pods + <id>-svc each (long-lived)
+  │  waitReady  ── GET agent.json ─────────────►  A2A servers ready
+  │  callSpecialist ── A2A msg + params ───────►  CIBA consent prompt per child
+  │       (blocks on consent)                      └─ approve → mint scope-limited token
+  │                                                 callTool on travel-tools MCP server
+  │  ◄──────────── A2A reply (real result) ─────  reply over A2A
+  │  killSpecialist ── DELETE /v1/agents ──────►  pods torn down
+  │  assemble itinerary, report + exit (Completed)
 ```
 
-## Run it (using the seeded `parent-agent` / `child-agent`)
+## Run it (using the seeded `travel-planner`)
 
-The parent spawns the child itself — you only spawn the parent.
+The planner spawns the specialists itself — you only spawn the planner, then
+approve the three consent prompts.
 
 ```bash
 make demo   # port-forwards orchestrator :8080 + dashboard :8090
 
 curl -sf -X POST http://localhost:8080/spawn \
   -H 'Content-Type: application/json' \
-  -d '{"agentType":"parent-agent","tenantId":"tenant-1","userId":"user-1"}'
-# -> {"workloadName":"parent-agent-xxxxx"}
+  -d '{"agentType":"travel-planner","userId":"user-1","task":"trip to Sydney"}'
+# -> {"workloadName":"travel-planner-xxxxx"}
 
-# Watch both the parent and the child it spawns:
+# Watch the planner and the three specialists it spawns:
 kubectl get agentworkloads -w
 
-# Parent timeline: delegation_token_minted, then the child round-trip:
-curl -sf http://localhost:8080/v1/agents/parent-agent-xxxxx/events | jq
+# Approve the three consent prompts on the dashboard (http://localhost:8090), or
+# via the consent API (GET /v1/consent-requests then POST .../approve).
 
-# Child timeline: delegation_exchange, api_b_call (200), api_b_write_denied (403):
-curl -sf http://localhost:8080/v1/agents/child-agent-yyyyy/events | jq
+# Planner timeline: parent_started, specialist_spawned ×3, parent_completed (itinerary):
+curl -sf http://localhost:8080/v1/agents/travel-planner-xxxxx/events | jq
 ```
 
-> This scenario needs the `ai-provider` Secret populated (the parent and child
-> each run an LLM session). Set `AI_API_KEY` in `.env` before `make bootstrap`
-> — see [`.env.example`](../../.env.example).
+> The travel-tools MCP server calls real upstream providers; populate its keys
+> (Duffel / LiteAPI; Frankfurter needs none) for live data, or it returns an
+> error the planner records and routes around. The planner itself runs no LLM.
 
-On the dashboard you'll see two agents appear: the parent, and the child it
-spawns; the child's `api_b_write_denied` event (status 403) is the visible proof
-that delegation handed down read access only.
+On the dashboard you'll see the planner plus three specialists appear, **three
+separate consent prompts** (one per capability), and — once approved — each
+specialist's `tool_result` event carrying real provider data, then the planner's
+assembled `parent_completed` itinerary.
 
-## Variant: handing off *without* delegation (own-authority child)
+## Token-exchange delegation: the other attenuation path
 
-Delegation is the right model when the child acts **on the user's behalf** with a
-slice of the parent's authority. But sometimes you just want the parent to *hand
-work to* a child that does its **own** thing with its **own** permissions —
-possibly completely different from the parent's. That needs *less* config, not
-more: the orchestration/A2A scaffolding is identical, and you simply drop the
-delegation machinery.
+The fan-out above attenuates by **least privilege + consent**: each child mints
+its *own* minimal token. The platform also supports the complementary model —
+**delegation by token-exchange (RFC 8693)**, where a parent hands a child a slice
+of *its own* authority, attenuated, and the child acts **on the user's behalf**.
 
-> See [05 — Defining Policy](05-defining-policy.md) for the own-authority vs
-> delegated-authority distinction this variant rests on.
+No example agent ships for this path today, but it remains a first-class platform
+capability:
 
-**What you remove vs the delegation flow above:**
+- The parent mints a **delegation token** attenuated to a narrower scope —
+  `tokens.getToken(scope, { audience: 'delegation' })` — and passes it to the
+  child (e.g. in A2A message metadata).
+- The child **exchanges** it for a resource token —
+  `tokens.exchangeToken({ subjectToken, audience, scope })` (the SDK's RFC 8693
+  helper) — and calls the protected API. The exchanged token keeps `sub` = the
+  **user** down the whole chain, so a resource server can authorize on the
+  originating user.
+- IdentityServer enforces the attenuation at the exchange:
+  [`TokenExchangeGrantValidator`](../../identityserver/TokenExchangeGrantValidator.cs)
+  rejects an exchange that widens scope beyond what the parent's template
+  `grantableScopes` permitted. (A delegation-capable client also needs the
+  `token-exchange` grant in [`Config.cs`](../../identityserver/Config.cs).)
 
-| Piece | Delegation flow | Own-authority handoff |
-|-------|-----------------|-----------------------|
-| Parent `delegation.allowedChildTypes` | required | **keep** — still gates the spawn (deny-by-default; see caveat 2) |
-| Parent `delegation.grantableScopes` / `maxDepth` | required | **omit** — no authority flows down |
-| Parent mints a delegation token (`audience=delegation`) | yes | **drop** |
-| Token passed over A2A metadata | yes | **drop** — the A2A call carries only the task |
-| Child exchanges `subject_token` | yes | **drop** — child calls `/token?scope=…` (client_credentials), like a [Scenario 1](01-job-and-exit.md) agent |
-| IS client `token-exchange` grant | parent + child | **drop** — both need only `client_credentials` |
+**Choosing between them:**
 
-**What stays the same:** the parent still `spawn`s the child with `parentId`,
-waits on `<id>-svc`, calls it over A2A, and kills it; the child is still
-long-lived (so it gets a Service) and still self-registers with its own
-`authzTemplate`.
+| | Consent-gated fan-out (this scenario) | Token-exchange delegation |
+|---|---|---|
+| Child's authority | its **own** least-privilege scope | a **slice of the parent's**, attenuated |
+| Token `sub` | the child | the **user** (carried down the chain) |
+| Gate | per-edge **user consent** (CIBA) | `grantableScopes` checked at the exchange |
+| Use when | each capability is independently owned + authorized | a resource must authorize on the originating user |
 
-**Where the child's authority comes from:** entirely its own config, with no
-reference to the parent — its template's `authzTemplate` (SpiceDB relations) plus
-its IdentityServer client `AllowedScopes`. To give the child *different,
-non-overlapping* permissions, set them directly on the child type. The trimmed
-parent template keeps `allowedChildTypes` (so the spawn is permitted) but drops
-the scope-flow fields:
-
-```json
-{
-  "agentType": "trip-planner",
-  "version": "1.0.0",
-  "status": "active",
-  "meta": {"displayName": "Trip Planner", "description": "Spawns a specialist child and hands off a task; no delegated authority"},
-  "runtimeSpec": {"image": "agent-trip-planner:latest", "resources": {"cpuLimits": "500m", "memoryLimits": "256Mi"}, "envDefaults": {}},
-  "authzTemplate": {
-    "spiceDbRelations": [
-      {"resource": "tenant:{{tenant_id}}", "relation": "agent", "subject": "agent:{{agent_id}}"}
-    ]
-  },
-  "delegation": {"allowedChildTypes": ["currency-converter"]}
-}
-```
-
-**Two caveats to weigh before choosing this model:**
-
-1. **"On whose behalf" changes.** A delegated token keeps `sub` = the user down
-   the whole chain; an own-authority token has `sub` = the child. The lineage is
-   still recorded in the registry (`parentId` / [`/v1/agents/{id}/chain`](../../cmd/registry/main.go#L414)),
-   but the *token itself* no longer asserts "acting for user-1." If a resource
-   server must authorize on the originating user, delegation is the only path
-   that carries it.
-2. **The parent→child edge is governed at spawn (deny-by-default).** Even without
-   a token-exchange, the orchestrator checks the parent template's
-   `allowedChildTypes` at spawn time and rejects (`403`) a child type the parent
-   doesn't list — so a parent that hands off to a child must declare it, exactly
-   as the delegation flow already does.
+Both rest on the same orchestration scaffolding (spawn → discover via `<id>-svc`
++ agent card → call over A2A → kill) and the same deny-by-default
+`allowedChildTypes` spawn gate; they differ only in **where the child's authority
+comes from**. See [05 — Defining Policy](05-defining-policy.md) for the
+own-authority vs delegated-authority distinction underneath both.
 
 ## What this scenario teaches
 
 - Agent-to-agent orchestration: spawn → discover (`<id>-svc` + agent card) →
   call over A2A → kill.
 - Delegation policy in the parent's template (`allowedChildTypes`,
-  `grantableScopes`, `maxDepth`).
-- **Least-privilege attenuation across the boundary** — the child receives, and
-  can only use, exactly the authority the parent was permitted to grant.
-- That **delegation is additive**: the same handoff without it is the
-  own-authority variant above, with the child's permissions defined entirely on
-  its own type.
+  `childPolicies` consent gates, `grantableScopes`, `maxDepth`).
+- **Per-capability consent**: distinct spawn edges produce distinct, non-collapsing
+  consent prompts.
+- **Least-privilege attenuation enforced at the resource server** — a specialist
+  can call only the one tool its single scope permits.
+- That **delegation has two shapes**: least-privilege own-authority children (the
+  fan-out), and token-exchange that carries the user's identity down the chain.

@@ -195,8 +195,9 @@ const exchanged = await tokens.exchangeToken({
 never granted. That `403` is the visible proof least privilege held across the
 boundary.
 
-This is exactly the [Scenario 3](03-parent-and-child.md) flow; the
-`parent-agent`/`child-agent` reference code implements it.
+This is the token-exchange attenuation flow; see the token-exchange section of
+[Scenario 3](03-parent-and-child.md#token-exchange-delegation-the-other-attenuation-path)
+for the concept and the SDK's `exchangeToken`.
 
 ### What IdentityServer enforces at the exchange
 
@@ -242,8 +243,8 @@ about why the platform refuses this.
 - **"Different scopes, on whose behalf?" has no coherent answer.** If the child
   exercises authority *as the user*, the user must have held it. If it exercises
   authority *as itself*, then `sub` should be the child — which is the
-  [own-authority handoff](03-parent-and-child.md#variant-handing-off-without-delegation-own-authority-child),
-  not delegation.
+  own-authority model the [consent-gated fan-out](03-parent-and-child.md)
+  uses (each child mints its own token), not delegation.
 - **Expansion is the confused-deputy pattern.** Letting a callable child mint
   authority for whoever invoked it turns "P may call C" into "P may wield C's
   powers" — silent escalation via composition, and an audit story where "what can
@@ -340,10 +341,11 @@ A tenant-agnostic instance is what a
 asserts no tenant and holds no `tenant:` grant, so a tenant-checking instance
 would (correctly) deny it. The `sample-api-global` manifest
 ([`deploy/manifests/sample-api-global.yaml`](../../deploy/manifests/sample-api-global.yaml))
-and the `global-worker` template
-([`agents/global-worker/template.json`](../../agents/global-worker/template.json))
-are a worked example of the pair. Setting `REQUIRE_TENANT=false` relaxes **only**
-the tenant check — authn and scope are still enforced.
+is the tenant-agnostic resource server; a tenant-agnostic agent declares
+`requiresTenant: false` in its template (e.g.
+[`agents/weather-monitor/template.json`](../../agents/weather-monitor/template.json)).
+Setting `REQUIRE_TENANT=false` relaxes **only** the tenant check — authn and
+scope are still enforced.
 
 ### Scopes and audiences catalog
 

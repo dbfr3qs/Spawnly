@@ -9,8 +9,8 @@ name: e2e
 #   - smoke / auth / template-lifecycle are pure dashboard + control-plane flows
 # So this lane runs with a DUMMY ai-provider key and costs nothing per run.
 #
-# Excluded (need a real model — keep them for a future key-gated / fake-model
-# lane): weather-chat, pi-worker, global-worker.
+# Excluded (need a real model — kept for a future key-gated / fake-model
+# lane): weather-chat.
 #
 # Heavy (~15 image builds + SPIRE + SpiceDB), so it does not run on every PR by
 # default: pushes to main, manual dispatch, and PRs labelled `full-e2e`.

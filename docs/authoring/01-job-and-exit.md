@@ -7,10 +7,10 @@ description: The simplest agent — acquire a scoped token, call a protected API
 
 > **Prerequisite:** [Anatomy of an Agent](00-anatomy.md).
 >
-> **Reference implementation:** the `worker` agent — [`agents/go-worker`](../../agents/go-worker),
-> whose template lives beside it at [`agents/go-worker/template.json`](../../agents/go-worker/template.json)
-> (seeded by [`scripts/seed.sh`](../../scripts/seed.sh)). It is the simplest agent
-> on the platform and exercises exactly this shape.
+> **Reference implementation:** none ships today — this is the simplest *shape* of
+> the [six-step path](00-anatomy.md#the-six-step-path-from-scratch), so the guide
+> builds a hypothetical `price-reporter` from scratch. (`travel-planner` is the
+> closest runnable one-shot, but it is a fan-out orchestrator — [Scenario 3](03-parent-and-child.md).)
 
 ## The personality
 
@@ -74,11 +74,10 @@ main().catch(async (err) => {
 });
 ```
 
-The snippet above is TypeScript for readability, but the **deployed `worker`
-reference is Go**: [`agents/go-worker/main.go`](../../agents/go-worker/main.go)
-runs the same token → protected-call shape on the Go SDK
-(`github.com/spawnly/sdk-go`). Its `AuthenticatedClient` attaches the `Bearer`
-token and `X-Tenant-ID` for you, so the core is just:
+The snippet above is TypeScript, but the same token → protected-call shape is
+available in Go on the Go SDK (`github.com/spawnly/sdk-go`, [`sdks/go`](../../sdks/go)).
+Its `AuthenticatedClient` attaches the `Bearer` token and `X-Tenant-ID` for you,
+so the core is just:
 
 ```go
 tc := spawnly.NewTokenClient()
@@ -88,25 +87,18 @@ client := spawnly.NewAuthenticatedClient(sampleAPIURL, scope, tc, spawnly.WithTe
 resp, err := client.Post(ctx, "/task", body)
 ```
 
-The same `TokenClient` + protected-call + `postEvent` sequence is the deterministic
-`callApiADirect()` step in
-[`agents/parent-agent/src/index.ts`](../../agents/parent-agent/src/index.ts) — the
-parent agent does this exact thing before it orchestrates its child.
-
 ### Optional: add an LLM summarisation step
 
 If the report benefits from natural-language summarisation, build a Flue context
 and prompt the model once, then `instrumentFlue` so the turn shows up on the
-dashboard. The child agent's `execute()` in
-[`agents/child-agent/src/index.ts`](../../agents/child-agent/src/index.ts) is a
-minimal example of a one-shot `session.prompt(...)`. For a pure data job, skip
-the LLM entirely — a job-and-exit agent does not need one.
+dashboard (see [`agents/weather-monitor`](../../agents/weather-monitor) for a Flue
+agent). For a pure data job, skip the LLM entirely — a job-and-exit agent does
+not need one.
 
 ## The template
 
 No `lifecycle` field — it defaults to short-lived, so the operator marks the
-workload Completed on exit and creates no Service. This is the `worker` template
-from [`agents/go-worker/template.json`](../../agents/go-worker/template.json), renamed:
+workload Completed on exit and creates no Service:
 
 ```json
 {
@@ -131,25 +123,27 @@ The `authzTemplate` grants `tenant:T#agent@agent:X`, which is what lets the
 sidecar mint a token the price API will accept (the API checks the SpiceDB
 `work_on` permission before serving the request).
 
-## Run it (using the seeded `worker`)
+## Run it
 
-The `worker` template is already seeded and is functionally this agent, so you
-can run the exact flow today:
+No minimal job-and-exit agent is seeded, so run *your own*: build + load the
+image, seed the `price-reporter` template, then spawn it — the
+[six-step path](00-anatomy.md#the-six-step-path-from-scratch) in 00 covers each
+command. The spawn + observe loop is:
 
 ```bash
-make demo   # port-forwards orchestrator :8080 + dashboard :8090, spawns a worker
+# Port-forward orchestrator :8080 + dashboard :8090:
+make demo
 
-# …or do it by hand:
 curl -sf -X POST http://localhost:8080/spawn \
   -H 'Content-Type: application/json' \
-  -d '{"agentType":"worker","tenantId":"tenant-1","userId":"user-1","task":"price snapshot"}'
-# -> {"workloadName":"worker-xxxxx"}
+  -d '{"agentType":"price-reporter","tenantId":"tenant-1","userId":"user-1","task":"price snapshot"}'
+# -> {"workloadName":"price-reporter-xxxxx"}
 
 # Watch it reach Completed:
-kubectl get agentworkload worker-xxxxx -w
+kubectl get agentworkload price-reporter-xxxxx -w
 
 # Inspect the event timeline (your price_report event appears near the end):
-curl -sf http://localhost:8080/v1/agents/worker-xxxxx/events | jq
+curl -sf http://localhost:8080/v1/agents/price-reporter-xxxxx/events | jq
 ```
 
 On the dashboard (http://localhost:8090) the agent appears, walks through

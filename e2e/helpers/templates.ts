@@ -53,12 +53,12 @@ export async function deleteTemplate(request: APIRequestContext, agentType: stri
 // the path holds regardless of the process cwd Playwright launches with.
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
-// Read the valid global-worker template and clone it under a fresh agentType so
-// it registers as a brand-new, schema-valid throwaway type. displayName is
+// Read a real, schema-valid template (weather-monitor) and clone it under a
+// fresh agentType so it registers as a brand-new throwaway type. displayName is
 // tweaked too so the clone is identifiable in the UI.
-export function cloneGlobalWorkerTemplate(agentType: string): Template {
+export function cloneSampleTemplate(agentType: string): Template {
   const raw = readFileSync(
-    path.join(REPO_ROOT, 'agents', 'global-worker', 'template.json'),
+    path.join(REPO_ROOT, 'agents', 'weather-monitor', 'template.json'),
     'utf8',
   );
   const tmpl = JSON.parse(raw) as Template;
