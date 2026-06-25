@@ -374,7 +374,7 @@ func TestSpawnDisabledTemplateRejected(t *testing.T) {
 	}
 }
 
-func TestSpawnDefaultAgentType(t *testing.T) {
+func TestSpawnRequiresAgentType(t *testing.T) {
 	mockReg := defaultMockRegistry(t)
 	defer mockReg.Close()
 
@@ -382,20 +382,21 @@ func TestSpawnDefaultAgentType(t *testing.T) {
 	sdb := spicedb.NewMock()
 	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
 
+	// A spawn with no agentType is rejected: there is no default agent type.
 	body, _ := json.Marshal(map[string]string{"userId": "u1", "tenantId": "t1"})
 	req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("got %d, want 202", rec.Code)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", rec.Code)
 	}
 
 	var list agentv1alpha1.AgentWorkloadList
 	fakeClient.List(context.Background(), &list)
-	if list.Items[0].Spec.AgentType != "worker" {
-		t.Fatalf("expected default agentType worker, got %q", list.Items[0].Spec.AgentType)
+	if len(list.Items) != 0 {
+		t.Fatalf("expected no AgentWorkload created for a typeless spawn, got %d", len(list.Items))
 	}
 }
 

@@ -144,7 +144,8 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			return
 		}
 		if req.AgentType == "" {
-			req.AgentType = "worker"
+			http.Error(w, "agentType is required", http.StatusBadRequest)
+			return
 		}
 
 		tpl, err := regClient.GetTemplate(r.Context(), req.AgentType)
