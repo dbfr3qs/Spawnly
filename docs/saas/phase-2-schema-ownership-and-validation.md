@@ -403,7 +403,7 @@ override path, not two divergent hardcoded copies.
 2. **`GET /v1/schema`** returns 200 with the active schema text, version
    string, and `source: "default"` when `SPICEDB_SCHEMA_PATH` is unset.
 3. **Default end-to-end still works**: registering the existing example
-   templates (chain-worker, pi-worker, etc. — `find` under `examples/` or
+   templates (chain-worker, travel-planner, etc. — `find` under `examples/` or
    `agents/` for template JSON fixtures) via `POST /v1/templates` still
    succeeds (200/201), and `POST /v1/agents` for those types still writes
    tuples successfully against the registry-written schema (verify via

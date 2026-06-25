@@ -1,0 +1,17 @@
+{
+  "name": "travel-planner",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "build": "tsc" },
+  "dependencies": {
+    "@a2a-js/sdk": "*",
+    "@spawnly/sdk": "file:../../sdks/typescript",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/uuid": "^9.0.0",
+    "@types/node": "^20.0.0"
+  }
+}

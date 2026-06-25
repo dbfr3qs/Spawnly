@@ -1,0 +1,22 @@
+{
+  "agentType": "fx-converter",
+  "version": "1.0.0",
+  "status": "active",
+  "requiresTenant": false,
+  "oauthScopes": ["openid", "fx:read"],
+  "meta": {
+    "displayName": "FX Converter",
+    "description": "A least-privilege specialist that converts currency via the travel-tools MCP server's convert_currency tool, using a token scoped to only fx:read."
+  },
+  "runtimeSpec": {
+    "image": "agent-travel-specialist:latest",
+    "lifecycle": "long-lived",
+    "resources": { "cpuLimits": "500m", "memoryLimits": "256Mi" },
+    "envDefaults": {
+      "MCP_URL": "http://travel-tools/mcp",
+      "MCP_TOOL": "convert_currency",
+      "MCP_SCOPE": "fx:read"
+    }
+  },
+  "authzTemplate": { "spiceDbRelations": [] }
+}

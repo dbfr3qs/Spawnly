@@ -8,13 +8,15 @@ description: The shared contract every agent satisfies — platform-injected ide
 This is the shared reference for authoring agents on the platform. Read it once;
 the three scenario guides build directly on it:
 
-1. [Job-and-exit — Price Reporter](01-job-and-exit.md)
+1. [Job-and-exit](01-job-and-exit.md)
 2. [Loop-until-stopped — Queue Worker](02-loop-until-stopped.md)
-3. [Parent → child — Trip Planner & Currency Converter](03-parent-and-child.md)
+3. [Parent → child — consent-gated fan-out](03-parent-and-child.md)
 
-Every guide uses one of the four agents already in this repo as its working
-reference implementation, so you can read real, running code alongside the
-explanation.
+Scenarios 2 and 3 use agents already in this repo as their working reference
+implementations (`weather-monitor`, `chain-worker`, and the `travel-planner` →
+specialist fan-out), so you can read real, running code alongside the
+explanation. Scenario 1 is the simplest *shape* of the path below — there is no
+dedicated minimal example agent, so it leans on this anatomy for the mechanics.
 
 ---
 
@@ -92,7 +94,8 @@ The same neutral contract is available in **Go** for non-Flue workloads:
 [`sdks/go`](../../sdks/go) (`github.com/spawnly/sdk-go`) mirrors `TokenClient`,
 an authenticated HTTP client, the tenant-header helper, and `postEvent` — minus
 the Flue-specific `instrumentFlue` / `promptTimeoutSignal` (Go uses `context`
-deadlines instead). The Go [`worker`](../../agents/go-worker) is built on it.
+deadlines instead). No example Go agent ships at the moment, but the contract is
+identical to the TypeScript SDK's.
 
 Keep the dependency direction in mind: the SDK stays framework-agnostic and
 depends on the platform's neutral contract, never the reverse. Don't pull
@@ -108,23 +111,22 @@ the scenario is `runtimeSpec.lifecycle` in the template** (see below).
 ### 1. Write the agent under `agents/<name>/`
 
 A TypeScript project depending on `@spawnly/sdk` and `@flue/runtime` — or, for a
-non-Flue workload, a Go module depending on `github.com/spawnly/sdk-go` (the
-[`go-worker`](../../agents/go-worker) is the Go reference).
+non-Flue workload, a Go module depending on `github.com/spawnly/sdk-go`.
 Use one of the reference agents as a starting skeleton:
 
 | Scenario | Reference agent | Shape |
 |----------|-----------------|-------|
-| Job-and-exit | [`agents/go-worker`](../../agents/go-worker) / `worker` | `main()` runs, then the process exits |
-| Loop-until-stopped | [`agents/weather-monitor`](../../agents/weather-monitor) | `setInterval` / loop until terminated |
-| Parent → child | [`agents/parent-agent`](../../agents/parent-agent) + [`agents/child-agent`](../../agents/child-agent) | parent orchestrates; child is an A2A server |
+| Job-and-exit | *(no dedicated example; see [01](01-job-and-exit.md))* | `main()` runs, then the process exits |
+| Loop-until-stopped | [`agents/weather-monitor`](../../agents/weather-monitor), [`agents/chain-worker`](../../agents/chain-worker) | `setInterval` / loop until terminated |
+| Parent → child | [`agents/travel-planner`](../../agents/travel-planner) + the [`travel-specialist`](../../agents/travel-specialist) specialists | parent fans out; each child is a consent-gated A2A/MCP-client server |
 
 ### 2. Add a Dockerfile build target
 
 Add a multi-stage block to the [`Dockerfile`](../../Dockerfile) following the
 `build-<name>-node` → final `agent-<name>` pattern used by `weather-monitor`,
-`parent-agent`, and `child-agent`. Every Node agent image copies the compiled
-shared SDK from the `build-ts-sdk` stage. (The Go `go-worker` follows a parallel
-`build-go-worker` → `go-worker` stage pattern instead, building its own module.)
+`chain-worker`, and `travel-planner`. Every Node agent image copies the compiled
+shared SDK from the `build-ts-sdk` stage. (A Go agent would follow a parallel
+`build-<name>` → `<name>` stage pattern instead, building its own module.)
 
 ### 3. Build and load the image into Kind
 

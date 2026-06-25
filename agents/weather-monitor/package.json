@@ -11,5 +11,9 @@
     "@spawnly/sdk": "file:../../sdks/typescript",
     "@flue/runtime": "^0.7.0",
     "@flue/cli": "^0.7.0"
+  },
+  "overrides": {
+    "@earendil-works/pi-ai": "0.78.1",
+    "@earendil-works/pi-agent-core": "0.78.1"
   }
 }

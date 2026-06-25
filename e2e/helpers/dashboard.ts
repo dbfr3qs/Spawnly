@@ -97,8 +97,8 @@ export async function findAgent(
 // where its HTTP listener / Service endpoint isn't routable yet, so the
 // orchestrator returns and the dashboard renders a persistent
 // "[Error: agent unreachable]" bubble that never self-heals. This is more
-// likely for heavier agents (e.g. pi-worker's large module graph slows its cold
-// start). To stay robust we treat that specific error as a readiness signal and
+// likely for heavier agents whose large module graph slows their cold
+// start. To stay robust we treat that specific error as a readiness signal and
 // re-send after a short backoff, up to `timeout`. Any other error bubble fails
 // immediately (it's a real error, not warm-up).
 export async function chat(

@@ -24,9 +24,9 @@ if [ -z "$ready" ]; then
   exit 1
 fi
 
-echo "==> spawning test worker (userId=alice tenantId=acme agentType=worker)"
+echo "==> spawning test worker (userId=alice tenantId=acme agentType=chain-worker)"
 WL=$(curl -s -X POST localhost:8080/spawn -H 'Content-Type: application/json' \
-  -d '{"userId":"alice","tenantId":"acme","agentType":"worker","task":"call the sample API"}' \
+  -d '{"userId":"alice","tenantId":"acme","agentType":"chain-worker","task":"call the sample API"}' \
   | jq -r .workloadName)
 if [ -z "$WL" ] || [ "$WL" = "null" ]; then
   echo "ERROR: spawn did not return a workloadName" >&2
@@ -34,11 +34,38 @@ if [ -z "$WL" ] || [ "$WL" = "null" ]; then
 fi
 echo "    workload: $WL"
 
-echo "==> waiting for the worker to finish"
+# chain-worker is long-lived (it loops + self-spawns one child of its own type
+# up to the template's maxDepth), so unlike a job-and-exit worker it never
+# terminates on its own. DELETE is NOT cascading on this platform (only
+# revoke/resume cascade), so reap the whole subtree explicitly: BFS the parentId
+# tree from $WL over the agents list and delete every descendant plus the root.
+teardown() {
+  kill $PF 2>/dev/null || true
+  [ -n "${WL:-}" ] || return 0
+  local agents to_delete frontier next p kids id
+  agents=$(curl -s --max-time 5 localhost:8080/v1/agents 2>/dev/null || echo '[]')
+  to_delete="$WL"; frontier="$WL"
+  for _ in $(seq 1 5); do # maxDepth is 4; one extra pass for safety
+    next=""
+    for p in $frontier; do
+      kids=$(echo "$agents" | jq -r --arg p "$p" '.[] | select(.parentId == $p) | .agentId' 2>/dev/null)
+      next="$next $kids"
+    done
+    next=$(echo "$next" | xargs -n1 2>/dev/null | sort -u)
+    [ -n "$next" ] || break
+    to_delete="$to_delete $next"; frontier="$next"
+  done
+  for id in $(echo "$to_delete" | xargs -n1 | sort -u); do
+    curl -s --max-time 5 -X DELETE "localhost:8080/v1/agents/$id" >/dev/null 2>&1 || true
+  done
+}
+trap teardown EXIT
+
+echo "==> waiting for the worker's first authorized sample-api call"
 events=""
 for _ in $(seq 1 45); do
   events=$(curl -s "localhost:8080/v1/agents/$WL/events" | jq -r '.[].type')
-  echo "$events" | grep -qE 'stopping|pod_failed' && break
+  echo "$events" | grep -qE 'work_ok|work_denied|pod_failed' && break
   sleep 2
 done
 
@@ -56,13 +83,13 @@ echo
 echo "agent event timeline:"
 echo "${events:-<none>}" | sed 's/^/   /'
 echo
-echo "worker result (expect 'task result: ...', no error):"
+echo "worker result (expect '[chain-worker] work -> 200', no error):"
 echo "${worklog:-<none>}" | sed 's/^/   /'
 echo "========================================================="
 echo
 
 if [ "$attestor_issuer" = "aws-stsweb" ] \
-   && echo "$worklog" | grep -q "task result:" \
+   && echo "$events" | grep -q "work_ok" \
    && ! echo "$events" | grep -q "pod_failed"; then
   echo "✅ PASS — agent attested via aws-stsweb (cluster-attested kubernetes-pod-name),"
   echo "   minted an IS token, and made an authorized sample-api call. No SPIRE."

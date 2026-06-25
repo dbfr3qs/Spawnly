@@ -73,9 +73,9 @@ a TypeScript agent image), `reload-sidecar`, `logs-<svc>`, `kind-down`.
 
 **Spawn an agent:** `POST localhost:8080/spawn` with
 `{"userId","tenantId","agentType","task"}` → `{"workloadName"}`. Omit `tenantId`
-for a global agent. Agent types: `worker`, `chain-worker`, `currency-converter`,
-`trip-planner`, `pi-worker`, `parent-agent`, `child-agent`, `global-worker`,
-`weather-monitor`.
+for a global agent. Agent types: `chain-worker`, `weather-monitor`,
+`travel-planner`, and the three travel specialists `flight-search`,
+`hotel-search`, `fx-converter` (each runs the shared `travel-specialist` image).
 
 **Key read APIs** (orchestrator on :8080, or registry):
 `GET /v1/agents`, `GET /v1/agents/{id}/events`, `GET /v1/templates`,

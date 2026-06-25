@@ -197,6 +197,23 @@ kubectl create secret generic dashboard-user \
   --from-literal=password="alice" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+# travel-tools MCP server upstream keys (Duffel/LiteAPI), from mcp/travel-tools/.env
+# — owned by that one service, kept out of the global .env. Created here so the
+# travel-tools pod has them on first start; absent keys just disable that tool.
+TT_ENV="$REPO_ROOT/mcp/travel-tools/.env"
+echo "==> Ensuring travel-tools-secrets (Duffel/LiteAPI; from mcp/travel-tools/.env)..."
+TT_DUFFEL="" TT_LITEAPI=""
+if [ -f "$TT_ENV" ]; then
+  TT_DUFFEL=$(grep -E '^DUFFEL_API_KEY=' "$TT_ENV" | head -1 | cut -d= -f2- | tr -d "\"' ")
+  TT_LITEAPI=$(grep -E '^LITEAPI_KEY=' "$TT_ENV" | head -1 | cut -d= -f2- | tr -d "\"' ")
+else
+  echo "    (no mcp/travel-tools/.env — flights/hotels tools will report 'not configured')"
+fi
+kubectl create secret generic travel-tools-secrets \
+  --from-literal=DUFFEL_API_KEY="$TT_DUFFEL" \
+  --from-literal=LITEAPI_KEY="$TT_LITEAPI" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 echo "==> Deploying services..."
 kubectl apply -f deploy/manifests/rbac.yaml
 kubectl apply -f deploy/manifests/spicedb.yaml
@@ -206,6 +223,7 @@ kubectl apply -f deploy/manifests/sample-api.yaml
 kubectl apply -f deploy/manifests/sample-api-a.yaml
 kubectl apply -f deploy/manifests/sample-api-b.yaml
 kubectl apply -f deploy/manifests/sample-api-global.yaml
+kubectl apply -f deploy/manifests/travel-tools.yaml
 kubectl apply -f deploy/manifests/operator.yaml
 kubectl apply -f deploy/manifests/orchestrator.yaml
 kubectl apply -f deploy/manifests/dashboard.yaml
@@ -220,7 +238,7 @@ echo "==> Restarting platform deployments to pick up freshly loaded images..."
 kubectl rollout restart \
   deployment/registry deployment/identity-server \
   deployment/sample-api deployment/sample-api-a deployment/sample-api-b \
-  deployment/sample-api-global deployment/agent-operator \
+  deployment/sample-api-global deployment/travel-tools deployment/agent-operator \
   deployment/orchestrator deployment/dashboard
 
 echo "==> Waiting for all services to be ready..."
@@ -231,6 +249,7 @@ kubectl rollout status deployment/sample-api --timeout=120s
 kubectl rollout status deployment/sample-api-a --timeout=120s
 kubectl rollout status deployment/sample-api-b --timeout=120s
 kubectl rollout status deployment/sample-api-global --timeout=120s
+kubectl rollout status deployment/travel-tools --timeout=120s
 kubectl rollout status deployment/agent-operator --timeout=120s
 kubectl rollout status deployment/orchestrator --timeout=120s
 kubectl rollout status deployment/dashboard --timeout=120s

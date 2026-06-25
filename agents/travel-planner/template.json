@@ -1,0 +1,26 @@
+{
+  "agentType": "travel-planner",
+  "version": "1.0.0",
+  "status": "active",
+  "requiresTenant": false,
+  "meta": {
+    "displayName": "Travel Planner",
+    "description": "Plans a trip by fanning out to three consent-gated specialists — flight-search, hotel-search, and fx-converter — each a DIFFERENT spawn edge, so the user is prompted to consent to each capability independently (the prompts do not collapse). Runs once and returns a real itinerary."
+  },
+  "runtimeSpec": {
+    "image": "agent-travel-planner:latest",
+    "resources": { "cpuLimits": "1", "memoryLimits": "512Mi" },
+    "envDefaults": {}
+  },
+  "authzTemplate": { "spiceDbRelations": [] },
+  "delegation": {
+    "allowedChildTypes": ["flight-search", "hotel-search", "fx-converter"],
+    "grantableScopes": [],
+    "maxDepth": 2,
+    "childPolicies": {
+      "flight-search": { "requireUserConsent": true, "consentTTL": "720h" },
+      "hotel-search": { "requireUserConsent": true, "consentTTL": "720h" },
+      "fx-converter": { "requireUserConsent": true, "consentTTL": "720h" }
+    }
+  }
+}

@@ -20,8 +20,8 @@ Each agent pod gets a unique SPIFFE identity (JWT-SVID) issued by SPIRE at start
 
 Agents run on the same platform contract regardless of language or framework:
 
-- **A Go worker** (`agents/go-worker/`) — the minimal short-lived reference workload, built on the Go SDK (`github.com/spawnly/sdk-go`).
-- **TypeScript agents** (`agents/`) — built on the `@spawnly/sdk` (which lives in `sdks/typescript/`). These can chat over an LLM (OpenAI or Anthropic), call tools, and orchestrate child agents over A2A. Most use the [Flue](https://www.npmjs.com/package/@flue/runtime) runtime; **`pi-worker`** instead embeds the [Pi](https://pi.dev) coding harness (`@earendil-works/pi-coding-agent`) — the first non-Flue agent, and a deliberate proof that the contract is framework-agnostic: its agent code uses only the SDK, and the Pi→event glue lives in the agent, not the platform.
+- **TypeScript agents** (`agents/`) — built on the `@spawnly/sdk` (which lives in `sdks/typescript/`). These can chat over an LLM (OpenAI or Anthropic), call tools, and orchestrate child agents over A2A. Most use the [Flue](https://www.npmjs.com/package/@flue/runtime) runtime; `chain-worker` and the `travel-*` agents are plain (no-LLM) TypeScript, proving the contract is framework-agnostic — agent code depends only on the SDK, never on platform internals.
+- **The same contract is available in Go** via the Go SDK (`github.com/spawnly/sdk-go`, in `sdks/go/`); no example Go agent ships at the moment, but the token/HTTP/event helpers mirror the TypeScript SDK exactly.
 
 ---
 
@@ -103,9 +103,10 @@ Every directory, by language and purpose:
 | `cmd/agent-sidecar/` | Go | Per-pod native sidecar (`:8089`). Fetches the JWT-SVID, exchanges it for scoped OAuth tokens, and serves `/token` to the agent |
 | `cmd/sample-api/` | Go | Protected HTTP API (`GET /work`, `POST /task`). Validates OAuth 2.0 Bearer tokens and a SpiceDB `work_on` check. Deployed as `sample-api`, `sample-api-a`, `sample-api-b`, and `sample-api-global` (the last with `REQUIRE_TENANT=false`) |
 | `cmd/dashboard/` | Go + HTML | Web UI. Polls agents and events, chats with long-lived agents, kills/revokes/resumes agents (revoke cascades to the descendant subtree), renders parent→child chains as a nested tree, filters events per-agent; proxies all requests to the orchestrator |
-| `agents/` | TypeScript + Go | Agent workloads. TypeScript agents on the `@spawnly/sdk`: `weather-monitor` (chat + tool calls), `currency-converter`, `trip-planner`, `parent-agent`, `child-agent`, `global-worker`, `chain-worker` (deterministic, no-LLM self-spawning looping worker that demonstrates cascading revocation) — all on the Flue runtime; plus `pi-worker` (long-lived chat coding agent on the Pi harness — the first non-Flue agent, proving the contract is framework-agnostic); plus the Go `go-worker` (minimal short-lived reference workload, on `github.com/spawnly/sdk-go`) |
-| `sdks/typescript/` | TypeScript | The `@spawnly/sdk` package — token/HTTP/event helpers consumed by the TypeScript agents (Flue and Pi alike) |
-| `sdks/go/` | Go | The `github.com/spawnly/sdk-go` module — the same token/HTTP/event helpers for Go agents like `go-worker` |
+| `agents/` | TypeScript | Agent workloads on the `@spawnly/sdk`: `weather-monitor` (Flue chat + tool calls), `chain-worker` (deterministic, no-LLM self-spawning looping worker that demonstrates cascading revocation), and the consent-gated travel demo — `travel-planner` (fan-out orchestrator) plus the `travel-specialist`-image specialists `flight-search` / `hotel-search` / `fx-converter` (least-privilege MCP clients, each scoped to one travel-tools tool) |
+| `mcp/travel-tools/` | TypeScript | Scope-enforcing MCP server exposing `search_flights` / `search_hotels` / `convert_currency` to the travel specialists, backed by real upstream providers (Duffel / LiteAPI / Frankfurter) |
+| `sdks/typescript/` | TypeScript | The `@spawnly/sdk` package — token/HTTP/event helpers consumed by the TypeScript agents |
+| `sdks/go/` | Go | The `github.com/spawnly/sdk-go` module — the same token/HTTP/event helpers for Go agents (no example Go agent ships at the moment) |
 | `identityserver/` | C# (.NET) | Duende IdentityServer. Issues OAuth 2.0 access tokens; authenticates the sidecar via JWT-SVID `client_assertion` |
 | `internal/events/` | Go | Shared lifecycle event types and HTTP client used by all Go services |
 | `internal/operator/` | Go | Reconciler logic (separated from `cmd/operator/` for testability) |
@@ -159,7 +160,7 @@ The LLM-backed agents need a model provider key. Keys are configured **once, for
 
 2. `make bootstrap` reads `.env` and loads these values into a single Kubernetes Secret named `ai-provider`.
 
-3. At spawn time the operator injects that Secret into **every** agent pod as `AI_PROVIDER` / `AI_API_KEY` / `AI_MODEL` — so all agents share the same key, and switching providers is a one-line `.env` change plus a re-bootstrap. An agent template may pin a specific model via its own `envDefaults` (e.g. `pi-worker` pins `AI_MODEL=openai/gpt-4o`), which overrides the Secret's `AI_MODEL` for that agent — so make sure the configured key matches.
+3. At spawn time the operator injects that Secret into **every** agent pod as `AI_PROVIDER` / `AI_API_KEY` / `AI_MODEL` — so all agents share the same key, and switching providers is a one-line `.env` change plus a re-bootstrap. An agent template may pin a specific model via its own `envDefaults` (`AI_MODEL`), which overrides the Secret's `AI_MODEL` for that agent — so make sure the configured key matches.
 
 `.env` is gitignored; your key never leaves your machine and the cluster's Secret.
 
@@ -204,7 +205,7 @@ Open `http://localhost:8090` to watch events, spin up agents, and chat with long
 
 ## AI provider & chat
 
-LLM-backed agents read their config from the `ai-provider` Secret, injected by the operator as `AI_PROVIDER` / `AI_API_KEY` / `AI_MODEL`. Both OpenAI (`openai/gpt-4o`, …) and Anthropic (`anthropic/claude-sonnet-4-6`, …) are supported. (`pi-worker` reads the same env and feeds the key to Pi via its `AuthStorage` runtime override.)
+LLM-backed agents read their config from the `ai-provider` Secret, injected by the operator as `AI_PROVIDER` / `AI_API_KEY` / `AI_MODEL`. Both OpenAI (`openai/gpt-4o`, …) and Anthropic (`anthropic/claude-sonnet-4-6`, …) are supported.
 
 **Long-lived agents that declare `supportsChat: true` can be chatted with from the dashboard** (the 💬 Chat button). A message round-trips:
 
@@ -321,7 +322,7 @@ This runs fmt/vet, the provider's unit tests, its acceptance tests, and a seeded
 ```bash
 curl -X POST http://localhost:8080/spawn \
   -H 'Content-Type: application/json' \
-  -d '{"userId":"user-1","tenantId":"tenant-1","agentType":"worker","task":"hello"}'
+  -d '{"userId":"user-1","tenantId":"tenant-1","agentType":"chain-worker","task":"hello"}'
 ```
 
 ### Spawn a global (tenant-less) agent

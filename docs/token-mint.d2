@@ -17,13 +17,13 @@ api: "Sample API\n(resource server)" {
   style.stroke-dash: 2
 }
 
-agent -> sidecar: "getToken('sample-api-a:write')"
+agent -> sidecar: "getToken('sample-api-a:read')"
 sidecar -> spire: "FetchJWTSVID(aud = IS token URL)"
-spire -> sidecar: "JWT-SVID\nsub = spiffe://…/tenant-1/alice/global-worker/agent-id" {
+spire -> sidecar: "JWT-SVID\nsub = spiffe://…/tenant-1/alice/chain-worker/agent-id" {
   style.stroke-dash: 3
 }
 
-sidecar -> idsrv: "POST /connect/token\ngrant_type=client_credentials\nclient_id=global-worker\nclient_assertion=<SVID>\nscope=sample-api-a:write"
+sidecar -> idsrv: "POST /connect/token\ngrant_type=client_credentials\nclient_id=chain-worker\nclient_assertion=<SVID>\nscope=sample-api-a:read"
 
 idsrv -> idsrv: "SpireClientSecretValidator\nverify SVID against SPIRE JWKS\n→ authenticates the client"
 idsrv -> registry: "look up agent by id (from SVID sub)"

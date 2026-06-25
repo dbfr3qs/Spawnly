@@ -10,7 +10,7 @@ description: The full AgentTemplate schema field by field, which component consu
 >
 > **Schema source of truth:** [`internal/registry/types.go`](../../internal/registry/types.go)
 > (`AgentTemplate`). **Worked references:** the co-located `template.json` files
-> (e.g. [`agents/trip-planner/template.json`](../../agents/trip-planner/template.json)),
+> (e.g. [`agents/travel-planner/template.json`](../../agents/travel-planner/template.json)),
 > which [`scripts/seed.sh`](../../scripts/seed.sh) sweeps up.
 
 An **agent template** is the registry's description of an agent *type*: the image
@@ -141,10 +141,10 @@ Full treatment in [05 — Defining Policy](05-defining-policy.md#part-2--delegat
 ### 4. Register it
 
 The registry stores templates in memory. Save your template as a `template.json`
-**next to your agent** (`agents/report-builder/template.json`, or
-`agents/go-worker/template.json` for the Go worker) — [`scripts/seed.sh`](../../scripts/seed.sh)
-discovers every co-located `template.json` and POSTs it, so it survives a registry
-restart. Seed with:
+**next to your agent** (`agents/report-builder/template.json`; the real agents
+follow the same pattern, e.g. `agents/chain-worker/template.json`) —
+[`scripts/seed.sh`](../../scripts/seed.sh) discovers every co-located
+`template.json` and POSTs it, so it survives a registry restart. Seed with:
 
 ```bash
 make reseed        # runs scripts/seed.sh: sweeps up every template.json and POSTs it
@@ -259,8 +259,9 @@ What the platform expects of a template's `image`:
 - Built from a [`Dockerfile`](../../Dockerfile) target and loaded into Kind
   (`make kind-load`).
 - Node agents bundle the compiled `@spawnly/sdk` from the `build-ts-sdk`
-  stage (see the `weather-monitor` / `parent-agent` / `child-agent` stages); the
-  Go `go-worker` builds its own module in the `build-go-worker` stage.
+  stage (see the `weather-monitor` / `chain-worker` / `travel-planner` stages). A
+  Go agent would instead build its own module in a dedicated stage (the Go SDK
+  lives at [`sdks/go`](../../sdks/go)).
 - **Long-lived** agents must listen on **port 8080** — that's the `targetPort`
   of the generated `<AGENT_ID>-svc` Service.
 

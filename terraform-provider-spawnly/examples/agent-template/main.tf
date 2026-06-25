@@ -24,7 +24,7 @@ resource "spawnly_agent_template" "demo" {
   }
 
   runtime_spec {
-    image         = "agent-go-worker:latest"
+    image         = "agent-chain-worker:latest"
     lifecycle     = "short-lived"
     supports_chat = false
 

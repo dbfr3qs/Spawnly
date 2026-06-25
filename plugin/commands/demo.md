@@ -1,5 +1,5 @@
 ---
-description: Guided, narrated demo of Spawnly using the example agents — spawn, chains, revoke cascade, CIBA consent, handoff, tenancy
+description: Guided, narrated demo of Spawnly using the example agents — spawn, chains, revoke cascade, CIBA consent, least-privilege fan-out, tenancy
 argument-hint: "[1-5 | scenario name]"
 allowed-tools: Bash, Read
 ---
@@ -21,19 +21,23 @@ Requested scenario: **$ARGUMENTS** (empty = show the menu and let them choose).
 
 ## Scenario menu
 
-1. **Hello world** (`worker`) — spawn one agent; watch it get its SPIFFE
-   identity, mint a token, call the sample API, and complete. The token-minting
-   path, end to end.
+1. **Hello world** (`chain-worker`, one node) — spawn one agent; watch it get
+   its SPIFFE identity, mint a token, and call the sample API (`work_ok`). The
+   token-minting path, end to end. (It also spawns one child of its own type — a
+   natural lead-in to #2.)
 2. **Chains & real-time revocation** (`chain-worker`) — grow a 4-deep chain,
    revoke a middle node, watch its subtree flip to `work_denied` in real time
    while ancestors keep working, then resume.
 3. **Human-in-the-loop consent (CIBA)** (`chain-worker`) — the first spawned
    link waits for consent; approve it; deeper links auto-approve from the stored
    consent; then revoke the consent and watch the next spawn re-prompt.
-4. **Handoff / token-exchange** (`currency-converter`) — one agent type handing
-   scoped authority to another via token-exchange.
-5. **Tenancy** (`global-worker` vs a tenanted `worker`) — same code, tenant-
-   scoped vs. global SVID; show the differing SPIFFE IDs.
+4. **Least-privilege fan-out** (`travel-planner`) — one orchestrator fans out to
+   three specialists (`flight-search`, `hotel-search`, `fx-converter`), each a
+   separate consent prompt and each handed a token scoped to exactly one MCP
+   tool. Per-capability consent + attenuated authority across the agent boundary.
+5. **Tenancy** (`weather-monitor`, tenanted vs global) — same agent type spawned
+   with vs without a `tenantId`; show the differing SPIFFE IDs (the tenant
+   segment is present vs dropped).
 
 If `$ARGUMENTS` names/numbers a scenario, run it. Otherwise show this menu and
 ask which to run.

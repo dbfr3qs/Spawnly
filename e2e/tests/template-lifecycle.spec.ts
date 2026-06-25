@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import {
-  cloneGlobalWorkerTemplate,
+  cloneSampleTemplate,
   deleteTemplate,
   isTypeOffered,
   registerTemplate,
@@ -26,8 +26,8 @@ test.describe('template-lifecycle', () => {
   });
 
   test('register → disable → hide → unspawnable → delete', async ({ page, request }) => {
-    // 1. Register a fresh, schema-valid clone of the global-worker template.
-    await registerTemplate(request, cloneGlobalWorkerTemplate(TYPE));
+    // 1. Register a fresh, schema-valid clone of a real template.
+    await registerTemplate(request, cloneSampleTemplate(TYPE));
 
     // 2. It IS offered — proves it landed in GET /api/templates (active types).
     await page.goto('/');
