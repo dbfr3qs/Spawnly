@@ -17,12 +17,14 @@ type Client interface {
 	Complete(ctx context.Context, agentID string) error
 	Fail(ctx context.Context, agentID string) error
 	ListAgents(ctx context.Context) ([]AgentRecord, error)
+	GetAgent(ctx context.Context, id string) (AgentRecord, error)
 	ListEvents(ctx context.Context, agentID string) ([]events.Event, error)
 	PostEvent(ctx context.Context, agentID string, e events.Event) error
 	ListTemplates(ctx context.Context) ([]string, error)
 	DismissAgent(ctx context.Context, agentID string) error
 	PreRegisterAgent(ctx context.Context, r AgentRecord) error
 	CheckSpawnPolicy(ctx context.Context, parentID, childType string) (SpawnDecision, error)
+	Subtree(ctx context.Context, id, userId string) ([]string, error)
 }
 
 type HTTPClient struct {
@@ -83,6 +85,23 @@ func (c *HTTPClient) ListAgents(ctx context.Context) ([]AgentRecord, error) {
 	}
 	var agents []AgentRecord
 	return agents, json.NewDecoder(resp.Body).Decode(&agents)
+}
+
+func (c *HTTPClient) GetAgent(ctx context.Context, id string) (AgentRecord, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.base+"/v1/agents/"+id, nil)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return AgentRecord{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return AgentRecord{}, fmt.Errorf("agent %q not found", id)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return AgentRecord{}, fmt.Errorf("get agent: status %d", resp.StatusCode)
+	}
+	var a AgentRecord
+	return a, json.NewDecoder(resp.Body).Decode(&a)
 }
 
 func (c *HTTPClient) ListEvents(ctx context.Context, agentID string) ([]events.Event, error) {
@@ -159,6 +178,36 @@ func (c *HTTPClient) CheckSpawnPolicy(ctx context.Context, parentID, childType s
 	return d, json.NewDecoder(resp.Body).Decode(&d)
 }
 
+// Subtree returns the agent's id followed by all descendant ids (root-first),
+// regardless of their lifecycle status. An unknown id yields (nil, nil) so the
+// caller can distinguish "registry never heard of this id" (first-pass-empty →
+// 404) from a transport/registry error.
+func (c *HTTPClient) Subtree(ctx context.Context, id, userId string) ([]string, error) {
+	u := c.base + "/v1/agents/" + id + "/subtree"
+	if userId != "" {
+		u += "?userId=" + url.QueryEscape(userId)
+	}
+	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("subtree: status %d", resp.StatusCode)
+	}
+	var out struct {
+		Subtree []string `json:"subtree"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.Subtree, nil
+}
+
 func (c *HTTPClient) DismissAgent(ctx context.Context, agentID string) error {
 	req, _ := http.NewRequestWithContext(ctx, "POST", c.base+"/v1/agents/"+agentID+"/dismiss", nil)
 	resp, err := c.http.Do(req)
@@ -178,6 +227,7 @@ type Mock struct {
 	Completed  []string
 	Failed     []string
 	EventStore map[string][]events.Event
+	Subtrees   map[string][]string
 }
 
 func NewMock(templates map[string]AgentTemplate) *Mock {
@@ -209,6 +259,15 @@ func (m *Mock) ListAgents(_ context.Context) ([]AgentRecord, error) {
 	return m.Agents, nil
 }
 
+func (m *Mock) GetAgent(_ context.Context, id string) (AgentRecord, error) {
+	for _, a := range m.Agents {
+		if a.AgentID == id {
+			return a, nil
+		}
+	}
+	return AgentRecord{}, fmt.Errorf("agent %q not found", id)
+}
+
 func (m *Mock) ListEvents(_ context.Context, agentID string) ([]events.Event, error) {
 	return m.EventStore[agentID], nil
 }
@@ -228,6 +287,10 @@ func (m *Mock) ListTemplates(_ context.Context) ([]string, error) {
 
 func (m *Mock) DismissAgent(_ context.Context, agentID string) error {
 	return nil
+}
+
+func (m *Mock) Subtree(_ context.Context, id, _ string) ([]string, error) {
+	return m.Subtrees[id], nil
 }
 
 func (m *Mock) PreRegisterAgent(_ context.Context, r AgentRecord) error {

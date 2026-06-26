@@ -39,6 +39,9 @@ public static class Config
             // present a client-credentials token carrying this scope to call the
             // registry's consent endpoints when CONTROL_PLANE_AUTH=oidc.
             new ApiScope("registry.consent", "Registry consent broker"),
+            // Phase 0: an agent presents a token carrying this scope (audienced
+            // for the orchestrator) to authenticate POST /spawn.
+            new ApiScope("orchestrator:spawn", "Spawn child agents via the orchestrator"),
         };
 
     // ApiResources give the access token its audience (`aud`): the resource name is
@@ -65,6 +68,12 @@ public static class Config
             new ApiResource("registry", "Agent Registry")
             {
                 Scopes = { "registry.consent" },
+            },
+            // Gives a spawn token the audience the orchestrator validates
+            // ("orchestrator") when an agent calls POST /spawn.
+            new ApiResource("orchestrator", "Agent Orchestrator")
+            {
+                Scopes = { "orchestrator:spawn" },
             },
         };
 
@@ -174,6 +183,8 @@ public static class Config
                     // openid: CIBA is an OIDC authentication request.
                     "openid",
                     "sample-api-a:read",
+                    // Phase 0: authenticate POST /spawn for the next chain link.
+                    "orchestrator:spawn",
                 },
             },
             // The travel-planner orchestrator calls no protected resource itself (it
@@ -188,7 +199,8 @@ public static class Config
                 ClientSecrets = { new Secret("placeholder".Sha256()) },
                 AlwaysSendClientClaims = true,
                 ClientClaimsPrefix = "",
-                AllowedScopes = { "openid" },
+                // orchestrator:spawn: the planner spawns the three specialists.
+                AllowedScopes = { "openid", "orchestrator:spawn" },
             },
             // travel-tools specialists. Each is a least-privilege MCP-client agent
             // allowed EXACTLY ONE travel-tools scope (so its token can call only one
@@ -218,6 +230,9 @@ public static class Config
             AccessTokenLifetime = 120,
             CibaLifetime = 300,
             PollingInterval = 5,
-            AllowedScopes = { "openid", scope },
+            // orchestrator:spawn so any agent type minted via this factory can
+            // authenticate POST /spawn without a per-type IdP edit (a scope a
+            // client can't request just 400s at the sidecar).
+            AllowedScopes = { "openid", scope, "orchestrator:spawn" },
         };
 }

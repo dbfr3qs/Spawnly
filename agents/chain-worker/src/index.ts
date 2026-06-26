@@ -1,4 +1,4 @@
-import { TokenClient, tenantHeader, postEvent } from '@spawnly/sdk';
+import { TokenClient, tenantHeader, postEvent, spawn } from '@spawnly/sdk';
 
 // Identity and platform endpoints are injected by the operator (see
 // internal/operator/reconciler.go buildPod). The sidecar runs in the same pod
@@ -7,7 +7,6 @@ const agentId         = process.env.AGENT_ID         ?? 'unknown';
 const agentType       = process.env.AGENT_TYPE       ?? 'chain-worker';
 const parentId        = process.env.PARENT_ID        || '';
 const tenantId        = process.env.TENANT_ID        || undefined;
-const userId          = process.env.USER_ID          ?? 'user-1';
 const registryUrl     = process.env.REGISTRY_URL     ?? 'http://registry:8080';
 const orchestratorUrl = process.env.ORCHESTRATOR_URL ?? 'http://orchestrator:8080';
 const sidecarUrl      = process.env.SIDECAR_URL      ?? 'http://localhost:8089';
@@ -25,22 +24,19 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 // that denial is expected and just marks the end of the chain.
 async function spawnChild(): Promise<void> {
   try {
-    const res = await fetch(`${orchestratorUrl}/spawn`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agentType, tenantId, userId, parentId: agentId }),
-    });
-    if (res.ok) {
-      const data = (await res.json()) as { workloadName?: string };
-      console.log(`[chain-worker] spawned child ${data.workloadName}`);
-      await postEvent(registryUrl, agentId, 'child_spawned', { childId: data.workloadName });
-    } else if (res.status === 403) {
+    // The orchestrator derives userId/parentId/tenantId from our spawn token +
+    // the registry, so we only send agentType.
+    const r = await spawn(orchestratorUrl, tokens, agentType);
+    if (r.ok) {
+      console.log(`[chain-worker] spawned child ${r.workloadName}`);
+      await postEvent(registryUrl, agentId, 'child_spawned', { childId: r.workloadName });
+    } else if (r.status === 403) {
       // Depth cap reached — we are the last link in the chain.
       console.log('[chain-worker] depth cap reached; no child spawned');
-      await postEvent(registryUrl, agentId, 'chain_end', { reason: (await res.text()).trim() });
+      await postEvent(registryUrl, agentId, 'chain_end', { reason: r.body });
     } else {
-      console.warn(`[chain-worker] spawn failed: ${res.status}`);
-      await postEvent(registryUrl, agentId, 'child_spawn_error', { status: res.status, body: (await res.text()).trim() });
+      console.warn(`[chain-worker] spawn failed: ${r.status}`);
+      await postEvent(registryUrl, agentId, 'child_spawn_error', { status: r.status, body: r.body });
     }
   } catch (err) {
     console.error('[chain-worker] spawn child error:', err);

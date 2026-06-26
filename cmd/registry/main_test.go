@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -515,7 +516,7 @@ func TestRevoke_CleansNonTenantResourceType(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/proj-1/revoke", nil))
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/proj-1/revoke?userId=u1", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("revoke: got %d, want 200", rec.Code)
 	}
@@ -526,7 +527,7 @@ func TestRevoke_CleansNonTenantResourceType(t *testing.T) {
 	// ...but the project:acme template relation itself survives (only enabled
 	// toggled). Resume re-enables, and work_on returns — which is only possible
 	// if the non-"tenant" project relation was never deleted by revoke.
-	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/agents/proj-1/resume", nil))
+	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/agents/proj-1/resume?userId=u1", nil))
 	if ok, _ := sdb.CheckPermission(t.Context(), "project:acme", "work_on", "agent:proj-1"); !ok {
 		t.Fatal("expected work_on restored after resume (project relation must survive revoke)")
 	}
@@ -559,7 +560,7 @@ func TestResumeAfterTemplateDeleted(t *testing.T) {
 		t.Fatal("expected work_on after register")
 	}
 
-	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/agents/w-1/revoke", nil))
+	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/agents/w-1/revoke?userId=u1", nil))
 	if work() {
 		t.Fatal("expected work_on denied after revoke")
 	}
@@ -567,7 +568,7 @@ func TestResumeAfterTemplateDeleted(t *testing.T) {
 	// Delete the template entirely, then resume — must still re-enable.
 	delete(s.templates, "worker")
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/w-1/resume", nil))
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/w-1/resume?userId=u1", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("resume: got %d", rec.Code)
 	}
@@ -1122,7 +1123,7 @@ func TestRevokeResume_AuthZ(t *testing.T) {
 			{Resource: "tenant:{{tenant_id}}", Relation: "agent", Subject: "agent:{{agent_id}}"},
 		}},
 	})
-	s.registerAgent(registry.AgentRecord{AgentID: "agent-test", AgentType: "worker", TenantID: "tenant-1", Status: "active"})
+	s.registerAgent(registry.AgentRecord{AgentID: "agent-test", AgentType: "worker", TenantID: "tenant-1", UserID: "alice", Status: "active"})
 	sdb := spicedb.NewMock()
 	sdb.WriteRelationship(t.Context(), "tenant:tenant-1", "agent", "agent:agent-test")
 	validator := &spiffe.MockSVIDValidator{}
@@ -1130,7 +1131,7 @@ func TestRevokeResume_AuthZ(t *testing.T) {
 
 	// revoke: status -> revoked, tuple removed
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/agent-test/revoke", nil))
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/agent-test/revoke?userId=alice", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("revoke: got %d, want 200", rec.Code)
 	}
@@ -1143,7 +1144,7 @@ func TestRevokeResume_AuthZ(t *testing.T) {
 
 	// resume: status -> active, tuple restored from template
 	rec2 := httptest.NewRecorder()
-	mux.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/agents/agent-test/resume", nil))
+	mux.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/agents/agent-test/resume?userId=alice", nil))
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("resume: got %d, want 200", rec2.Code)
 	}
@@ -1156,7 +1157,7 @@ func TestRevokeResume_AuthZ(t *testing.T) {
 
 	// resume of an already-active agent -> 200, no-op (empty resumed list)
 	rec3 := httptest.NewRecorder()
-	mux.ServeHTTP(rec3, httptest.NewRequest("POST", "/v1/agents/agent-test/resume", nil))
+	mux.ServeHTTP(rec3, httptest.NewRequest("POST", "/v1/agents/agent-test/resume?userId=alice", nil))
 	if rec3.Code != http.StatusOK {
 		t.Fatalf("resume already-active: got %d, want 200", rec3.Code)
 	}
@@ -1170,7 +1171,7 @@ func TestRevokeResume_AuthZ(t *testing.T) {
 
 	// revoke unknown agent -> 404
 	rec4 := httptest.NewRecorder()
-	mux.ServeHTTP(rec4, httptest.NewRequest("POST", "/v1/agents/nope/revoke", nil))
+	mux.ServeHTTP(rec4, httptest.NewRequest("POST", "/v1/agents/nope/revoke?userId=alice", nil))
 	if rec4.Code != http.StatusNotFound {
 		t.Fatalf("revoke unknown: got %d, want 404", rec4.Code)
 	}
@@ -1194,7 +1195,7 @@ func TestRevokeResume_Cascade(t *testing.T) {
 		{"root", ""}, {"a", "root"}, {"b", "a"}, {"c", "b"}, {"other", ""},
 	}
 	for _, n := range chain {
-		s.registerAgent(registry.AgentRecord{AgentID: n.id, AgentType: "worker", TenantID: "tenant-1", Status: "active", ParentID: n.parent})
+		s.registerAgent(registry.AgentRecord{AgentID: n.id, AgentType: "worker", TenantID: "tenant-1", UserID: "alice", Status: "active", ParentID: n.parent})
 		sdb.WriteRelationship(t.Context(), "tenant:tenant-1", "agent", "agent:"+n.id)
 		sdb.WriteRelationship(t.Context(), "agent:"+n.id, "enabled", "agent:"+n.id)
 	}
@@ -1207,7 +1208,7 @@ func TestRevokeResume_Cascade(t *testing.T) {
 
 	// Revoke "a": expect a, b, c revoked; root and other untouched.
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/a/revoke", nil))
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/a/revoke?userId=alice", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("revoke: got %d, want 200", rec.Code)
 	}
@@ -1233,7 +1234,7 @@ func TestRevokeResume_Cascade(t *testing.T) {
 
 	// Resume "a": a and c restored; b stays failed (and gets no tuple back).
 	rec2 := httptest.NewRecorder()
-	mux.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/agents/a/resume", nil))
+	mux.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/agents/a/resume?userId=alice", nil))
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("resume: got %d, want 200", rec2.Code)
 	}
@@ -1271,7 +1272,7 @@ func TestRevokeCascade_PreservesTerminalDescendant(t *testing.T) {
 	for _, n := range []struct{ id, parent, status string }{
 		{"root", "", "active"}, {"a", "root", "active"}, {"c", "a", "completed"},
 	} {
-		s.registerAgent(registry.AgentRecord{AgentID: n.id, AgentType: "worker", TenantID: "tenant-1", Status: n.status, ParentID: n.parent})
+		s.registerAgent(registry.AgentRecord{AgentID: n.id, AgentType: "worker", TenantID: "tenant-1", UserID: "alice", Status: n.status, ParentID: n.parent})
 		if n.status == "active" {
 			sdb.WriteRelationship(t.Context(), "tenant:tenant-1", "agent", "agent:"+n.id)
 			sdb.WriteRelationship(t.Context(), "agent:"+n.id, "enabled", "agent:"+n.id)
@@ -1286,7 +1287,7 @@ func TestRevokeCascade_PreservesTerminalDescendant(t *testing.T) {
 	// Revoke root: only root and a are active, so only they are revoked. c stays
 	// completed and is absent from the revoked list.
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/root/revoke", nil))
+	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/root/revoke?userId=alice", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("revoke: got %d, want 200", rec.Code)
 	}
@@ -1303,7 +1304,7 @@ func TestRevokeCascade_PreservesTerminalDescendant(t *testing.T) {
 
 	// Resume root must not resurrect the completed node.
 	rec2 := httptest.NewRecorder()
-	mux.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/agents/root/resume", nil))
+	mux.ServeHTTP(rec2, httptest.NewRequest("POST", "/v1/agents/root/resume?userId=alice", nil))
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("resume: got %d, want 200", rec2.Code)
 	}
@@ -1533,5 +1534,217 @@ func TestConsentRevoke_ScopedToOwner(t *testing.T) {
 	}
 	if got := s.listConsents("alice"); len(got) != 1 || !got[0].Revoked {
 		t.Fatalf("owner revoke must mark the record revoked, got %+v", got)
+	}
+}
+
+// subtreeIDs drives GET /v1/agents/{id}/subtree and returns the decoded id list
+// plus the HTTP status code.
+func subtreeIDs(t *testing.T, mux http.Handler, id, userId string) ([]string, int) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/"+id+"/subtree?userId="+userId, nil))
+	if rec.Code != http.StatusOK {
+		return nil, rec.Code
+	}
+	var resp struct {
+		Subtree []string `json:"subtree"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode subtree response: %v", err)
+	}
+	return resp.Subtree, rec.Code
+}
+
+// TestSubtreeEndpoint exercises GET /v1/agents/{id}/subtree, the read side a
+// cascading delete consumes: the named agent plus every descendant reachable
+// through ParentID edges, root first.
+func TestSubtreeEndpoint(t *testing.T) {
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{}
+
+	// Linear chain: root -> a -> b -> c.
+	t.Run("linear chain", func(t *testing.T) {
+		s := newStore()
+		mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+		seed := func(id, parent string) {
+			s.registerAgent(registry.AgentRecord{AgentID: id, AgentType: "chain-worker", TenantID: "tenant-1", UserID: "alice", ParentID: parent})
+		}
+		for _, n := range []struct{ id, parent string }{{"root", ""}, {"a", "root"}, {"b", "a"}, {"c", "b"}} {
+			seed(n.id, n.parent)
+		}
+
+		if got, _ := subtreeIDs(t, mux, "root", "alice"); !slices.Equal(got, []string{"root", "a", "b", "c"}) {
+			t.Fatalf("subtree(root) = %v, want [root a b c]", got)
+		}
+		if got, _ := subtreeIDs(t, mux, "a", "alice"); !slices.Equal(got, []string{"a", "b", "c"}) {
+			t.Fatalf("subtree(a) = %v, want [a b c]", got)
+		}
+		if got, _ := subtreeIDs(t, mux, "c", "alice"); !slices.Equal(got, []string{"c"}) {
+			t.Fatalf("subtree(c) = %v, want [c]", got)
+		}
+	})
+
+	// Branching tree: root -> {x, y}, x -> x1. BFS sibling order between x and y
+	// is not guaranteed, so compare as a set — but the root must come first.
+	t.Run("branching tree", func(t *testing.T) {
+		s := newStore()
+		mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+		seed := func(id, parent string) {
+			s.registerAgent(registry.AgentRecord{AgentID: id, AgentType: "chain-worker", TenantID: "tenant-1", UserID: "alice", ParentID: parent})
+		}
+		for _, n := range []struct{ id, parent string }{{"root", ""}, {"x", "root"}, {"y", "root"}, {"x1", "x"}} {
+			seed(n.id, n.parent)
+		}
+
+		got, _ := subtreeIDs(t, mux, "root", "alice")
+		if len(got) == 0 || got[0] != "root" {
+			t.Fatalf("subtree(root) must have root first, got %v", got)
+		}
+		sorted := append([]string(nil), got...)
+		slices.Sort(sorted)
+		if !slices.Equal(sorted, []string{"root", "x", "x1", "y"}) {
+			t.Fatalf("subtree(root) set = %v, want {root x y x1}", got)
+		}
+	})
+
+	// Unknown id -> 404.
+	t.Run("unknown id", func(t *testing.T) {
+		s := newStore()
+		mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+		if _, code := subtreeIDs(t, mux, "nope", "alice"); code != http.StatusNotFound {
+			t.Fatalf("subtree(unknown) status = %d, want 404", code)
+		}
+	})
+
+	// A descendant whose status is terminal is still part of the delete set.
+	t.Run("terminal descendant still included", func(t *testing.T) {
+		s := newStore()
+		mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+		seed := func(id, parent string) {
+			s.registerAgent(registry.AgentRecord{AgentID: id, AgentType: "chain-worker", TenantID: "tenant-1", UserID: "alice", ParentID: parent})
+		}
+		seed("root", "")
+		seed("dead", "root")
+		if _, err := s.UpdateAgentStatus(context.Background(), "dead", "completed"); err != nil {
+			t.Fatalf("set terminal status: %v", err)
+		}
+
+		got, _ := subtreeIDs(t, mux, "root", "alice")
+		if !slices.Contains(got, "dead") {
+			t.Fatalf("terminal descendant must still appear in subtree, got %v", got)
+		}
+	})
+}
+
+// ownershipMux registers a single alice-owned active agent and returns the store
+// and mux. The agent type carries a tenant relation so revoke/resume have a tuple
+// to toggle.
+func ownershipMux(t *testing.T) (*store, http.Handler, *spicedb.Mock) {
+	t.Helper()
+	s := newStore()
+	s.putTemplate(registry.AgentTemplate{
+		AgentType: "worker",
+		AuthZ: registry.AuthZSpec{SpiceDBRelations: []registry.SpiceDBRelationTemplate{
+			{Resource: "tenant:{{tenant_id}}", Relation: "agent", Subject: "agent:{{agent_id}}"},
+		}},
+	})
+	s.registerAgent(registry.AgentRecord{AgentID: "alice-agent", AgentType: "worker", TenantID: "tenant-1", UserID: "alice", Status: "active"})
+	sdb := spicedb.NewMock()
+	sdb.WriteRelationship(t.Context(), "tenant:tenant-1", "agent", "agent:alice-agent")
+	sdb.WriteRelationship(t.Context(), "agent:alice-agent", "enabled", "agent:alice-agent")
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	return s, mux, sdb
+}
+
+// TestAgentOwnership_Revoke covers the ownership gate on the destructive
+// per-agent endpoints: only the owner (asserting ?userId=) may act; a non-owner
+// or a caller asserting no identity gets 404 and the action is a no-op.
+func TestAgentOwnership_Revoke(t *testing.T) {
+	t.Run("owner succeeds", func(t *testing.T) {
+		s, mux, _ := ownershipMux(t)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/alice-agent/revoke?userId=alice", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("owner revoke: got %d, want 200", rec.Code)
+		}
+		if s.getAgent("alice-agent").Status != "revoked" {
+			t.Fatal("owner revoke did not take effect")
+		}
+	})
+
+	t.Run("non-owner gets 404 and no effect", func(t *testing.T) {
+		s, mux, _ := ownershipMux(t)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/alice-agent/revoke?userId=mallory", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("non-owner revoke: got %d, want 404", rec.Code)
+		}
+		if s.getAgent("alice-agent").Status != "active" {
+			t.Fatalf("non-owner revoke must be a no-op, status=%q", s.getAgent("alice-agent").Status)
+		}
+	})
+
+	t.Run("missing userId gets 404 and no effect", func(t *testing.T) {
+		s, mux, _ := ownershipMux(t)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/alice-agent/revoke", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("anonymous revoke: got %d, want 404", rec.Code)
+		}
+		if s.getAgent("alice-agent").Status != "active" {
+			t.Fatalf("anonymous revoke must be a no-op, status=%q", s.getAgent("alice-agent").Status)
+		}
+	})
+}
+
+// TestAgentOwnership_Dismiss verifies the same gate on POST .../dismiss.
+func TestAgentOwnership_Dismiss(t *testing.T) {
+	t.Run("owner succeeds", func(t *testing.T) {
+		s, mux, _ := ownershipMux(t)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/alice-agent/dismiss?userId=alice", nil))
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("owner dismiss: got %d, want 204", rec.Code)
+		}
+		if !s.getAgent("alice-agent").Dismissed {
+			t.Fatal("owner dismiss did not take effect")
+		}
+	})
+
+	t.Run("non-owner gets 404 and no effect", func(t *testing.T) {
+		s, mux, _ := ownershipMux(t)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/alice-agent/dismiss?userId=mallory", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("non-owner dismiss: got %d, want 404", rec.Code)
+		}
+		if s.getAgent("alice-agent").Dismissed {
+			t.Fatal("non-owner dismiss must be a no-op")
+		}
+	})
+
+	t.Run("missing userId gets 404 and no effect", func(t *testing.T) {
+		s, mux, _ := ownershipMux(t)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/alice-agent/dismiss", nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("anonymous dismiss: got %d, want 404", rec.Code)
+		}
+		if s.getAgent("alice-agent").Dismissed {
+			t.Fatal("anonymous dismiss must be a no-op")
+		}
+	})
+}
+
+// TestAgentOwnership_Subtree verifies the read-side gate: the owner gets the
+// tree, a non-owner gets 404.
+func TestAgentOwnership_Subtree(t *testing.T) {
+	_, mux, _ := ownershipMux(t)
+
+	if got, code := subtreeIDs(t, mux, "alice-agent", "alice"); code != http.StatusOK || !slices.Equal(got, []string{"alice-agent"}) {
+		t.Fatalf("owner subtree: code=%d got=%v, want 200 [alice-agent]", code, got)
+	}
+	if _, code := subtreeIDs(t, mux, "alice-agent", "mallory"); code != http.StatusNotFound {
+		t.Fatalf("non-owner subtree: got %d, want 404", code)
 	}
 }

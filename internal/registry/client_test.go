@@ -49,6 +49,37 @@ func TestHTTPClientGetTemplateNotFound(t *testing.T) {
 	}
 }
 
+func TestHTTPClientGetAgent(t *testing.T) {
+	rec := registry.AgentRecord{
+		AgentID:  "parent-1",
+		UserID:   "alice",
+		TenantID: "t1",
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/agents/parent-1" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(rec)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	client := registry.New(srv.URL)
+
+	got, err := client.GetAgent(context.Background(), "parent-1")
+	if err != nil {
+		t.Fatalf("GetAgent(parent-1): %v", err)
+	}
+	if got.UserID != "alice" || got.TenantID != "t1" {
+		t.Errorf("got %+v, want userId=alice tenantId=t1", got)
+	}
+
+	if _, err := client.GetAgent(context.Background(), "ghost"); err == nil {
+		t.Fatal("expected error for unknown agent")
+	}
+}
+
 func TestHTTPClientCheckSpawnPolicy(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/spawn-policy" {
@@ -70,6 +101,43 @@ func TestHTTPClientCheckSpawnPolicy(t *testing.T) {
 	}
 	if d, err := client.CheckSpawnPolicy(context.Background(), "parent-1", "other"); err != nil || d.Allowed {
 		t.Fatalf("denied case: err=%v, decision=%+v", err, d)
+	}
+}
+
+func TestHTTPClientSubtree(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/agents/root/subtree" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string][]string{"subtree": {"root", "a", "b"}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	client := registry.New(srv.URL)
+
+	got, err := client.Subtree(context.Background(), "root", "alice")
+	if err != nil {
+		t.Fatalf("Subtree(root): %v", err)
+	}
+	want := []string{"root", "a", "b"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+
+	// Unknown id → (nil, nil), not an error.
+	got, err = client.Subtree(context.Background(), "ghost", "alice")
+	if err != nil {
+		t.Fatalf("Subtree(ghost): unexpected error %v", err)
+	}
+	if got != nil {
+		t.Fatalf("Subtree(ghost): expected nil, got %v", got)
 	}
 }
 

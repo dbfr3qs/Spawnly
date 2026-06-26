@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -31,7 +33,13 @@ import (
 	"github.com/spawnly/platform/internal/events"
 	"github.com/spawnly/platform/internal/registry"
 	"github.com/spawnly/platform/internal/spicedb"
+	"github.com/spawnly/platform/internal/tokenvalidator"
 )
+
+// cascadeSettleDelay is the pause between cascade sweeps, giving any child spawn
+// that was in flight during a sweep time to register before the next snapshot.
+// Tests set it to 0.
+var cascadeSettleDelay = 300 * time.Millisecond
 
 type SpawnRequest struct {
 	AgentType string `json:"agentType"`
@@ -127,7 +135,18 @@ func isContainerNotReadyErr(err error) bool {
 	return false
 }
 
-func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Client, registryURL string) *http.ServeMux {
+// ownsAgent reports whether userId owns the agent (its registry record's
+// UserID). Empty userId never owns. Used to gate the read/interact endpoints
+// the orchestrator fronts directly.
+func ownsAgent(ctx context.Context, regClient registry.Client, id, userId string) bool {
+	if userId == "" {
+		return false
+	}
+	rec, err := regClient.GetAgent(ctx, id)
+	return err == nil && rec.UserID == userId
+}
+
+func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Client, registryURL string, spawnValidator tokenvalidator.TokenValidator, spawnAudience, spawnScope, controlPlaneToken string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	regClient := registry.New(registryURL)
@@ -139,6 +158,96 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		// Two authenticated paths derive the spawn's authority; the body is never
+		// trusted for who/where except as noted.
+		//
+		//   Agent path (Authorization header present): validate the agent's ACT-AS
+		//   access token with the same tokenvalidator the resource servers use. The
+		//   token's `sub` is the human owner ("user:<userId>", authoritative) and its
+		//   outermost `act.sub` is the acting agent's SPIFFE URI (ActingAgentName is
+		//   the bare parent agent id). The child's userId/parentId come from those
+		//   claims and its tenantId from the PARENT's registry record — body
+		//   userId/parentId/tenantId are ignored, so an agent can't forge who it
+		//   spawns for or graft the child elsewhere. Audience + scope are enforced so
+		//   a token minted for another resource server (e.g. sample-api) can't be
+		//   replayed at /spawn.
+		//
+		//   Dashboard path (no Authorization header): authenticate via a SEPARATE
+		//   X-Control-Plane-Token header (not Authorization — that key drives the
+		//   agent path, so sharing it would let an attacker bypass the JWT by simply
+		//   omitting the token). The body userId is trusted (the dashboard injects the
+		//   session user), but parentId is rejected — human spawns are top-level only.
+		//   An empty controlPlaneToken is the demo/none tier: the dashboard path runs
+		//   open.
+		if r.Header.Get("Authorization") != "" {
+			rawToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if rawToken == "" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			claims, err := spawnValidator.ValidateAccessToken(r.Context(), rawToken)
+			if err != nil {
+				log.Printf("spawn: token validation failed: %v", err)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			// Reject delegation-only tokens and tokens minted for a different audience
+			// (the cross-audience-replay defense).
+			if claims.TokenUse == "delegation" {
+				log.Printf("spawn: rejecting token_use=delegation")
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if !claims.HasAudience(spawnAudience) {
+				log.Printf("spawn: rejecting token: aud %v does not contain %q", claims.Audience, spawnAudience)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if !claims.HasScope(spawnScope) {
+				log.Printf("spawn: rejecting token: missing scope %q (have %v)", spawnScope, claims.Scopes)
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			userID := strings.TrimPrefix(claims.User, "user:")
+			if userID == "" {
+				log.Printf("spawn: token has no user subject")
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			parentID := claims.ActingAgentName
+			if parentID == "" {
+				log.Printf("spawn: token has no acting agent")
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			parent, err := regClient.GetAgent(r.Context(), parentID)
+			if err != nil {
+				log.Printf("spawn: unknown parent agent %s: %v", parentID, err)
+				http.Error(w, "unknown parent agent", http.StatusForbidden)
+				return
+			}
+			req.UserID = userID
+			req.ParentID = parentID
+			req.TenantID = parent.TenantID
+		} else {
+			if controlPlaneToken != "" {
+				got := r.Header.Get("X-Control-Plane-Token")
+				if subtle.ConstantTimeCompare([]byte(got), []byte(controlPlaneToken)) != 1 {
+					log.Printf("spawn: invalid control-plane token on dashboard spawn")
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+			}
+			// controlPlaneToken == "" means the demo/none tier — dashboard path open.
+			if req.ParentID != "" {
+				http.Error(w, "parentId not allowed on dashboard spawn", http.StatusBadRequest)
+				return
+			}
+			// req.UserID is trusted here (dashboard injected it from the session);
+			// the existing "userId required" check below still applies.
+		}
+
 		if req.UserID == "" {
 			http.Error(w, "userId is required", http.StatusBadRequest)
 			return
@@ -266,12 +375,29 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			http.Error(w, "registry unavailable", http.StatusBadGateway)
 			return
 		}
+		// Ownership scoping: when the caller supplies a userId (the dashboard
+		// injects the session user), only return that user's agents so one user
+		// can't enumerate another's. Empty userId is internal/back-compat and
+		// returns everything.
+		if userId := r.URL.Query().Get("userId"); userId != "" {
+			owned := make([]registry.AgentRecord, 0, len(agents))
+			for _, a := range agents {
+				if a.UserID == userId {
+					owned = append(owned, a)
+				}
+			}
+			agents = owned
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(agents)
 	})
 
 	mux.HandleFunc("GET /v1/agents/{id}/events", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
+		if !ownsAgent(r.Context(), regClient, id, r.URL.Query().Get("userId")) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 		evts, err := regClient.ListEvents(r.Context(), id)
 		if err != nil {
 			http.Error(w, "registry unavailable", http.StatusBadGateway)
@@ -283,6 +409,10 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	mux.HandleFunc("GET /v1/agents/{id}/logs", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
+		if !ownsAgent(r.Context(), regClient, id, r.URL.Query().Get("userId")) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 
 		container := r.URL.Query().Get("container")
 		if container == "" {
@@ -377,25 +507,103 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		json.NewEncoder(w).Encode(resp)
 	})
 
+	// DELETE /v1/agents/{id} tears down an agent AND its entire descendant
+	// subtree (the pods). It asks the registry for the subtree (root-first) and
+	// deletes each AgentWorkload CR; deleting a CR kills its pod via owner-ref GC
+	// and stops that node from spawning more children.
+	//
+	// We sweep in a settle-loop rather than deleting one snapshot once. chain
+	// agents self-spawn at every level (~every 3s), so a child can be born during
+	// the cascade and won't appear in the first snapshot. We re-fetch the subtree
+	// and re-delete until a pass deletes zero LIVE CRs (every Delete returned
+	// NotFound), which means no live pod remains to spawn anything new.
+	//
+	// The termination condition is "deleted zero live CRs", NOT "subtree is
+	// empty": the operator's deletion finalizer only marks each registry record
+	// Completed/Failed — it does not remove the record — and subtree() returns
+	// descendants regardless of status. So the subtree does NOT shrink as we
+	// delete CRs; an "empty subtree" loop would never terminate.
+	//
+	// Status codes: 204 success, 207 if some node deletes errored (non-NotFound),
+	// 404 if the registry never heard of the id (first pass empty), 502 if the
+	// registry is unavailable on the first pass.
 	mux.HandleFunc("DELETE /v1/agents/{id}", func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		id := r.PathValue("id")
-		aw := &agentv1alpha1.AgentWorkload{}
-		aw.Name = id
-		aw.Namespace = "default"
-		if err := k8s.Delete(r.Context(), aw); err != nil {
-			if apierrors.IsNotFound(err) {
-				http.Error(w, "not found", http.StatusNotFound)
-				return
+		userID := r.URL.Query().Get("userId")
+		const maxPasses = 8
+		deleted := 0
+		failedSet := map[string]bool{} // node ids whose delete errored (non-NotFound)
+
+		for pass := 0; pass < maxPasses; pass++ {
+			nodes, err := regClient.Subtree(ctx, id, userID)
+			if err != nil {
+				if pass == 0 {
+					http.Error(w, "registry unavailable", http.StatusBadGateway)
+					return
+				}
+				break // already made progress; stop sweeping
 			}
-			http.Error(w, "delete failed", http.StatusInternalServerError)
+			if len(nodes) == 0 {
+				if pass == 0 {
+					http.Error(w, "not found", http.StatusNotFound)
+					return
+				}
+				break
+			}
+
+			deletedThisPass := 0
+			for _, nid := range nodes {
+				aw := &agentv1alpha1.AgentWorkload{}
+				aw.Name = nid
+				aw.Namespace = "default"
+				if err := k8s.Delete(ctx, aw); err != nil {
+					if apierrors.IsNotFound(err) {
+						continue // already gone — normal on re-sweep
+					}
+					failedSet[nid] = true
+					continue
+				}
+				deletedThisPass++
+				deleted++
+			}
+
+			if deletedThisPass == 0 {
+				break // converged: nothing live left to delete or spawn
+			}
+			if pass < maxPasses-1 {
+				// Settle pause so in-flight child spawns register before the next
+				// sweep. Abort if the caller has gone away rather than hold a
+				// goroutine sleeping for a disconnected request.
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(cascadeSettleDelay):
+				}
+			}
+		}
+
+		if len(failedSet) > 0 {
+			failed := make([]string, 0, len(failedSet))
+			for nid := range failedSet {
+				failed = append(failed, nid)
+			}
+			sort.Strings(failed)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusMultiStatus) // 207
+			json.NewEncoder(w).Encode(map[string]any{"deleted": deleted, "failed": failed})
 			return
 		}
-		w.WriteHeader(http.StatusNoContent)
+		w.WriteHeader(http.StatusNoContent) // 204
 	})
 
 	mux.HandleFunc("POST /v1/agents/{id}/dismiss", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		req2, err := http.NewRequestWithContext(r.Context(), "POST", registryURL+"/v1/agents/"+id+"/dismiss", nil)
+		target := registryURL + "/v1/agents/" + id + "/dismiss"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		req2, err := http.NewRequestWithContext(r.Context(), "POST", target, nil)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -459,10 +667,10 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	// revoke/resume are cascading authorization actions owned by the registry.
 	mux.HandleFunc("POST /v1/agents/{id}/revoke", forwardToRegistry("POST", func(r *http.Request) string {
-		return "/v1/agents/" + r.PathValue("id") + "/revoke"
+		return withQuery("/v1/agents/"+r.PathValue("id")+"/revoke", r)
 	}))
 	mux.HandleFunc("POST /v1/agents/{id}/resume", forwardToRegistry("POST", func(r *http.Request) string {
-		return "/v1/agents/" + r.PathValue("id") + "/resume"
+		return withQuery("/v1/agents/"+r.PathValue("id")+"/resume", r)
 	}))
 
 	mux.HandleFunc("GET /v1/templates", forwardToRegistry("GET", func(*http.Request) string {
@@ -507,6 +715,10 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	mux.HandleFunc("POST /v1/agents/{id}/message", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
+		if !ownsAgent(r.Context(), regClient, id, r.URL.Query().Get("userId")) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -606,6 +818,38 @@ func controlPlaneBearerSource() func() string {
 	}
 }
 
+// getEnv returns the value of the environment variable named by key, or def if
+// the variable is unset or empty.
+func getEnv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// buildSpawnValidator constructs the access-token validator used on the agent
+// spawn path — the SAME tokenvalidator the resource servers (sample-api) use, so
+// the agent's ACT-AS token is validated identically. tokenvalidator.New fetches
+// the IdP JWKS at construction and returns an error if the IdP isn't reachable
+// yet, so — like waitForRegistrySchema — we retry every 3s: in a fresh cluster
+// the orchestrator and IdP start together and the orchestrator has nothing to do
+// until the IdP can validate spawn tokens. Note the fetch uses the default HTTP
+// client (no timeout), so a hung socket or a permanently-misconfigured
+// IS_JWKS_URL blocks startup (logged each attempt) rather than crash-looping.
+func buildSpawnValidator(ctx context.Context) tokenvalidator.TokenValidator {
+	issuer := getEnv("IS_ISSUER", "http://identity-server")
+	jwksURL := getEnv("IS_JWKS_URL", "http://identity-server/.well-known/openid-configuration/jwks")
+	for attempt := 1; ; attempt++ {
+		v, err := tokenvalidator.New(ctx, issuer, jwksURL)
+		if err == nil {
+			log.Printf("spawn token validator ready after %d attempt(s)", attempt)
+			return v
+		}
+		log.Printf("waiting for spawn token validator JWKS (attempt %d): %v", attempt, err)
+		time.Sleep(3 * time.Second)
+	}
+}
+
 // waitForRegistrySchema blocks until the registry's GET /v1/schema returns 200,
 // i.e. the registry has applied the SpiceDB schema (Phase 2). It logs and
 // retries indefinitely rather than failing fast: in a fresh cluster the registry
@@ -671,7 +915,20 @@ func main() {
 	// can't hit SpiceDB before any schema exists.
 	waitForRegistrySchema(registryURL)
 
-	mux := buildMux(k8s, clientset, sdb, registryURL)
+	// Inbound spawn auth: the agent path validates the agent's ACT-AS access
+	// token (waits for the IdP's JWKS) and enforces audience + scope; the
+	// dashboard path authenticates via a separate X-Control-Plane-Token header.
+	// An empty token (CONTROL_PLANE_AUTH != shared-secret) runs the dashboard path
+	// open (demo/none tier).
+	spawnValidator := buildSpawnValidator(context.Background())
+	spawnAudience := getEnv("SPAWN_OIDC_AUDIENCE", "orchestrator")
+	spawnScope := getEnv("SPAWN_SCOPE", "orchestrator:spawn")
+	controlPlaneToken := ""
+	if os.Getenv("CONTROL_PLANE_AUTH") == "shared-secret" {
+		controlPlaneToken = os.Getenv("CONTROL_PLANE_TOKEN")
+	}
+
+	mux := buildMux(k8s, clientset, sdb, registryURL, spawnValidator, spawnAudience, spawnScope, controlPlaneToken)
 	log.Println("orchestrator listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))
 }
