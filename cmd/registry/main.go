@@ -1064,6 +1064,23 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		json.NewEncoder(w).Encode(map[string]any{"resumed": resumed})
 	})
 
+	// Subtree is the read side of the cascade family: it returns the named agent
+	// plus its entire descendant subtree (everything it spawned, transitively),
+	// root first followed by a breadth-first walk — exactly the set a cascading
+	// delete will operate on. It is read-only and storage-agnostic; the actual
+	// cascading delete is owned by the orchestrator, which holds the k8s client
+	// needed to tear pods down, and consumes this endpoint to learn what to delete.
+	// Like its revoke/resume siblings it is a plain handler (no control-plane auth).
+	mux.HandleFunc("GET /v1/agents/{id}/subtree", func(w http.ResponseWriter, r *http.Request) {
+		nodes := subtree(r.Context(), s, r.PathValue("id"))
+		if nodes == nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"subtree": nodes})
+	})
+
 	// Delegation policy decision for parentType delegating to childType.
 	// Always returns HTTP 200 — a missing/unconfigured parent template yields allowed:false.
 	mux.HandleFunc("GET /v1/delegation-policy", func(w http.ResponseWriter, r *http.Request) {

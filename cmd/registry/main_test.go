@@ -3,6 +3,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -1534,4 +1535,103 @@ func TestConsentRevoke_ScopedToOwner(t *testing.T) {
 	if got := s.listConsents("alice"); len(got) != 1 || !got[0].Revoked {
 		t.Fatalf("owner revoke must mark the record revoked, got %+v", got)
 	}
+}
+
+// subtreeIDs drives GET /v1/agents/{id}/subtree and returns the decoded id list
+// plus the HTTP status code.
+func subtreeIDs(t *testing.T, mux http.Handler, id string) ([]string, int) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/"+id+"/subtree", nil))
+	if rec.Code != http.StatusOK {
+		return nil, rec.Code
+	}
+	var resp struct {
+		Subtree []string `json:"subtree"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode subtree response: %v", err)
+	}
+	return resp.Subtree, rec.Code
+}
+
+// TestSubtreeEndpoint exercises GET /v1/agents/{id}/subtree, the read side a
+// cascading delete consumes: the named agent plus every descendant reachable
+// through ParentID edges, root first.
+func TestSubtreeEndpoint(t *testing.T) {
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{}
+
+	// Linear chain: root -> a -> b -> c.
+	t.Run("linear chain", func(t *testing.T) {
+		s := newStore()
+		mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+		seed := func(id, parent string) {
+			s.registerAgent(registry.AgentRecord{AgentID: id, AgentType: "chain-worker", TenantID: "tenant-1", ParentID: parent})
+		}
+		for _, n := range []struct{ id, parent string }{{"root", ""}, {"a", "root"}, {"b", "a"}, {"c", "b"}} {
+			seed(n.id, n.parent)
+		}
+
+		if got, _ := subtreeIDs(t, mux, "root"); !slices.Equal(got, []string{"root", "a", "b", "c"}) {
+			t.Fatalf("subtree(root) = %v, want [root a b c]", got)
+		}
+		if got, _ := subtreeIDs(t, mux, "a"); !slices.Equal(got, []string{"a", "b", "c"}) {
+			t.Fatalf("subtree(a) = %v, want [a b c]", got)
+		}
+		if got, _ := subtreeIDs(t, mux, "c"); !slices.Equal(got, []string{"c"}) {
+			t.Fatalf("subtree(c) = %v, want [c]", got)
+		}
+	})
+
+	// Branching tree: root -> {x, y}, x -> x1. BFS sibling order between x and y
+	// is not guaranteed, so compare as a set — but the root must come first.
+	t.Run("branching tree", func(t *testing.T) {
+		s := newStore()
+		mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+		seed := func(id, parent string) {
+			s.registerAgent(registry.AgentRecord{AgentID: id, AgentType: "chain-worker", TenantID: "tenant-1", ParentID: parent})
+		}
+		for _, n := range []struct{ id, parent string }{{"root", ""}, {"x", "root"}, {"y", "root"}, {"x1", "x"}} {
+			seed(n.id, n.parent)
+		}
+
+		got, _ := subtreeIDs(t, mux, "root")
+		if len(got) == 0 || got[0] != "root" {
+			t.Fatalf("subtree(root) must have root first, got %v", got)
+		}
+		sorted := append([]string(nil), got...)
+		slices.Sort(sorted)
+		if !slices.Equal(sorted, []string{"root", "x", "x1", "y"}) {
+			t.Fatalf("subtree(root) set = %v, want {root x y x1}", got)
+		}
+	})
+
+	// Unknown id -> 404.
+	t.Run("unknown id", func(t *testing.T) {
+		s := newStore()
+		mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+		if _, code := subtreeIDs(t, mux, "nope"); code != http.StatusNotFound {
+			t.Fatalf("subtree(unknown) status = %d, want 404", code)
+		}
+	})
+
+	// A descendant whose status is terminal is still part of the delete set.
+	t.Run("terminal descendant still included", func(t *testing.T) {
+		s := newStore()
+		mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+		seed := func(id, parent string) {
+			s.registerAgent(registry.AgentRecord{AgentID: id, AgentType: "chain-worker", TenantID: "tenant-1", ParentID: parent})
+		}
+		seed("root", "")
+		seed("dead", "root")
+		if _, err := s.UpdateAgentStatus(context.Background(), "dead", "completed"); err != nil {
+			t.Fatalf("set terminal status: %v", err)
+		}
+
+		got, _ := subtreeIDs(t, mux, "root")
+		if !slices.Contains(got, "dead") {
+			t.Fatalf("terminal descendant must still appear in subtree, got %v", got)
+		}
+	})
 }
