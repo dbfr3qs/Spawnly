@@ -487,6 +487,17 @@ func subtree(ctx context.Context, s registry.Store, id string) []string {
 	return out
 }
 
+// agentOwnedBy reports whether the agent exists and is owned by userId. Ownership
+// is the agent record's UserID. An empty userId never owns anything (so a caller
+// that asserts no identity is denied), and an unknown id reports exists=false.
+func agentOwnedBy(ctx context.Context, s registry.Store, id, userId string) (owned, exists bool) {
+	rec, _ := s.GetAgent(ctx, id)
+	if rec.AgentID == "" {
+		return false, false
+	}
+	return userId != "" && rec.UserID == userId, true
+}
+
 // depth returns how many agents are in the lineage from id up to the root,
 // counting id itself: a top-level agent is depth 1, its child depth 2, and so
 // on. Used to enforce a template's maxDepth at spawn time. Unknown ids are 0.
@@ -1007,6 +1018,12 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 
 	mux.HandleFunc("POST /v1/agents/{id}/dismiss", func(w http.ResponseWriter, r *http.Request) {
 		agentID := r.PathValue("id")
+		userId := r.URL.Query().Get("userId")
+		owned, exists := agentOwnedBy(r.Context(), s, agentID, userId)
+		if !exists || !owned {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 		ok, err := s.DismissAgent(r.Context(), agentID)
 		if storeErr(w, err) {
 			return
@@ -1027,7 +1044,14 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	// terminal status is preserved). The response lists only the nodes actually
 	// revoked. Revoking a leaf agent (no descendants) is the single-agent case.
 	mux.HandleFunc("POST /v1/agents/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
-		nodes := subtree(r.Context(), s, r.PathValue("id"))
+		id := r.PathValue("id")
+		userId := r.URL.Query().Get("userId")
+		owned, exists := agentOwnedBy(r.Context(), s, id, userId)
+		if !exists || !owned {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		nodes := subtree(r.Context(), s, id)
 		if nodes == nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -1049,7 +1073,14 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	// that exited on its own. Idempotent: resuming an already-active subtree is a
 	// no-op that returns an empty list.
 	mux.HandleFunc("POST /v1/agents/{id}/resume", func(w http.ResponseWriter, r *http.Request) {
-		nodes := subtree(r.Context(), s, r.PathValue("id"))
+		id := r.PathValue("id")
+		userId := r.URL.Query().Get("userId")
+		owned, exists := agentOwnedBy(r.Context(), s, id, userId)
+		if !exists || !owned {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		nodes := subtree(r.Context(), s, id)
 		if nodes == nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -1072,7 +1103,14 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	// needed to tear pods down, and consumes this endpoint to learn what to delete.
 	// Like its revoke/resume siblings it is a plain handler (no control-plane auth).
 	mux.HandleFunc("GET /v1/agents/{id}/subtree", func(w http.ResponseWriter, r *http.Request) {
-		nodes := subtree(r.Context(), s, r.PathValue("id"))
+		id := r.PathValue("id")
+		userId := r.URL.Query().Get("userId")
+		owned, exists := agentOwnedBy(r.Context(), s, id, userId)
+		if !exists || !owned {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		nodes := subtree(r.Context(), s, id)
 		if nodes == nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
