@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"time"
 )
 
 //go:embed static
@@ -250,7 +251,17 @@ func main() {
 		port = "8080"
 	}
 	log.Printf("dashboard listening on :%s (orchestrator: %s, oidc authority: %s)", port, orchestratorURL, authority)
-	log.Fatal(http.ListenAndServe(":"+port, mux))
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second, // Slowloris defense; no risk to legit responses.
+		ReadTimeout:       30 * time.Second, // request bodies are all small JSON.
+		IdleTimeout:       120 * time.Second,
+		// No WriteTimeout: the dashboard PROXIES the orchestrator's
+		// /v1/agents/{id}/logs and /v1/agents/{id}/message, which are
+		// legitimately long-lived; a write deadline would truncate them.
+	}
+	log.Fatal(srv.ListenAndServe())
 }
 
 // copyResponse copies an upstream response's status, headers, and body verbatim.

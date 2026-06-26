@@ -833,9 +833,10 @@ func getEnv(key, def string) string {
 // the IdP JWKS at construction and returns an error if the IdP isn't reachable
 // yet, so — like waitForRegistrySchema — we retry every 3s: in a fresh cluster
 // the orchestrator and IdP start together and the orchestrator has nothing to do
-// until the IdP can validate spawn tokens. Note the fetch uses the default HTTP
-// client (no timeout), so a hung socket or a permanently-misconfigured
-// IS_JWKS_URL blocks startup (logged each attempt) rather than crash-looping.
+// until the IdP can validate spawn tokens. The JWKS fetch is bounded (the
+// tokenvalidator uses a 10s HTTP client), so a hung socket or misconfigured
+// IS_JWKS_URL surfaces as a retryable error — the loop logs and retries every
+// 3s rather than blocking startup on a hung connection.
 func buildSpawnValidator(ctx context.Context) tokenvalidator.TokenValidator {
 	issuer := getEnv("IS_ISSUER", "http://identity-server")
 	jwksURL := getEnv("IS_JWKS_URL", "http://identity-server/.well-known/openid-configuration/jwks")
@@ -930,5 +931,15 @@ func main() {
 
 	mux := buildMux(k8s, clientset, sdb, registryURL, spawnValidator, spawnAudience, spawnScope, controlPlaneToken)
 	log.Println("orchestrator listening on :8080")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	srv := &http.Server{
+		Addr:              ":8080",
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second, // Slowloris defense; no risk to legit responses.
+		ReadTimeout:       30 * time.Second, // request bodies are all small JSON.
+		IdleTimeout:       120 * time.Second,
+		// No WriteTimeout: /v1/agents/{id}/logs (reads pod logs) and
+		// /v1/agents/{id}/message (forwards to an agent / slow LLM) are
+		// legitimately long-lived; a write deadline would truncate them.
+	}
+	log.Fatal(srv.ListenAndServe())
 }

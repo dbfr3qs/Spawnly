@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/spawnly/platform/internal/events"
 )
@@ -39,9 +40,13 @@ func New(baseURL string) *HTTPClient {
 // NewWithToken is New plus a control-plane bearer token. When token != "", every
 // outbound request carries "Authorization: Bearer <token>" — wired via a custom
 // RoundTripper so each method stays header-free. When token == "", it behaves
-// exactly like New (no Authorization header, default transport).
+// like New (no Authorization header, default transport).
+//
+// The client carries a 30s Timeout: every call is a short JSON round-trip
+// (registry GET/POST/PATCH); none stream, so a client-wide timeout is safe and
+// prevents a hung registry socket from blocking a caller forever.
 func NewWithToken(baseURL, token string) *HTTPClient {
-	hc := &http.Client{}
+	hc := &http.Client{Timeout: 30 * time.Second}
 	if token != "" {
 		hc.Transport = &bearerTransport{token: token, base: http.DefaultTransport}
 	}

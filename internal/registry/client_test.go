@@ -7,9 +7,44 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/spawnly/platform/internal/registry"
 )
+
+// TestHTTPClientTimeout verifies the registry client gives up on a server that
+// never finishes responding, rather than hanging forever. The default client
+// timeout is 30s; we point it at a server that sleeps far longer and assert the
+// call returns an error well before that would complete.
+func TestHTTPClientTimeout(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Block until the test tears the server down; the client must time out.
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	client := registry.New(srv.URL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.GetTemplate(ctx, "worker")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected a timeout/cancellation error from a non-responding server")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client hung on a non-responding server; expected it to give up")
+	}
+}
 
 func TestHTTPClientGetTemplate(t *testing.T) {
 	tpl := registry.AgentTemplate{

@@ -450,7 +450,13 @@ func run(ctx context.Context, cfg config) error {
 		})
 	})
 
-	srv := &http.Server{Addr: ":8089", Handler: mux}
+	srv := &http.Server{
+		Addr:              ":8089",
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second, // Slowloris defense; /token requests are short.
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 
 	go func() {
 		<-ctx.Done()

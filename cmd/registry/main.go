@@ -1682,7 +1682,17 @@ func main() {
 		s.setSchema(activeSchema, schemaVersion, schemaSource)
 	}
 	log.Printf("registry listening on :8080 (schema source=%s version=%s)", schemaSource, schemaVersion)
-	log.Fatal(http.ListenAndServe(":8080", buildMux(s, sdb, verifier, cpAuth)))
+	srv := &http.Server{
+		Addr:              ":8080",
+		Handler:           buildMux(s, sdb, verifier, cpAuth),
+		ReadHeaderTimeout: 10 * time.Second, // Slowloris defense; no risk to legit responses.
+		ReadTimeout:       30 * time.Second, // request bodies are all small JSON.
+		IdleTimeout:       120 * time.Second,
+		// No WriteTimeout: responses are short JSON, but the orchestrator and
+		// dashboard proxy long-lived endpoints, so we stay consistent and avoid
+		// truncating any forwarded long response.
+	}
+	log.Fatal(srv.ListenAndServe())
 }
 
 // buildControlPlaneAuth selects the consent-endpoint authenticator from
