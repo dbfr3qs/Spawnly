@@ -978,8 +978,31 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		json.NewEncoder(w).Encode(rec)
 	})
 
+	// PATCH /v1/agents/{id} — set an agent's lifecycle status. status=completed|failed
+	// triggers IRREVERSIBLE SpiceDB cleanup (deletes the agent's relations + its
+	// `enabled` tuple), so an unauthenticated cross-agent PATCH would destroy
+	// another agent's authority. This has two legitimate callers, so it uses DUAL
+	// AUTH: the operator's reconciler (Registry.Complete/Fail) authenticates as a
+	// control-plane caller and may set ANY agent's status; the agent's own sidecar
+	// (CIBA lifecycle: awaiting-consent/active/failed) presents its SVID and may
+	// set only its OWN status.
 	mux.HandleFunc("PATCH /v1/agents/", func(w http.ResponseWriter, r *http.Request) {
 		agentID := strings.TrimPrefix(r.URL.Path, "/v1/agents/")
+		// Authorize: a control-plane caller (the operator) may set ANY agent's
+		// status; otherwise the agent itself, proven by its SVID, may set only its
+		// OWN status. An unauthenticated caller is rejected — this is what stops a
+		// cross-agent completed/failed that would destroy another agent's
+		// authority. Under the AllowAll (demo) tier cpAuth passes for everyone,
+		// matching the open posture. The sidecar's `Authorization: Bearer <svid>`
+		// fails the control-plane bearer compare and falls through to SVID verify —
+		// no collision.
+		if _, err := cpAuth.Authenticate(r.Context(), r); err != nil {
+			id, verr := verifier.Verify(r.Context(), r)
+			if verr != nil || id.AgentID != agentID {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
 		var req struct {
 			Status string `json:"status"`
 		}
@@ -1659,7 +1682,17 @@ func main() {
 		s.setSchema(activeSchema, schemaVersion, schemaSource)
 	}
 	log.Printf("registry listening on :8080 (schema source=%s version=%s)", schemaSource, schemaVersion)
-	log.Fatal(http.ListenAndServe(":8080", buildMux(s, sdb, verifier, cpAuth)))
+	srv := &http.Server{
+		Addr:              ":8080",
+		Handler:           buildMux(s, sdb, verifier, cpAuth),
+		ReadHeaderTimeout: 10 * time.Second, // Slowloris defense; no risk to legit responses.
+		ReadTimeout:       30 * time.Second, // request bodies are all small JSON.
+		IdleTimeout:       120 * time.Second,
+		// No WriteTimeout: responses are short JSON, but the orchestrator and
+		// dashboard proxy long-lived endpoints, so we stay consistent and avoid
+		// truncating any forwarded long response.
+	}
+	log.Fatal(srv.ListenAndServe())
 }
 
 // buildControlPlaneAuth selects the consent-endpoint authenticator from

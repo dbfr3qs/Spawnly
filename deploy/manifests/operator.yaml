@@ -27,3 +27,22 @@ spec:
               value: "http://sample-api-a:8080"
             - name: ORCHESTRATOR_URL
               value: "http://orchestrator:8080"
+            # Control-plane auth the operator presents to the registry's
+            # PATCH /v1/agents/{id} status endpoint; must match the registry's
+            # setting. Both values come from the optional `control-plane-auth`
+            # Secret that bootstrap.sh generates (shared with the registry, so
+            # the tokens match by construction). Absent Secret → env unset →
+            # "none" (sends no credential, demo). The "oidc" tier would need a
+            # client-credentials token source (see orchestrator) and is a follow-up.
+            - name: CONTROL_PLANE_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-auth
+                  key: auth
+                  optional: true
+            - name: CONTROL_PLANE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-auth
+                  key: token
+                  optional: true

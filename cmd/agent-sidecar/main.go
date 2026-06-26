@@ -324,13 +324,13 @@ func run(ctx context.Context, cfg config) error {
 						Source: events.SourceAgent, Type: "consent_denied", Payload: payload,
 					})
 				}
-				if err := updateStatus(ctx, cfg.registryURL, agentID, "failed"); err != nil {
+				if err := updateStatus(ctx, cfg, agentID, "failed"); err != nil {
 					log.Printf("warn: mark failed: %v", err)
 				}
 			})
 		}
 
-		if err := updateStatus(ctx, cfg.registryURL, agentID, "awaiting-consent"); err != nil {
+		if err := updateStatus(ctx, cfg, agentID, "awaiting-consent"); err != nil {
 			log.Printf("warn: set awaiting-consent: %v", err)
 		}
 		postEvent(ctx, cfg.registryURL, agentID, events.Event{
@@ -348,7 +348,7 @@ func run(ctx context.Context, cfg config) error {
 				failConsent(err.Error())
 				return
 			}
-			if err := updateStatus(ctx, cfg.registryURL, agentID, "active"); err != nil {
+			if err := updateStatus(ctx, cfg, agentID, "active"); err != nil {
 				log.Printf("warn: set active: %v", err)
 			}
 			postEvent(ctx, cfg.registryURL, agentID, events.Event{
@@ -450,7 +450,13 @@ func run(ctx context.Context, cfg config) error {
 		})
 	})
 
-	srv := &http.Server{Addr: ":8089", Handler: mux}
+	srv := &http.Server{
+		Addr:              ":8089",
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second, // Slowloris defense; /token requests are short.
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 
 	go func() {
 		<-ctx.Done()

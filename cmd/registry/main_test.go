@@ -444,6 +444,90 @@ func TestAgentCompletion_DeletesSpiceDB(t *testing.T) {
 	}
 }
 
+// TestPatchAgentStatus_ControlPlaneAuth covers the control-plane path of the
+// dual-auth gate on PATCH /v1/agents/{id}: under a shared-secret authenticator an
+// unauthenticated PATCH is rejected (401, status unchanged), and a PATCH bearing
+// the control-plane token (the operator's path) succeeds (200, status updated).
+// Without this gate any in-cluster caller could PATCH another agent to completed
+// and trigger the irreversible SpiceDB cleanup.
+func TestPatchAgentStatus_ControlPlaneAuth(t *testing.T) {
+	s := newStore()
+	s.putTemplate(workerTemplate())
+	s.registerAgent(registry.AgentRecord{AgentID: "agent-test", AgentType: "worker", TenantID: "tenant-1", Status: "active"})
+	sdb := spicedb.NewMock()
+	// Validator returns an unrelated SVID id so the SVID-self branch never
+	// authorizes here — isolating the control-plane path under test.
+	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/someone-else"}
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.NewSharedSecret("tok"))
+
+	patchBody, _ := json.Marshal(map[string]string{"status": "completed"})
+
+	// No Authorization → 401, status unchanged.
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("PATCH", "/v1/agents/agent-test", bytes.NewReader(patchBody)))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated patch: got %d, want 401", rec.Code)
+	}
+	if got := s.getAgent("agent-test").Status; got != "active" {
+		t.Fatalf("status changed without auth: got %q, want active", got)
+	}
+
+	// Correct control-plane bearer → 200, status updated.
+	rec2 := httptest.NewRecorder()
+	req := httptest.NewRequest("PATCH", "/v1/agents/agent-test", bytes.NewReader(patchBody))
+	req.Header.Set("Authorization", "Bearer tok")
+	mux.ServeHTTP(rec2, req)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("control-plane patch: got %d, want 200", rec2.Code)
+	}
+	if got := s.getAgent("agent-test").Status; got != "completed" {
+		t.Fatalf("status not updated: got %q, want completed", got)
+	}
+}
+
+// TestPatchAgentStatus_SVIDSelf covers the agent-self path of the dual-auth gate:
+// an agent presenting its own SVID may PATCH only its OWN status (the sidecar's
+// CIBA lifecycle path), but the same SVID may not PATCH another agent's status.
+// The control-plane authenticator is shared-secret, so the SVID falls through to
+// the SVID-verify branch (its bearer fails the control-plane token compare).
+func TestPatchAgentStatus_SVIDSelf(t *testing.T) {
+	s := newStore()
+	s.putTemplate(workerTemplate())
+	s.registerAgent(registry.AgentRecord{AgentID: "agent-x", AgentType: "worker", TenantID: "tenant-1", Status: "awaiting-consent"})
+	s.registerAgent(registry.AgentRecord{AgentID: "other", AgentType: "worker", TenantID: "tenant-1", Status: "active"})
+	sdb := spicedb.NewMock()
+	// MockSVIDValidator returns this fixed SPIFFE id; the verifier derives
+	// AgentID = path.Base = "agent-x".
+	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/agent-x"}
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.NewSharedSecret("tok"))
+
+	patchBody, _ := json.Marshal(map[string]string{"status": "active"})
+
+	// SVID for agent-x patching ITS OWN status → 200.
+	rec := httptest.NewRecorder()
+	self := httptest.NewRequest("PATCH", "/v1/agents/agent-x", bytes.NewReader(patchBody))
+	self.Header.Set("Authorization", "Bearer agent-x-svid")
+	mux.ServeHTTP(rec, self)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("self patch: got %d, want 200", rec.Code)
+	}
+	if got := s.getAgent("agent-x").Status; got != "active" {
+		t.Fatalf("self status not updated: got %q, want active", got)
+	}
+
+	// Same SVID patching ANOTHER agent → 401, that agent's status unchanged.
+	rec2 := httptest.NewRecorder()
+	cross := httptest.NewRequest("PATCH", "/v1/agents/other", bytes.NewReader(patchBody))
+	cross.Header.Set("Authorization", "Bearer agent-x-svid")
+	mux.ServeHTTP(rec2, cross)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Fatalf("cross-agent patch: got %d, want 401", rec2.Code)
+	}
+	if got := s.getAgent("other").Status; got != "active" {
+		t.Fatalf("cross-agent patch changed other's status to %q", got)
+	}
+}
+
 func TestPostTemplate_RejectsSchemaMismatch(t *testing.T) {
 	s := newStore() // seeded with the embedded default schema (tenant/agent)
 	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())

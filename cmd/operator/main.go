@@ -92,7 +92,7 @@ func main() {
 	if err = (&operator.AgentWorkloadReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
-		Registry:         registry.New(registryURL),
+		Registry:         registry.NewWithToken(registryURL, controlPlaneToken()),
 		RegistryURL:      registryURL,
 		ISTokenURL:       isTokenURL,
 		SampleAPIURL:     sampleAPIURL,
@@ -129,4 +129,16 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// controlPlaneToken returns the bearer the operator presents to the registry's
+// control-plane endpoints (PATCH status), matching the registry's CONTROL_PLANE_AUTH.
+// Only the shared-secret tier is wired here; none/unset -> "" (open demo tier).
+// The oidc tier would need a client-credentials token source (like the
+// orchestrator's controlPlaneBearerSource) and is a follow-up.
+func controlPlaneToken() string {
+	if os.Getenv("CONTROL_PLANE_AUTH") == "shared-secret" {
+		return os.Getenv("CONTROL_PLANE_TOKEN")
+	}
+	return ""
 }

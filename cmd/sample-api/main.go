@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/spawnly/platform/internal/spicedb"
 	"github.com/spawnly/platform/internal/tokenvalidator"
@@ -207,5 +208,12 @@ func main() {
 	}
 
 	log.Printf("sample-api listening on :8080 (audience=%s, scopePrefix=%s, requireTenant=%t)", audience, scopePrefix, requireTenant)
-	log.Fatal(http.ListenAndServe(":8080", buildMux(sdb, validator, cfg)))
+	srv := &http.Server{
+		Addr:              ":8080",
+		Handler:           buildMux(sdb, validator, cfg),
+		ReadHeaderTimeout: 10 * time.Second, // Slowloris defense.
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	log.Fatal(srv.ListenAndServe())
 }

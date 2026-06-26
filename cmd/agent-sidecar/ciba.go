@@ -279,13 +279,23 @@ func (cs *cibaTokenSource) get(ctx context.Context) (string, int, error) {
 
 // updateStatus PATCHes the agent's registry record (e.g. awaiting-consent,
 // active, failed). Terminal statuses also drop SpiceDB authority registry-side.
-func updateStatus(ctx context.Context, registryURL, agentID, status string) error {
-	body, _ := json.Marshal(map[string]string{"status": status})
-	req, err := http.NewRequestWithContext(ctx, "PATCH",
-		registryURL+"/v1/agents/"+agentID, strings.NewReader(string(body)))
+//
+// The registry authorizes this PATCH via the agent's SVID (self-scope: an agent
+// may set only its OWN status). These calls happen AFTER the CIBA consent wait
+// (minutes later), so a startup SVID can be stale — fetch a FRESH credential per
+// call, exactly as run()/selfRegister authenticate to the registry.
+func updateStatus(ctx context.Context, cfg config, agentID, status string) error {
+	cred, err := cfg.source.Fetch(ctx, "registry")
 	if err != nil {
 		return err
 	}
+	body, _ := json.Marshal(map[string]string{"status": status})
+	req, err := http.NewRequestWithContext(ctx, "PATCH",
+		cfg.registryURL+"/v1/agents/"+agentID, strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+cred.Value)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

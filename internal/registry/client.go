@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/spawnly/platform/internal/events"
 )
@@ -33,7 +34,37 @@ type HTTPClient struct {
 }
 
 func New(baseURL string) *HTTPClient {
-	return &HTTPClient{base: baseURL, http: &http.Client{}}
+	return NewWithToken(baseURL, "")
+}
+
+// NewWithToken is New plus a control-plane bearer token. When token != "", every
+// outbound request carries "Authorization: Bearer <token>" — wired via a custom
+// RoundTripper so each method stays header-free. When token == "", it behaves
+// like New (no Authorization header, default transport).
+//
+// The client carries a 30s Timeout: every call is a short JSON round-trip
+// (registry GET/POST/PATCH); none stream, so a client-wide timeout is safe and
+// prevents a hung registry socket from blocking a caller forever.
+func NewWithToken(baseURL, token string) *HTTPClient {
+	hc := &http.Client{Timeout: 30 * time.Second}
+	if token != "" {
+		hc.Transport = &bearerTransport{token: token, base: http.DefaultTransport}
+	}
+	return &HTTPClient{base: baseURL, http: hc}
+}
+
+// bearerTransport sets a static Authorization header on every request before
+// delegating to the wrapped RoundTripper. It clones the request so it never
+// mutates a caller-owned *http.Request (RoundTripper contract).
+type bearerTransport struct {
+	token string
+	base  http.RoundTripper
+}
+
+func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r := req.Clone(req.Context())
+	r.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(r)
 }
 
 func (c *HTTPClient) GetTemplate(ctx context.Context, agentType string) (AgentTemplate, error) {

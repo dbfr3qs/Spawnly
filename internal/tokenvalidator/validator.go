@@ -4,8 +4,10 @@ package tokenvalidator
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
@@ -66,7 +68,10 @@ type JWKSValidator struct {
 
 func New(ctx context.Context, issuer, jwksURL string) (*JWKSValidator, error) {
 	cache := jwk.NewCache(ctx)
-	if err := cache.Register(jwksURL); err != nil {
+	// Bound both the initial fetch and background refreshes with a timeout-aware
+	// HTTP client; otherwise a hung IdP socket blocks forever (the orchestrator's
+	// buildSpawnValidator retry loop only recovers from errors, not a hang).
+	if err := cache.Register(jwksURL, jwk.WithHTTPClient(&http.Client{Timeout: 10 * time.Second})); err != nil {
 		return nil, err
 	}
 	if _, err := cache.Get(ctx, jwksURL); err != nil {
