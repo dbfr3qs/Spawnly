@@ -135,6 +135,17 @@ func isContainerNotReadyErr(err error) bool {
 	return false
 }
 
+// ownsAgent reports whether userId owns the agent (its registry record's
+// UserID). Empty userId never owns. Used to gate the read/interact endpoints
+// the orchestrator fronts directly.
+func ownsAgent(ctx context.Context, regClient registry.Client, id, userId string) bool {
+	if userId == "" {
+		return false
+	}
+	rec, err := regClient.GetAgent(ctx, id)
+	return err == nil && rec.UserID == userId
+}
+
 func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Client, registryURL string, spawnValidator tokenvalidator.TokenValidator, spawnAudience, spawnScope, controlPlaneToken string) *http.ServeMux {
 	mux := http.NewServeMux()
 
@@ -364,12 +375,29 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			http.Error(w, "registry unavailable", http.StatusBadGateway)
 			return
 		}
+		// Ownership scoping: when the caller supplies a userId (the dashboard
+		// injects the session user), only return that user's agents so one user
+		// can't enumerate another's. Empty userId is internal/back-compat and
+		// returns everything.
+		if userId := r.URL.Query().Get("userId"); userId != "" {
+			owned := make([]registry.AgentRecord, 0, len(agents))
+			for _, a := range agents {
+				if a.UserID == userId {
+					owned = append(owned, a)
+				}
+			}
+			agents = owned
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(agents)
 	})
 
 	mux.HandleFunc("GET /v1/agents/{id}/events", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
+		if !ownsAgent(r.Context(), regClient, id, r.URL.Query().Get("userId")) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 		evts, err := regClient.ListEvents(r.Context(), id)
 		if err != nil {
 			http.Error(w, "registry unavailable", http.StatusBadGateway)
@@ -381,6 +409,10 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	mux.HandleFunc("GET /v1/agents/{id}/logs", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
+		if !ownsAgent(r.Context(), regClient, id, r.URL.Query().Get("userId")) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 
 		container := r.URL.Query().Get("container")
 		if container == "" {
@@ -683,6 +715,10 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	mux.HandleFunc("POST /v1/agents/{id}/message", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
+		if !ownsAgent(r.Context(), regClient, id, r.URL.Query().Get("userId")) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {

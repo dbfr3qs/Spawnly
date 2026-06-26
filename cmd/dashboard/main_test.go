@@ -27,6 +27,31 @@ func TestAgentOpTargetEscapesID(t *testing.T) {
 	}
 }
 
+// TestLogsOpTargetCarriesUserAndParams asserts the logs target keeps the inbound
+// logs params, always carries the session userId (winning over any smuggled
+// value), and PathEscape's the id so a crafted id can't smuggle a userId.
+func TestLogsOpTargetCarriesUserAndParams(t *testing.T) {
+	q := url.Values{}
+	q.Set("container", "agent-sidecar")
+	q.Set("tailLines", "100")
+	q.Set("userId", "victim") // a smuggled inbound userId must be overwritten
+
+	got := logsOpTarget("http://orch", `realId?userId=victim`, "attacker", q)
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse %q: %v", got, err)
+	}
+	if u.Path != "/v1/agents/realId?userId=victim/logs" {
+		t.Fatalf("crafted id did not stay (escaped) in the path: path=%q", u.Path)
+	}
+	if u.Query().Get("userId") != "attacker" {
+		t.Fatalf("userId = %q, want session user \"attacker\"", u.Query().Get("userId"))
+	}
+	if u.Query().Get("container") != "agent-sidecar" || u.Query().Get("tailLines") != "100" {
+		t.Fatalf("logs params not carried through: query=%q", u.RawQuery)
+	}
+}
+
 func TestInjectUserID(t *testing.T) {
 	// A browser-supplied userId is overwritten with the authenticated user.
 	out, err := injectUserID([]byte(`{"agentType":"worker","userId":"evil","tenantId":"t1"}`), "alice")

@@ -102,7 +102,12 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"docsUrl": docsURL})
 	})))
-	mux.Handle("GET /api/agents", auth.require(proxy("GET", orchestratorURL+"/v1/agents")))
+	// List — inject the authenticated session user as userId so the orchestrator
+	// scopes the result to this user's agents (no cross-user enumeration).
+	mux.Handle("GET /api/agents", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, _ := auth.user(r) // require() guarantees a session
+		proxy("GET", orchestratorURL+"/v1/agents?userId="+url.QueryEscape(user))(w, r)
+	})))
 
 	// Spawn — inject the authenticated user's identity as userId so the human
 	// principal (not a browser-supplied value) flows into the agent's token sub.
@@ -141,17 +146,16 @@ func main() {
 
 	// For endpoints with path params, extract and forward
 	mux.Handle("GET /api/agents/{id}/events", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, _ := auth.user(r) // require() guarantees a session
 		id := r.PathValue("id")
-		proxy("GET", orchestratorURL+"/v1/agents/"+id+"/events")(w, r)
+		proxy("GET", agentOpTarget(orchestratorURL, id, "/events", user))(w, r)
 	})))
 	// Logs route — unlike the generic proxy, this MUST forward the inbound
 	// query string (container, sinceTime, tailLines) to the orchestrator.
 	mux.Handle("GET /api/agents/{id}/logs", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, _ := auth.user(r) // require() guarantees a session
 		id := r.PathValue("id")
-		target := orchestratorURL + "/v1/agents/" + id + "/logs"
-		if r.URL.RawQuery != "" {
-			target += "?" + r.URL.RawQuery
-		}
+		target := logsOpTarget(orchestratorURL, id, user, r.URL.Query())
 		req, err := http.NewRequestWithContext(r.Context(), "GET", target, nil)
 		if err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -172,8 +176,9 @@ func main() {
 		proxy("DELETE", agentOpTarget(orchestratorURL, id, "", user))(w, r)
 	})))
 	mux.Handle("POST /api/agents/{id}/message", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, _ := auth.user(r) // require() guarantees a session
 		id := r.PathValue("id")
-		proxy("POST", orchestratorURL+"/v1/agents/"+id+"/message")(w, r)
+		proxy("POST", agentOpTarget(orchestratorURL, id, "/message", user))(w, r)
 	})))
 	mux.Handle("POST /api/agents/{id}/dismiss", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, _ := auth.user(r) // require() guarantees a session
@@ -267,6 +272,16 @@ func copyResponse(w http.ResponseWriter, resp *http.Response) {
 // user via the trailing userId query.
 func agentOpTarget(base, id, suffix, user string) string {
 	return base + "/v1/agents/" + url.PathEscape(id) + suffix + "?userId=" + url.QueryEscape(user)
+}
+
+// logsOpTarget builds the orchestrator logs URL, carrying BOTH the inbound logs
+// params (container/sinceTime/tailLines, in q) AND the session userId so the
+// orchestrator can enforce ownership. Like agentOpTarget, the id is PathEscape'd
+// so a crafted id can't smuggle a different userId; userId is always Set last so
+// it wins over any inbound value.
+func logsOpTarget(base, id, user string, q url.Values) string {
+	q.Set("userId", user)
+	return base + "/v1/agents/" + url.PathEscape(id) + "/logs?" + q.Encode()
 }
 
 // injectUserID overwrites the spawn request's userId with the authenticated

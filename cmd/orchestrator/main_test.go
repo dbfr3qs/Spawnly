@@ -89,6 +89,15 @@ func defaultMockRegistry(t *testing.T) *httptest.Server {
 				UserID:    "alice",
 				TenantID:  "t1",
 			})
+		// Records backing the logs tests' ownership gate (owner=owner).
+		case r.Method == http.MethodGet && (r.URL.Path == "/v1/agents/agent-1a2b" || r.URL.Path == "/v1/agents/agent-zzzz"):
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(registry.AgentRecord{
+				AgentID:   strings.TrimPrefix(r.URL.Path, "/v1/agents/"),
+				AgentType: "worker",
+				UserID:    "owner",
+				TenantID:  "t1",
+			})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/spawn-policy":
 			w.Header().Set("Content-Type", "application/json")
 			if r.URL.Query().Get("childType") == "child-agent" {
@@ -901,7 +910,7 @@ func TestLogsInvalidContainerRejected(t *testing.T) {
 	sdb := spicedb.NewMock()
 	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
-	req := httptest.NewRequest("GET", "/v1/agents/agent-1a2b/logs?container=bogus", nil)
+	req := httptest.NewRequest("GET", "/v1/agents/agent-1a2b/logs?container=bogus&userId=owner", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -921,7 +930,7 @@ func TestLogsDefaultContainerAndWaitingState(t *testing.T) {
 	// "Pending" (no pod found), and return 200 (never 5xx).
 	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
-	req := httptest.NewRequest("GET", "/v1/agents/agent-1a2b/logs", nil)
+	req := httptest.NewRequest("GET", "/v1/agents/agent-1a2b/logs?userId=owner", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -987,7 +996,7 @@ func TestLogsResolvesPodNameFromStatusAndPhase(t *testing.T) {
 	sdb := spicedb.NewMock()
 	mux := buildMux(fakeClient, cs, sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
-	req := httptest.NewRequest("GET", "/v1/agents/agent-zzzz/logs", nil)
+	req := httptest.NewRequest("GET", "/v1/agents/agent-zzzz/logs?userId=owner", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -1238,5 +1247,181 @@ func TestDeleteCascadePartialFailure(t *testing.T) {
 	fakeClient.List(context.Background(), &list)
 	if len(list.Items) != 1 || list.Items[0].Name != "b" {
 		t.Fatalf("expected only b to remain, got %d items", len(list.Items))
+	}
+}
+
+// scopedMockRegistry serves the read/interact surface that Phase C gates:
+//   - GET /v1/agents              → a mix of alice- and bob-owned records
+//   - GET /v1/agents/parent-1     → alice-owned (reused from defaultMockRegistry)
+//   - GET /v1/agents/bob-1        → bob-owned
+//   - GET /v1/agents/{id}/events  → one event (only reached past the gate)
+func scopedMockRegistry(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]registry.AgentRecord{
+				{AgentID: "parent-1", AgentType: "parent-agent", UserID: "alice", TenantID: "t1"},
+				{AgentID: "bob-1", AgentType: "parent-agent", UserID: "bob", TenantID: "t2"},
+				{AgentID: "alice-2", AgentType: "child-agent", UserID: "alice", TenantID: "t1"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents/parent-1":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(registry.AgentRecord{
+				AgentID: "parent-1", AgentType: "parent-agent", UserID: "alice", TenantID: "t1",
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents/bob-1":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(registry.AgentRecord{
+				AgentID: "bob-1", AgentType: "parent-agent", UserID: "bob", TenantID: "t2",
+			})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/events"):
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[{"type":"spawned","message":"hi"}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func newScopedMux(t *testing.T, mockReg *httptest.Server) *http.ServeMux {
+	t.Helper()
+	sdb := &spicedb.Mock{}
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	return buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
+}
+
+func TestListAgentsScopedToUser(t *testing.T) {
+	mockReg := scopedMockRegistry(t)
+	defer mockReg.Close()
+	mux := newScopedMux(t, mockReg)
+
+	req := httptest.NewRequest("GET", "/v1/agents?userId=alice", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var got []registry.AgentRecord
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d records, want 2 (alice only)", len(got))
+	}
+	for _, a := range got {
+		if a.UserID != "alice" {
+			t.Errorf("leaked a %q-owned record: %s", a.UserID, a.AgentID)
+		}
+	}
+}
+
+func TestListAgentsNoMatchReturnsEmptyArray(t *testing.T) {
+	mockReg := scopedMockRegistry(t)
+	defer mockReg.Close()
+	mux := newScopedMux(t, mockReg)
+
+	req := httptest.NewRequest("GET", "/v1/agents?userId=carol", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	// Must be a JSON empty array, not null.
+	if body := strings.TrimSpace(rec.Body.String()); body != "[]" {
+		t.Errorf("body = %q, want []", body)
+	}
+}
+
+func TestListAgentsNoUserIdReturnsAll(t *testing.T) {
+	mockReg := scopedMockRegistry(t)
+	defer mockReg.Close()
+	mux := newScopedMux(t, mockReg)
+
+	req := httptest.NewRequest("GET", "/v1/agents", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	var got []registry.AgentRecord
+	json.NewDecoder(rec.Body).Decode(&got)
+	if len(got) != 3 {
+		t.Fatalf("got %d records, want 3 (back-compat: all)", len(got))
+	}
+}
+
+func TestEventsOwnershipGate(t *testing.T) {
+	mockReg := scopedMockRegistry(t)
+	defer mockReg.Close()
+	mux := newScopedMux(t, mockReg)
+
+	// Non-owner (alice asking for bob's agent) → 404.
+	req := httptest.NewRequest("GET", "/v1/agents/bob-1/events?userId=alice", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("non-owner events: status = %d, want 404", rec.Code)
+	}
+
+	// Missing userId → 404 (empty never owns).
+	req = httptest.NewRequest("GET", "/v1/agents/parent-1/events", nil)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("missing-userId events: status = %d, want 404", rec.Code)
+	}
+
+	// Owner → 200, event served.
+	req = httptest.NewRequest("GET", "/v1/agents/parent-1/events?userId=alice", nil)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("owner events: status = %d, want 200", rec.Code)
+	}
+}
+
+func TestLogsOwnershipGate(t *testing.T) {
+	mockReg := scopedMockRegistry(t)
+	defer mockReg.Close()
+	mux := newScopedMux(t, mockReg)
+
+	// Non-owner → 404.
+	req := httptest.NewRequest("GET", "/v1/agents/bob-1/logs?userId=alice", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("non-owner logs: status = %d, want 404", rec.Code)
+	}
+
+	// Owner → past the gate (no pod exists, so a logs JSON body, NOT a 404).
+	req = httptest.NewRequest("GET", "/v1/agents/parent-1/logs?userId=alice", nil)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code == http.StatusNotFound {
+		t.Fatalf("owner logs: got 404, want past the ownership gate")
+	}
+}
+
+func TestMessageOwnershipGate(t *testing.T) {
+	mockReg := scopedMockRegistry(t)
+	defer mockReg.Close()
+	mux := newScopedMux(t, mockReg)
+
+	// Non-owner → 404, never reaches body decode or forward.
+	req := httptest.NewRequest("POST", "/v1/agents/bob-1/message?userId=alice", strings.NewReader(`{"message":"hi"}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("non-owner message: status = %d, want 404", rec.Code)
+	}
+
+	// Owner → past the gate (the agent svc is unreachable in-test, so 502, NOT 404).
+	req = httptest.NewRequest("POST", "/v1/agents/parent-1/message?userId=alice", strings.NewReader(`{"message":"hi"}`))
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code == http.StatusNotFound {
+		t.Fatalf("owner message: got 404, want past the ownership gate")
 	}
 }
