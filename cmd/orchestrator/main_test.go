@@ -16,7 +16,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	fakeclient "k8s.io/client-go/kubernetes/fake"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentv1alpha1 "github.com/spawnly/platform/api/v1alpha1"
 	"github.com/spawnly/platform/internal/registry"
@@ -687,5 +689,195 @@ func TestLogsResolvesPodNameFromStatusAndPhase(t *testing.T) {
 	}
 	if !resp.Complete {
 		t.Fatalf("expected complete=true for Succeeded phase")
+	}
+}
+
+// --- Cascade DELETE tests -------------------------------------------------
+
+// cascadeMockRegistry serves GET /v1/agents/{id}/subtree from a fixed map and
+// 404s unknown ids, plus the POST /events endpoint the handler may touch. The
+// subtree intentionally does NOT shrink across calls — mirroring production,
+// where deleting a CR only marks the registry record terminal, not removed.
+func cascadeMockRegistry(t *testing.T, subtrees map[string][]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/subtree"):
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/agents/"), "/subtree")
+			nodes, ok := subtrees[id]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string][]string{"subtree": nodes})
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/events"):
+			w.WriteHeader(http.StatusCreated)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+// agentWorkloads builds AgentWorkload CRs (namespace "default") for the given ids.
+func agentWorkloads(ids ...string) []client.Object {
+	objs := make([]client.Object, 0, len(ids))
+	for _, id := range ids {
+		aw := &agentv1alpha1.AgentWorkload{}
+		aw.Name = id
+		aw.Namespace = "default"
+		objs = append(objs, aw)
+	}
+	return objs
+}
+
+func TestDeleteCascadeChain(t *testing.T) {
+	cascadeSettleDelay = 0
+	mockReg := cascadeMockRegistry(t, map[string][]string{
+		"root": {"root", "a", "b", "c"},
+	})
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newScheme()).
+		WithObjects(agentWorkloads("root", "a", "b", "c")...).
+		Build()
+	sdb := spicedb.NewMock()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+
+	req := httptest.NewRequest("DELETE", "/v1/agents/root", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("got %d, want 204", rec.Code)
+	}
+	var list agentv1alpha1.AgentWorkloadList
+	fakeClient.List(context.Background(), &list)
+	if len(list.Items) != 0 {
+		t.Fatalf("expected all CRs deleted, %d remain", len(list.Items))
+	}
+}
+
+func TestDeleteCascadeLeaf(t *testing.T) {
+	cascadeSettleDelay = 0
+	mockReg := cascadeMockRegistry(t, map[string][]string{
+		"leaf": {"leaf"},
+	})
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newScheme()).
+		WithObjects(agentWorkloads("leaf")...).
+		Build()
+	sdb := spicedb.NewMock()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+
+	req := httptest.NewRequest("DELETE", "/v1/agents/leaf", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("got %d, want 204", rec.Code)
+	}
+	var list agentv1alpha1.AgentWorkloadList
+	fakeClient.List(context.Background(), &list)
+	if len(list.Items) != 0 {
+		t.Fatalf("expected leaf CR deleted, %d remain", len(list.Items))
+	}
+}
+
+func TestDeleteCascadeUnknownRoot(t *testing.T) {
+	cascadeSettleDelay = 0
+	// Empty map → every id 404s → first-pass-empty → 404.
+	mockReg := cascadeMockRegistry(t, map[string][]string{})
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	sdb := spicedb.NewMock()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+
+	req := httptest.NewRequest("DELETE", "/v1/agents/ghost", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("got %d, want 404", rec.Code)
+	}
+}
+
+func TestDeleteCascadeIdempotentAlreadyGone(t *testing.T) {
+	cascadeSettleDelay = 0
+	// Registry still knows the subtree, but the CRs no longer exist in the
+	// cluster. Every Delete returns NotFound → deletedThisPass==0 on pass 0 →
+	// converge to 204 with no failures.
+	mockReg := cascadeMockRegistry(t, map[string][]string{
+		"root": {"root", "a"},
+	})
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build() // no objects
+	sdb := spicedb.NewMock()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+
+	req := httptest.NewRequest("DELETE", "/v1/agents/root", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("got %d, want 204 (idempotent already-gone)", rec.Code)
+	}
+}
+
+func TestDeleteCascadePartialFailure(t *testing.T) {
+	cascadeSettleDelay = 0
+	mockReg := cascadeMockRegistry(t, map[string][]string{
+		"root": {"root", "a", "b"},
+	})
+	defer mockReg.Close()
+
+	// Intercept the fake client so deleting "b" returns a non-NotFound error,
+	// leaving root/a deletable. The cascade should report 207 with b in failed[].
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newScheme()).
+		WithObjects(agentWorkloads("root", "a", "b")...).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if obj.GetName() == "b" {
+					return errors.New("simulated delete failure")
+				}
+				return c.Delete(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	sdb := spicedb.NewMock()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+
+	req := httptest.NewRequest("DELETE", "/v1/agents/root", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusMultiStatus {
+		t.Fatalf("got %d, want 207", rec.Code)
+	}
+	var body struct {
+		Deleted int      `json:"deleted"`
+		Failed  []string `json:"failed"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode 207 body: %v", err)
+	}
+	if body.Deleted != 2 {
+		t.Errorf("deleted = %d, want 2 (root+a)", body.Deleted)
+	}
+	// b appears exactly once despite being retried across sweeps (de-duped).
+	if len(body.Failed) != 1 || body.Failed[0] != "b" {
+		t.Errorf("failed = %v, want [b]", body.Failed)
+	}
+	// b survives; root and a are gone.
+	var list agentv1alpha1.AgentWorkloadList
+	fakeClient.List(context.Background(), &list)
+	if len(list.Items) != 1 || list.Items[0].Name != "b" {
+		t.Fatalf("expected only b to remain, got %d items", len(list.Items))
 	}
 }

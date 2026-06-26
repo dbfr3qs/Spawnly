@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,11 @@ import (
 	"github.com/spawnly/platform/internal/registry"
 	"github.com/spawnly/platform/internal/spicedb"
 )
+
+// cascadeSettleDelay is the pause between cascade sweeps, giving any child spawn
+// that was in flight during a sweep time to register before the next snapshot.
+// Tests set it to 0.
+var cascadeSettleDelay = 300 * time.Millisecond
 
 type SpawnRequest struct {
 	AgentType string `json:"agentType"`
@@ -377,20 +383,93 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		json.NewEncoder(w).Encode(resp)
 	})
 
+	// DELETE /v1/agents/{id} tears down an agent AND its entire descendant
+	// subtree (the pods). It asks the registry for the subtree (root-first) and
+	// deletes each AgentWorkload CR; deleting a CR kills its pod via owner-ref GC
+	// and stops that node from spawning more children.
+	//
+	// We sweep in a settle-loop rather than deleting one snapshot once. chain
+	// agents self-spawn at every level (~every 3s), so a child can be born during
+	// the cascade and won't appear in the first snapshot. We re-fetch the subtree
+	// and re-delete until a pass deletes zero LIVE CRs (every Delete returned
+	// NotFound), which means no live pod remains to spawn anything new.
+	//
+	// The termination condition is "deleted zero live CRs", NOT "subtree is
+	// empty": the operator's deletion finalizer only marks each registry record
+	// Completed/Failed — it does not remove the record — and subtree() returns
+	// descendants regardless of status. So the subtree does NOT shrink as we
+	// delete CRs; an "empty subtree" loop would never terminate.
+	//
+	// Status codes: 204 success, 207 if some node deletes errored (non-NotFound),
+	// 404 if the registry never heard of the id (first pass empty), 502 if the
+	// registry is unavailable on the first pass.
 	mux.HandleFunc("DELETE /v1/agents/{id}", func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		id := r.PathValue("id")
-		aw := &agentv1alpha1.AgentWorkload{}
-		aw.Name = id
-		aw.Namespace = "default"
-		if err := k8s.Delete(r.Context(), aw); err != nil {
-			if apierrors.IsNotFound(err) {
-				http.Error(w, "not found", http.StatusNotFound)
-				return
+		const maxPasses = 8
+		deleted := 0
+		failedSet := map[string]bool{} // node ids whose delete errored (non-NotFound)
+
+		for pass := 0; pass < maxPasses; pass++ {
+			nodes, err := regClient.Subtree(ctx, id)
+			if err != nil {
+				if pass == 0 {
+					http.Error(w, "registry unavailable", http.StatusBadGateway)
+					return
+				}
+				break // already made progress; stop sweeping
 			}
-			http.Error(w, "delete failed", http.StatusInternalServerError)
+			if len(nodes) == 0 {
+				if pass == 0 {
+					http.Error(w, "not found", http.StatusNotFound)
+					return
+				}
+				break
+			}
+
+			deletedThisPass := 0
+			for _, nid := range nodes {
+				aw := &agentv1alpha1.AgentWorkload{}
+				aw.Name = nid
+				aw.Namespace = "default"
+				if err := k8s.Delete(ctx, aw); err != nil {
+					if apierrors.IsNotFound(err) {
+						continue // already gone — normal on re-sweep
+					}
+					failedSet[nid] = true
+					continue
+				}
+				deletedThisPass++
+				deleted++
+			}
+
+			if deletedThisPass == 0 {
+				break // converged: nothing live left to delete or spawn
+			}
+			if pass < maxPasses-1 {
+				// Settle pause so in-flight child spawns register before the next
+				// sweep. Abort if the caller has gone away rather than hold a
+				// goroutine sleeping for a disconnected request.
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(cascadeSettleDelay):
+				}
+			}
+		}
+
+		if len(failedSet) > 0 {
+			failed := make([]string, 0, len(failedSet))
+			for nid := range failedSet {
+				failed = append(failed, nid)
+			}
+			sort.Strings(failed)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusMultiStatus) // 207
+			json.NewEncoder(w).Encode(map[string]any{"deleted": deleted, "failed": failed})
 			return
 		}
-		w.WriteHeader(http.StatusNoContent)
+		w.WriteHeader(http.StatusNoContent) // 204
 	})
 
 	mux.HandleFunc("POST /v1/agents/{id}/dismiss", func(w http.ResponseWriter, r *http.Request) {

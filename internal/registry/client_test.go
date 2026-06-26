@@ -73,6 +73,43 @@ func TestHTTPClientCheckSpawnPolicy(t *testing.T) {
 	}
 }
 
+func TestHTTPClientSubtree(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/agents/root/subtree" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string][]string{"subtree": {"root", "a", "b"}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	client := registry.New(srv.URL)
+
+	got, err := client.Subtree(context.Background(), "root")
+	if err != nil {
+		t.Fatalf("Subtree(root): %v", err)
+	}
+	want := []string{"root", "a", "b"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+
+	// Unknown id → (nil, nil), not an error.
+	got, err = client.Subtree(context.Background(), "ghost")
+	if err != nil {
+		t.Fatalf("Subtree(ghost): unexpected error %v", err)
+	}
+	if got != nil {
+		t.Fatalf("Subtree(ghost): expected nil, got %v", got)
+	}
+}
+
 func TestMockClientSpawnPolicy(t *testing.T) {
 	m := registry.NewMock(map[string]registry.AgentTemplate{
 		"parent-agent": {

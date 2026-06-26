@@ -23,6 +23,7 @@ type Client interface {
 	DismissAgent(ctx context.Context, agentID string) error
 	PreRegisterAgent(ctx context.Context, r AgentRecord) error
 	CheckSpawnPolicy(ctx context.Context, parentID, childType string) (SpawnDecision, error)
+	Subtree(ctx context.Context, id string) ([]string, error)
 }
 
 type HTTPClient struct {
@@ -159,6 +160,32 @@ func (c *HTTPClient) CheckSpawnPolicy(ctx context.Context, parentID, childType s
 	return d, json.NewDecoder(resp.Body).Decode(&d)
 }
 
+// Subtree returns the agent's id followed by all descendant ids (root-first),
+// regardless of their lifecycle status. An unknown id yields (nil, nil) so the
+// caller can distinguish "registry never heard of this id" (first-pass-empty →
+// 404) from a transport/registry error.
+func (c *HTTPClient) Subtree(ctx context.Context, id string) ([]string, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.base+"/v1/agents/"+id+"/subtree", nil)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("subtree: status %d", resp.StatusCode)
+	}
+	var out struct {
+		Subtree []string `json:"subtree"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.Subtree, nil
+}
+
 func (c *HTTPClient) DismissAgent(ctx context.Context, agentID string) error {
 	req, _ := http.NewRequestWithContext(ctx, "POST", c.base+"/v1/agents/"+agentID+"/dismiss", nil)
 	resp, err := c.http.Do(req)
@@ -178,6 +205,7 @@ type Mock struct {
 	Completed  []string
 	Failed     []string
 	EventStore map[string][]events.Event
+	Subtrees   map[string][]string
 }
 
 func NewMock(templates map[string]AgentTemplate) *Mock {
@@ -228,6 +256,10 @@ func (m *Mock) ListTemplates(_ context.Context) ([]string, error) {
 
 func (m *Mock) DismissAgent(_ context.Context, agentID string) error {
 	return nil
+}
+
+func (m *Mock) Subtree(_ context.Context, id string) ([]string, error) {
+	return m.Subtrees[id], nil
 }
 
 func (m *Mock) PreRegisterAgent(_ context.Context, r AgentRecord) error {
