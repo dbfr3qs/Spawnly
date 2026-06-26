@@ -179,3 +179,32 @@ func TestMockClient(t *testing.T) {
 		t.Errorf("unexpected Failed: %v", m.Failed)
 	}
 }
+
+// TestNewWithToken_SendsBearer verifies that NewWithToken attaches
+// "Authorization: Bearer <token>" to outbound requests, and that New (token "")
+// sends no Authorization header. Exercised via Complete (a PATCH).
+func TestNewWithToken_SendsBearer(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	// With a token → request carries the bearer.
+	if err := registry.NewWithToken(srv.URL, "tok").Complete(context.Background(), "agent-1"); err != nil {
+		t.Fatalf("Complete (with token): %v", err)
+	}
+	if gotAuth != "Bearer tok" {
+		t.Fatalf("Authorization: got %q, want %q", gotAuth, "Bearer tok")
+	}
+
+	// Plain New → no Authorization header.
+	gotAuth = ""
+	if err := registry.New(srv.URL).Complete(context.Background(), "agent-1"); err != nil {
+		t.Fatalf("Complete (no token): %v", err)
+	}
+	if gotAuth != "" {
+		t.Fatalf("expected no Authorization header, got %q", gotAuth)
+	}
+}

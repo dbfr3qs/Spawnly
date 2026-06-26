@@ -197,3 +197,28 @@ func TestCovered_ScopeSubset(t *testing.T) {
 		}
 	}
 }
+
+// TestUpdateStatus_AttachesBearer verifies updateStatus fetches a fresh registry
+// credential and presents it as `Authorization: Bearer <svid>` — the SVID-self
+// auth the registry's PATCH /v1/agents/{id} now requires. A startup token could
+// be stale by the time the post-consent active/failed PATCH fires, so the
+// credential is fetched per call.
+func TestUpdateStatus_AttachesBearer(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := config{
+		registryURL: srv.URL,
+		source:      &attestor.MockSource{Cred: attestor.Credential{Value: "fresh-svid"}},
+	}
+	if err := updateStatus(context.Background(), cfg, "agent-x", "active"); err != nil {
+		t.Fatalf("updateStatus: %v", err)
+	}
+	if gotAuth != "Bearer fresh-svid" {
+		t.Fatalf("Authorization: got %q, want %q", gotAuth, "Bearer fresh-svid")
+	}
+}
