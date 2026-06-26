@@ -46,6 +46,8 @@ code is the truth. After explaining, offer to **show it live** on the cluster.
 | Spawn consent (CIBA) | `docs/internals/spawn-consent.md`, `identityserver/CibaRequestValidator.cs` (binds the request to a registry-derived spawn edge), `identityserver/CibaConsentNotificationService.cs` (auto-approve vs. prompt), `identityserver/CibaCompletionService.cs` (records the grant + releases pending requests for the edge), `cmd/agent-sidecar/ciba.go` (the sidecar driver) |
 | Delegation / token-exchange | `identityserver/TokenExchangeGrantValidator.cs`, the registry spawn-policy handler in `cmd/registry/main.go` (`allowedChildTypes`, `maxDepth`, `childPolicies`) |
 | Revoke / resume cascade | `cmd/registry/main.go` (`subtree()`, `revokeNode`, `resumeNode`) — drops/restores SpiceDB authority across an agent's whole descendant subtree |
+| Agent ownership scoping | A user only sees/acts on agents whose record `UserID` is theirs. Enforced via `?userId=` (the asserted session user): `agentOwnedBy` in `cmd/registry/main.go` gates revoke/resume/dismiss/subtree; the orchestrator (`cmd/orchestrator/main.go`, `ownsAgent`) gates the list + events/logs/message; the dashboard injects `auth.user(r)` and PathEscapes the id (`agentOpTarget`) so a crafted id can't smuggle a different userId. Deny = 404 (no existence oracle) |
+| Authenticated spawn | `cmd/orchestrator/main.go` `POST /spawn` derives identity, never trusts the body: agent path validates an `aud=orchestrator` JWT (`internal/tokenvalidator`) → `userId` from `sub`, `parentId` from `act`; dashboard path uses the `X-Control-Plane-Token` header. Audience/scope from `identityserver/Config.cs` (`orchestrator` ApiResource + `orchestrator:spawn` scope); SDK `spawn()` mints the token |
 | Tenancy / global scope | `deploy/spire/clusterspiffeid.yaml` (tenant vs. global ID templates), the registry register handler (tenant tuples skipped for global agents) |
 | Lifecycle events | `cmd/agent-sidecar/main.go` + `internal/events` — the neutral event taxonomy (`svid_fetched`, `token_issued`, `work_ok`, `work_denied`, `consent_requested`, `consent_granted`, `consent_denied`) the dashboard and tests read |
 
@@ -71,8 +73,13 @@ a TypeScript agent image), `reload-sidecar`, `logs-<svc>`, `kind-down`.
 **Ports:** dashboard `localhost:8090`, orchestrator `localhost:8080` (both via
 `make demo` or `kubectl port-forward`).
 
-**Spawn an agent:** `POST localhost:8080/spawn` with
-`{"userId","tenantId","agentType","task"}` → `{"workloadName"}`. Omit `tenantId`
+**Spawn an agent:** `POST localhost:8080/spawn` → `{"workloadName"}`.
+Authenticated: an **agent** caller sends a `Bearer` token audienced for the
+orchestrator (the SDK `spawn()` mints it) and the orchestrator derives
+`userId`/`parentId`/`tenantId` from the token+parent record — the body only
+carries `agentType` (+`task`). A **dashboard/human** caller sends no bearer but
+an `X-Control-Plane-Token` header and the body's `userId` (the dashboard injects
+the session user) for a top-level spawn (no `parentId`). Omit `tenantId`
 for a global agent. Agent types: `chain-worker`, `weather-monitor`,
 `travel-planner`, and the three travel specialists `flight-search`,
 `hotel-search`, `fx-converter` (each runs the shared `travel-specialist` image).
@@ -83,8 +90,9 @@ for a global agent. Agent types: `chain-worker`, `weather-monitor`,
 `GET /v1/consents/check`, `GET /v1/spawn-policy`.
 
 **Lifecycle actions:** `POST /v1/agents/{id}/revoke|resume|dismiss`,
-`DELETE /v1/agents/{id}` (kill — does **not** cascade to chain children; revoke
-is the cascading one).
+`DELETE /v1/agents/{id}` (kill — **cascades** to the whole descendant subtree,
+like revoke). All are ownership-scoped: callers pass `?userId=` and the registry
+404s an agent the user doesn't own. The dashboard injects the session user.
 
 ## Operational gotchas (for diagnosis)
 
