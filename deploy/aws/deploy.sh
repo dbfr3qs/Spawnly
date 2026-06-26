@@ -179,8 +179,9 @@ if [ -n "$CERT_ARN" ] && [ "$CERT_ARN" != "None" ]; then
   # X-Forwarded-Proto so its cookies are Secure; the dashboard reads that header
   # directly for its own cookies.
   PUBLIC_ORIGIN="https://${PUBLIC_DOMAIN:-spawnly.run}"
+  PUBLIC_DOCS_ORIGIN="https://docs.${PUBLIC_DOMAIN:-spawnly.run}"
   echo "==> wiring public OIDC origin ($PUBLIC_ORIGIN)"
-  kubectl set env deployment/dashboard OIDC_AUTHORITY="$PUBLIC_ORIGIN"
+  kubectl set env deployment/dashboard OIDC_AUTHORITY="$PUBLIC_ORIGIN" DOCS_URL="$PUBLIC_DOCS_ORIGIN"
   kubectl set env deployment/identity-server DASHBOARD_ORIGIN="$PUBLIC_ORIGIN" FORWARDED_HEADERS=true
   kubectl rollout status deployment/dashboard --timeout=120s
   kubectl rollout status deployment/identity-server --timeout=120s

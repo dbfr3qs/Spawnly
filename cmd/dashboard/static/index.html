@@ -121,6 +121,7 @@
       font-family: var(--font);
       font-size: 12px;
       font-weight: 600;
+      text-decoration: none;
       transition: all .15s ease;
     }
     .btn:active { transform: scale(.95); }
@@ -958,6 +959,10 @@
   <div class="header-actions">
     <button class="btn btn-primary" id="open-modal-btn">+ New Agent</button>
     <button class="btn btn-ghost" id="open-consents-btn">Consents</button>
+    <!-- href is overwritten from /api/config on load (local docs by default,
+         the public docs origin in prod); the default keeps the link working in
+         local dev even if that fetch fails. -->
+    <a class="btn btn-ghost" id="docs-link" href="http://localhost:4321" target="_blank" rel="noopener noreferrer">Docs ↗</a>
     <button class="btn btn-ghost theme-toggle" id="theme-toggle-btn" title="Toggle dark/light mode"></button>
     <span id="current-user" class="current-user"></span>
     <form method="post" action="/logout" class="logout-form">
@@ -1297,7 +1302,10 @@
   // A "revoked" agent is still alive (its pod runs, getting denied) so it keeps
   // its Kill button and is NOT treated as terminal.
 
-  function isAlive(status)   { const s = (status||'').toLowerCase(); return s === 'active' || s === 'revoked'; }
+  // Kill tears down the pod, so it's offered for any non-terminal agent — this
+  // includes a "pending" agent stuck spinning up (e.g. wedged on pod_created)
+  // and a "revoked" one (still running, getting denied), as well as "active".
+  function isKillable(status) { return !isTerminalStatus(status); }
   function revokeState(status) {
     const s = (status||'').toLowerCase();
     return s === 'active' ? 'revoke' : s === 'revoked' ? 'resume' : '';
@@ -1310,7 +1318,7 @@
   function actionButtonsHtml(a) {
     return `
       <span id="revokewrap-${a.agentId}" data-state="${revokeState(a.status)}">${revokeBtnHtml(a.agentId, revokeState(a.status))}</span>
-      <span id="killwrap-${a.agentId}">${isAlive(a.status) ? `<button class="btn btn-danger" data-testid="kill" onclick="handleKill('${a.agentId}')">Kill</button>` : ''}</span>
+      <span id="killwrap-${a.agentId}">${isKillable(a.status) ? `<button class="btn btn-danger" data-testid="kill" onclick="handleKill('${a.agentId}')">Kill</button>` : ''}</span>
       <span id="dismisswrap-${a.agentId}">${isTerminalStatus(a.status) ? `<button class="btn btn-dismiss" onclick="handleDismiss('${a.agentId}')">✕</button>` : ''}</span>`;
   }
 
@@ -1330,8 +1338,8 @@
     const kw = document.getElementById(`killwrap-${a.agentId}`);
     if (kw) {
       const has = !!kw.querySelector('button');
-      if (isAlive(a.status) && !has) kw.innerHTML = `<button class="btn btn-danger" data-testid="kill" onclick="handleKill('${a.agentId}')">Kill</button>`;
-      else if (!isAlive(a.status) && has) kw.innerHTML = '';
+      if (isKillable(a.status) && !has) kw.innerHTML = `<button class="btn btn-danger" data-testid="kill" onclick="handleKill('${a.agentId}')">Kill</button>`;
+      else if (!isKillable(a.status) && has) kw.innerHTML = '';
     }
     const dw = document.getElementById(`dismisswrap-${a.agentId}`);
     if (dw) {
@@ -2143,6 +2151,17 @@
       if (!r.ok) return;
       const { user } = await r.json();
       if (user) document.getElementById('current-user').textContent = user;
+    } catch (_) {}
+  })();
+
+  // Point the header Docs link at the env-specific docs origin (localhost:4321
+  // in dev, docs.spawnly.run in prod). Falls back to the static default href.
+  (async () => {
+    try {
+      const r = await fetch('/api/config');
+      if (!r.ok) return;
+      const { docsUrl } = await r.json();
+      if (docsUrl) document.getElementById('docs-link').href = docsUrl;
     } catch (_) {}
   })();
 </script>

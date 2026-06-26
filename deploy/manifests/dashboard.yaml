@@ -31,6 +31,10 @@ spec:
               value: "dashboard"
             - name: OIDC_CLIENT_SECRET
               value: "dashboard-secret"
+            # Header "Docs" link target. Local dev runs the docs site on :4321;
+            # the AWS deploy.sh overrides this to the public docs origin.
+            - name: DOCS_URL
+              value: "http://localhost:4321"
           ports:
             - containerPort: 8080
 ---

@@ -30,6 +30,10 @@ func main() {
 	clientSecret := getenv("OIDC_CLIENT_SECRET", "dashboard-secret")
 	auth := NewAuthenticator(authority, identityInternalURL, clientID, clientSecret)
 
+	// Browser-facing docs link target. Local dev runs the docs site on :4321;
+	// the AWS/prod deploy.sh sets this to the public docs origin.
+	docsURL := getenv("DOCS_URL", "http://localhost:4321")
+
 	staticFS, _ := fs.Sub(staticFiles, "static")
 	mux := http.NewServeMux()
 
@@ -86,6 +90,13 @@ func main() {
 	mux.HandleFunc("GET /api/me", func(w http.ResponseWriter, r *http.Request) {
 		auth.require(http.HandlerFunc(auth.handleMe)).ServeHTTP(w, r)
 	})
+
+	// Client-side config the static UI reads on load (e.g. the env-specific docs
+	// link target). Behind a session like the rest of /api.
+	mux.Handle("GET /api/config", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"docsUrl": docsURL})
+	})))
 	mux.Handle("GET /api/agents", auth.require(proxy("GET", orchestratorURL+"/v1/agents")))
 
 	// Spawn — inject the authenticated user's identity as userId so the human
