@@ -306,9 +306,21 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 
 	resources := corev1.ResourceRequirements{}
 	if tpl.Runtime.Resources.CPULimit != "" {
+		cpuLimit := resource.MustParse(tpl.Runtime.Resources.CPULimit)
+		memLimit := resource.MustParse(tpl.Runtime.Resources.MemoryLimit)
 		resources.Limits = corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse(tpl.Runtime.Resources.CPULimit),
-			corev1.ResourceMemory: resource.MustParse(tpl.Runtime.Resources.MemoryLimit),
+			corev1.ResourceCPU:    cpuLimit,
+			corev1.ResourceMemory: memLimit,
+		}
+		// Decouple requests from limits so the scheduler can pack agents densely.
+		// CPU is compressible, so we request a quarter of the limit and let the
+		// pod burst up to it — many idle-ish agents (e.g. a poll-every-3s chain
+		// worker) then share a node instead of each reserving its full limit.
+		// Memory is incompressible, so its request stays equal to the limit
+		// (Guaranteed) to avoid node memory overcommit and OOM kills.
+		resources.Requests = corev1.ResourceList{
+			corev1.ResourceCPU:    *resource.NewMilliQuantity(cpuLimit.MilliValue()/4, resource.DecimalSI),
+			corev1.ResourceMemory: memLimit,
 		}
 	}
 

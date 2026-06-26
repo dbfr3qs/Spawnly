@@ -102,6 +102,18 @@ func TestReconcileNew_PullsTemplateAndCreatesPod(t *testing.T) {
 	if pod.Spec.Containers[0].Image != "agent-runner:latest" {
 		t.Errorf("unexpected image: %q", pod.Spec.Containers[0].Image)
 	}
+	// CPU request is a quarter of the limit (compressible → pack densely);
+	// memory request equals its limit (incompressible → Guaranteed).
+	res := pod.Spec.Containers[0].Resources
+	if got := res.Limits.Cpu().MilliValue(); got != 500 {
+		t.Errorf("cpu limit = %dm, want 500m", got)
+	}
+	if got := res.Requests.Cpu().MilliValue(); got != 125 {
+		t.Errorf("cpu request = %dm, want 125m (quarter of limit)", got)
+	}
+	if !res.Requests.Memory().Equal(*res.Limits.Memory()) {
+		t.Errorf("memory request %v != limit %v (want equal)", res.Requests.Memory(), res.Limits.Memory())
+	}
 	if len(pod.Spec.InitContainers) != 1 || pod.Spec.InitContainers[0].Name != "agent-sidecar" {
 		t.Fatalf("expected init container 'agent-sidecar', got %+v", pod.Spec.InitContainers)
 	}
