@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,6 +33,7 @@ import (
 	"github.com/spawnly/platform/internal/events"
 	"github.com/spawnly/platform/internal/registry"
 	"github.com/spawnly/platform/internal/spicedb"
+	"github.com/spawnly/platform/internal/tokenvalidator"
 )
 
 // cascadeSettleDelay is the pause between cascade sweeps, giving any child spawn
@@ -133,7 +135,7 @@ func isContainerNotReadyErr(err error) bool {
 	return false
 }
 
-func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Client, registryURL string) *http.ServeMux {
+func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Client, registryURL string, spawnValidator tokenvalidator.TokenValidator, spawnAudience, spawnScope, controlPlaneToken string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	regClient := registry.New(registryURL)
@@ -145,6 +147,96 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+
+		// Two authenticated paths derive the spawn's authority; the body is never
+		// trusted for who/where except as noted.
+		//
+		//   Agent path (Authorization header present): validate the agent's ACT-AS
+		//   access token with the same tokenvalidator the resource servers use. The
+		//   token's `sub` is the human owner ("user:<userId>", authoritative) and its
+		//   outermost `act.sub` is the acting agent's SPIFFE URI (ActingAgentName is
+		//   the bare parent agent id). The child's userId/parentId come from those
+		//   claims and its tenantId from the PARENT's registry record — body
+		//   userId/parentId/tenantId are ignored, so an agent can't forge who it
+		//   spawns for or graft the child elsewhere. Audience + scope are enforced so
+		//   a token minted for another resource server (e.g. sample-api) can't be
+		//   replayed at /spawn.
+		//
+		//   Dashboard path (no Authorization header): authenticate via a SEPARATE
+		//   X-Control-Plane-Token header (not Authorization — that key drives the
+		//   agent path, so sharing it would let an attacker bypass the JWT by simply
+		//   omitting the token). The body userId is trusted (the dashboard injects the
+		//   session user), but parentId is rejected — human spawns are top-level only.
+		//   An empty controlPlaneToken is the demo/none tier: the dashboard path runs
+		//   open.
+		if r.Header.Get("Authorization") != "" {
+			rawToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if rawToken == "" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			claims, err := spawnValidator.ValidateAccessToken(r.Context(), rawToken)
+			if err != nil {
+				log.Printf("spawn: token validation failed: %v", err)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			// Reject delegation-only tokens and tokens minted for a different audience
+			// (the cross-audience-replay defense).
+			if claims.TokenUse == "delegation" {
+				log.Printf("spawn: rejecting token_use=delegation")
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if !claims.HasAudience(spawnAudience) {
+				log.Printf("spawn: rejecting token: aud %v does not contain %q", claims.Audience, spawnAudience)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if !claims.HasScope(spawnScope) {
+				log.Printf("spawn: rejecting token: missing scope %q (have %v)", spawnScope, claims.Scopes)
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			userID := strings.TrimPrefix(claims.User, "user:")
+			if userID == "" {
+				log.Printf("spawn: token has no user subject")
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			parentID := claims.ActingAgentName
+			if parentID == "" {
+				log.Printf("spawn: token has no acting agent")
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			parent, err := regClient.GetAgent(r.Context(), parentID)
+			if err != nil {
+				log.Printf("spawn: unknown parent agent %s: %v", parentID, err)
+				http.Error(w, "unknown parent agent", http.StatusForbidden)
+				return
+			}
+			req.UserID = userID
+			req.ParentID = parentID
+			req.TenantID = parent.TenantID
+		} else {
+			if controlPlaneToken != "" {
+				got := r.Header.Get("X-Control-Plane-Token")
+				if subtle.ConstantTimeCompare([]byte(got), []byte(controlPlaneToken)) != 1 {
+					log.Printf("spawn: invalid control-plane token on dashboard spawn")
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+			}
+			// controlPlaneToken == "" means the demo/none tier — dashboard path open.
+			if req.ParentID != "" {
+				http.Error(w, "parentId not allowed on dashboard spawn", http.StatusBadRequest)
+				return
+			}
+			// req.UserID is trusted here (dashboard injected it from the session);
+			// the existing "userId required" check below still applies.
+		}
+
 		if req.UserID == "" {
 			http.Error(w, "userId is required", http.StatusBadRequest)
 			return
@@ -685,6 +777,38 @@ func controlPlaneBearerSource() func() string {
 	}
 }
 
+// getEnv returns the value of the environment variable named by key, or def if
+// the variable is unset or empty.
+func getEnv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// buildSpawnValidator constructs the access-token validator used on the agent
+// spawn path — the SAME tokenvalidator the resource servers (sample-api) use, so
+// the agent's ACT-AS token is validated identically. tokenvalidator.New fetches
+// the IdP JWKS at construction and returns an error if the IdP isn't reachable
+// yet, so — like waitForRegistrySchema — we retry every 3s: in a fresh cluster
+// the orchestrator and IdP start together and the orchestrator has nothing to do
+// until the IdP can validate spawn tokens. Note the fetch uses the default HTTP
+// client (no timeout), so a hung socket or a permanently-misconfigured
+// IS_JWKS_URL blocks startup (logged each attempt) rather than crash-looping.
+func buildSpawnValidator(ctx context.Context) tokenvalidator.TokenValidator {
+	issuer := getEnv("IS_ISSUER", "http://identity-server")
+	jwksURL := getEnv("IS_JWKS_URL", "http://identity-server/.well-known/openid-configuration/jwks")
+	for attempt := 1; ; attempt++ {
+		v, err := tokenvalidator.New(ctx, issuer, jwksURL)
+		if err == nil {
+			log.Printf("spawn token validator ready after %d attempt(s)", attempt)
+			return v
+		}
+		log.Printf("waiting for spawn token validator JWKS (attempt %d): %v", attempt, err)
+		time.Sleep(3 * time.Second)
+	}
+}
+
 // waitForRegistrySchema blocks until the registry's GET /v1/schema returns 200,
 // i.e. the registry has applied the SpiceDB schema (Phase 2). It logs and
 // retries indefinitely rather than failing fast: in a fresh cluster the registry
@@ -750,7 +874,20 @@ func main() {
 	// can't hit SpiceDB before any schema exists.
 	waitForRegistrySchema(registryURL)
 
-	mux := buildMux(k8s, clientset, sdb, registryURL)
+	// Inbound spawn auth: the agent path validates the agent's ACT-AS access
+	// token (waits for the IdP's JWKS) and enforces audience + scope; the
+	// dashboard path authenticates via a separate X-Control-Plane-Token header.
+	// An empty token (CONTROL_PLANE_AUTH != shared-secret) runs the dashboard path
+	// open (demo/none tier).
+	spawnValidator := buildSpawnValidator(context.Background())
+	spawnAudience := getEnv("SPAWN_OIDC_AUDIENCE", "orchestrator")
+	spawnScope := getEnv("SPAWN_SCOPE", "orchestrator:spawn")
+	controlPlaneToken := ""
+	if os.Getenv("CONTROL_PLANE_AUTH") == "shared-secret" {
+		controlPlaneToken = os.Getenv("CONTROL_PLANE_TOKEN")
+	}
+
+	mux := buildMux(k8s, clientset, sdb, registryURL, spawnValidator, spawnAudience, spawnScope, controlPlaneToken)
 	log.Println("orchestrator listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", mux))
 }

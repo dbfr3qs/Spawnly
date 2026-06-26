@@ -17,6 +17,7 @@ type Client interface {
 	Complete(ctx context.Context, agentID string) error
 	Fail(ctx context.Context, agentID string) error
 	ListAgents(ctx context.Context) ([]AgentRecord, error)
+	GetAgent(ctx context.Context, id string) (AgentRecord, error)
 	ListEvents(ctx context.Context, agentID string) ([]events.Event, error)
 	PostEvent(ctx context.Context, agentID string, e events.Event) error
 	ListTemplates(ctx context.Context) ([]string, error)
@@ -84,6 +85,23 @@ func (c *HTTPClient) ListAgents(ctx context.Context) ([]AgentRecord, error) {
 	}
 	var agents []AgentRecord
 	return agents, json.NewDecoder(resp.Body).Decode(&agents)
+}
+
+func (c *HTTPClient) GetAgent(ctx context.Context, id string) (AgentRecord, error) {
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.base+"/v1/agents/"+id, nil)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return AgentRecord{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return AgentRecord{}, fmt.Errorf("agent %q not found", id)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return AgentRecord{}, fmt.Errorf("get agent: status %d", resp.StatusCode)
+	}
+	var a AgentRecord
+	return a, json.NewDecoder(resp.Body).Decode(&a)
 }
 
 func (c *HTTPClient) ListEvents(ctx context.Context, agentID string) ([]events.Event, error) {
@@ -235,6 +253,15 @@ func (m *Mock) Fail(_ context.Context, agentID string) error {
 
 func (m *Mock) ListAgents(_ context.Context) ([]AgentRecord, error) {
 	return m.Agents, nil
+}
+
+func (m *Mock) GetAgent(_ context.Context, id string) (AgentRecord, error) {
+	for _, a := range m.Agents {
+		if a.AgentID == id {
+			return a, nil
+		}
+	}
+	return AgentRecord{}, fmt.Errorf("agent %q not found", id)
 }
 
 func (m *Mock) ListEvents(_ context.Context, agentID string) ([]events.Event, error) {

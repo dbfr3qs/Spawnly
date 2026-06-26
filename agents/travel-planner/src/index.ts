@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from "uuid";
 import { ClientFactory } from "@a2a-js/sdk/client";
-import { postEvent } from "@spawnly/sdk";
+import { postEvent, spawn, TokenClient } from "@spawnly/sdk";
 
 // Deterministic travel orchestrator (no LLM): fans out to three CONSENT-GATED
 // specialists — flight-search, hotel-search, fx-converter — each a DIFFERENT spawn
@@ -9,8 +9,9 @@ import { postEvent } from "@spawnly/sdk";
 const agentId = process.env.AGENT_ID ?? "unknown";
 const registryUrl = process.env.REGISTRY_URL ?? "http://registry:8080";
 const orchestratorUrl = process.env.ORCHESTRATOR_URL ?? "http://orchestrator:8080";
-const tenantId = process.env.TENANT_ID || undefined;
-const userId = process.env.USER_ID ?? "unknown";
+const sidecarUrl = process.env.SIDECAR_URL ?? "http://localhost:8089";
+
+const tokens = new TokenClient(sidecarUrl);
 
 // Trip parameters — overridable via env so a custom trip can be driven, with a
 // concrete NZ↔AU default so the demo runs out of the box.
@@ -24,16 +25,12 @@ const homeCurrency = process.env.HOME_CURRENCY ?? "NZD";
 const budget = Number(process.env.BUDGET ?? 1500);
 
 async function spawnSpecialist(agentType: string): Promise<string> {
-  const res = await fetch(`${orchestratorUrl}/spawn`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ agentType, userId, parentId: agentId, ...(tenantId && { tenantId }) }),
-  });
-  if (!res.ok) throw new Error(`spawn ${agentType} failed: ${res.status} ${await res.text()}`);
-  const data = (await res.json()) as { workloadName?: string; id?: string };
-  const id = data.workloadName ?? data.id;
-  if (!id) throw new Error(`spawn ${agentType}: no id in response`);
-  return id;
+  // The orchestrator derives userId/parentId/tenantId from our spawn token + the
+  // registry, so we only send agentType.
+  const r = await spawn(orchestratorUrl, tokens, agentType);
+  if (!r.ok) throw new Error(`spawn ${agentType} failed: ${r.status} ${r.body ?? ""}`);
+  if (!r.workloadName) throw new Error(`spawn ${agentType}: no id in response`);
+  return r.workloadName;
 }
 
 async function waitReady(childId: string): Promise<void> {

@@ -189,6 +189,31 @@ export async function postEvent(
   }
 }
 
+export interface SpawnOptions { task?: string; audience?: string; scope?: string; signal?: AbortSignal; }
+export interface SpawnResult { ok: boolean; status: number; workloadName?: string; body?: string; }
+
+/**
+ * Spawn a child agent via the orchestrator. Mints a FRESH orchestrator-audienced
+ * token (scope "orchestrator:spawn", aud "orchestrator") and POSTs it to
+ * `${orchestratorUrl}/spawn`. The orchestrator derives userId/parentId/tenantId
+ * from the token + registry, so the caller only sends `{ agentType }` (and an
+ * optional `task`). A 403 (e.g. a depth cap or denied consent) surfaces as
+ * `{ ok: false, status: 403 }` for the caller to branch on.
+ */
+export async function spawn(orchestratorUrl: string, tokens: TokenClient, agentType: string, opts: SpawnOptions = {}): Promise<SpawnResult> {
+  const scope = opts.scope ?? "orchestrator:spawn";
+  const audience = opts.audience ?? "orchestrator";
+  const token = await tokens.getToken(scope, { audience, signal: opts.signal });
+  const res = await fetch(`${orchestratorUrl}/spawn`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ agentType, ...(opts.task ? { task: opts.task } : {}) }),
+    signal: opts.signal,
+  });
+  if (res.ok) { const d = await res.json().catch(() => ({} as any)); return { ok: true, status: res.status, workloadName: d.workloadName }; }
+  return { ok: false, status: res.status, body: (await res.text().catch(() => "")).trim() };
+}
+
 // --- Flue instrumentation ----------------------------------------------------
 // Minimal structural type so the SDK stays dependency-free and does NOT import
 // from @flue/runtime. Any object exposing subscribeEvent satisfies this.

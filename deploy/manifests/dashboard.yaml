@@ -35,6 +35,23 @@ spec:
             # the AWS deploy.sh overrides this to the public docs origin.
             - name: DOCS_URL
               value: "http://localhost:4321"
+            # Control-plane auth the dashboard presents to the orchestrator's
+            # dashboard /spawn path (X-Control-Plane-Token). Both values come from
+            # the optional `control-plane-auth` Secret bootstrap.sh generates
+            # (shared with the orchestrator, so the tokens match by construction).
+            # Absent Secret → env unset → "none" (sends an empty token, demo).
+            - name: CONTROL_PLANE_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-auth
+                  key: auth
+                  optional: true
+            - name: CONTROL_PLANE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-auth
+                  key: token
+                  optional: true
           ports:
             - containerPort: 8080
 ---

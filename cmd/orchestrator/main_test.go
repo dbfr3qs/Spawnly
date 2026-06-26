@@ -23,7 +23,35 @@ import (
 	agentv1alpha1 "github.com/spawnly/platform/api/v1alpha1"
 	"github.com/spawnly/platform/internal/registry"
 	"github.com/spawnly/platform/internal/spicedb"
+	"github.com/spawnly/platform/internal/tokenvalidator"
 )
+
+// fakeValidator is a tokenvalidator.TokenValidator stub for the agent spawn path:
+// it returns canned claims (the agent's ACT-AS token, already validated) or a
+// fixed error, with no real signature/issuer checking.
+type fakeValidator struct {
+	claims tokenvalidator.Claims
+	err    error
+}
+
+func (f fakeValidator) ValidateAccessToken(_ context.Context, _ string) (tokenvalidator.Claims, error) {
+	if f.err != nil {
+		return tokenvalidator.Claims{}, f.err
+	}
+	return f.claims, nil
+}
+
+// agentClaims returns canned claims for a valid orchestrator spawn token: human
+// owner user:<user>, acting agent <parent>, audience "orchestrator", scope
+// "orchestrator:spawn".
+func agentClaims(user, parent string) tokenvalidator.Claims {
+	return tokenvalidator.Claims{
+		User:            "user:" + user,
+		ActingAgentName: parent,
+		Audience:        []string{"orchestrator"},
+		Scopes:          []string{"orchestrator:spawn"},
+	}
+}
 
 func newScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
@@ -33,19 +61,34 @@ func newScheme() *runtime.Scheme {
 }
 
 // defaultMockRegistry returns an httptest.Server that responds to:
+//   - POST /v1/agents/preregister → 201
 //   - POST /v1/agents/*/events   → 201
 //   - GET  /v1/agents            → []
+//   - GET  /v1/agents/parent-1   → a parent record (userId=alice, tenantId=t1)
 //   - GET  /v1/templates/{type}  → stub template with lifecycle ""
 //   - GET  /v1/spawn-policy       → allowed iff childType == "child-agent"
+//
+// The /v1/agents/parent-1 record backs the agent spawn path: the orchestrator
+// GetAgents the parent to derive the child's userId/tenantId from its record.
 func defaultMockRegistry(t *testing.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/agents/preregister":
+			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/events"):
 			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents":
 			w.Header().Set("Content-Type", "application/json")
 			w.Write([]byte("[]"))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents/parent-1":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(registry.AgentRecord{
+				AgentID:   "parent-1",
+				AgentType: "parent-agent",
+				UserID:    "alice",
+				TenantID:  "t1",
+			})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/spawn-policy":
 			w.Header().Set("Content-Type", "application/json")
 			if r.URL.Query().Get("childType") == "child-agent" {
@@ -68,7 +111,7 @@ func TestSpawnCreatesAgentWorkload(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 	body, _ := json.Marshal(SpawnRequest{
 		AgentType: "worker",
@@ -121,16 +164,15 @@ func TestSpawnWithAllowedParentSucceeds(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	// Agent path: parentId comes from the verified token (parent-1), not the body.
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: agentClaims("alice", "parent-1")}, "orchestrator", "orchestrator:spawn", "")
 
 	body, _ := json.Marshal(SpawnRequest{
 		AgentType: "child-agent", // allowed by the mock spawn-policy
-		UserID:    "user-1",
-		TenantID:  "tenant-1",
-		ParentID:  "parent-1",
 	})
 	req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer x")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -153,16 +195,15 @@ func TestSpawnWithDisallowedParentDenied(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	// Agent path: parentId comes from the verified token (parent-1), not the body.
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: agentClaims("alice", "parent-1")}, "orchestrator", "orchestrator:spawn", "")
 
 	body, _ := json.Marshal(SpawnRequest{
 		AgentType: "forbidden-type", // denied by the mock spawn-policy
-		UserID:    "user-1",
-		TenantID:  "tenant-1",
-		ParentID:  "parent-1",
 	})
 	req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer x")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -177,13 +218,289 @@ func TestSpawnWithDisallowedParentDenied(t *testing.T) {
 	}
 }
 
+// TestSpawnAgentPathIgnoresSpoofedBody asserts that on the agent path the child's
+// userId/tenantId/parentId are derived from the verified token + parent record,
+// never the body — so a compromised agent can't forge who it spawns for or where.
+func TestSpawnAgentPathIgnoresSpoofedBody(t *testing.T) {
+	mockReg := defaultMockRegistry(t) // serves GET /v1/agents/parent-1 → alice/t1
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	sdb := spicedb.NewMock()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: agentClaims("alice", "parent-1")}, "orchestrator", "orchestrator:spawn", "")
+
+	// child-agent is allowed by the mock spawn-policy. The body lies about who it
+	// spawns for and where in the tree.
+	body, _ := json.Marshal(SpawnRequest{
+		AgentType: "child-agent",
+		UserID:    "mallory",
+		TenantID:  "evil",
+		ParentID:  "someone-else",
+	})
+	req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer x")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("got %d, want 202 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	var list agentv1alpha1.AgentWorkloadList
+	fakeClient.List(context.Background(), &list)
+	if len(list.Items) != 1 {
+		t.Fatalf("expected 1 AgentWorkload, got %d", len(list.Items))
+	}
+	spec := list.Items[0].Spec
+	if spec.UserID != "alice" {
+		t.Errorf("userId: got %q, want alice (body spoof must be ignored)", spec.UserID)
+	}
+	if spec.TenantID != "t1" {
+		t.Errorf("tenantId: got %q, want t1 (body spoof must be ignored)", spec.TenantID)
+	}
+	if spec.ParentID != "parent-1" {
+		t.Errorf("parentId: got %q, want parent-1 (must come from token)", spec.ParentID)
+	}
+}
+
+// TestSpawnAgentPathInvalidTokenRejected asserts a failed token verification on
+// the agent path yields 401 and creates no workload.
+func TestSpawnAgentPathInvalidTokenRejected(t *testing.T) {
+	mockReg := defaultMockRegistry(t)
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	sdb := spicedb.NewMock()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{err: errors.New("bad")}, "orchestrator", "orchestrator:spawn", "")
+
+	body, _ := json.Marshal(SpawnRequest{AgentType: "child-agent"})
+	req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer bogus")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", rec.Code)
+	}
+	var list agentv1alpha1.AgentWorkloadList
+	fakeClient.List(context.Background(), &list)
+	if len(list.Items) != 0 {
+		t.Fatalf("expected 0 AgentWorkloads, got %d", len(list.Items))
+	}
+}
+
+// TestSpawnAgentPathAudienceMismatchRejected asserts that a validly-signed token
+// minted for a DIFFERENT resource server (e.g. sample-api-a) cannot be replayed
+// at /spawn: its aud doesn't contain "orchestrator", so the spawn is rejected
+// with 401 and no workload is created. This is the cross-audience-replay defense.
+func TestSpawnAgentPathAudienceMismatchRejected(t *testing.T) {
+	mockReg := defaultMockRegistry(t)
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	sdb := spicedb.NewMock()
+	// Valid token (no error), correct scope, but wrong audience.
+	claims := tokenvalidator.Claims{
+		User:            "user:alice",
+		ActingAgentName: "parent-1",
+		Audience:        []string{"sample-api-a"},
+		Scopes:          []string{"orchestrator:spawn"},
+	}
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: claims}, "orchestrator", "orchestrator:spawn", "")
+
+	body, _ := json.Marshal(SpawnRequest{AgentType: "child-agent"})
+	req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer wrong-aud")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401 (wrong-audience token must not be replayable)", rec.Code)
+	}
+	var list agentv1alpha1.AgentWorkloadList
+	fakeClient.List(context.Background(), &list)
+	if len(list.Items) != 0 {
+		t.Fatalf("expected 0 AgentWorkloads, got %d", len(list.Items))
+	}
+}
+
+// TestSpawnAgentPathDelegationTokenRejected asserts a delegation-only token
+// (token_use=delegation) cannot be used to spawn — 401, before aud/scope.
+func TestSpawnAgentPathDelegationTokenRejected(t *testing.T) {
+	mockReg := defaultMockRegistry(t)
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	sdb := spicedb.NewMock()
+	claims := agentClaims("alice", "parent-1")
+	claims.TokenUse = "delegation"
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: claims}, "orchestrator", "orchestrator:spawn", "")
+
+	body, _ := json.Marshal(SpawnRequest{AgentType: "child-agent"})
+	req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer delegation")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401 (delegation token must not spawn)", rec.Code)
+	}
+}
+
+// TestSpawnAgentPathMissingScopeRejected asserts a token with the right audience
+// but lacking the spawn scope is 403 (distinct from the 401 audience/auth cases).
+func TestSpawnAgentPathMissingScopeRejected(t *testing.T) {
+	mockReg := defaultMockRegistry(t)
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	sdb := spicedb.NewMock()
+	claims := agentClaims("alice", "parent-1")
+	claims.Scopes = []string{"sample-api-a:read"} // right aud, wrong scope
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: claims}, "orchestrator", "orchestrator:spawn", "")
+
+	body, _ := json.Marshal(SpawnRequest{AgentType: "child-agent"})
+	req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer no-scope")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403 (missing spawn scope)", rec.Code)
+	}
+}
+
+// TestSpawnAgentPathUnknownParentRejected asserts that a valid token whose acting
+// agent isn't a known registry record is 403 — the parent must exist to derive
+// the child's userId/tenantId.
+func TestSpawnAgentPathUnknownParentRejected(t *testing.T) {
+	mockReg := defaultMockRegistry(t)
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	sdb := spicedb.NewMock()
+	// defaultMockRegistry only knows parent-1; a different acting agent 404s.
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: agentClaims("alice", "ghost-parent")}, "orchestrator", "orchestrator:spawn", "")
+
+	body, _ := json.Marshal(SpawnRequest{AgentType: "child-agent"})
+	req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer unknown-parent")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403 (unknown parent agent)", rec.Code)
+	}
+	var list agentv1alpha1.AgentWorkloadList
+	fakeClient.List(context.Background(), &list)
+	if len(list.Items) != 0 {
+		t.Fatalf("expected no workload, got %d", len(list.Items))
+	}
+}
+
+// TestSpawnDashboardPathRejectsParentID asserts the dashboard path (no auth
+// header) rejects a body parentId with 400 — human spawns are top-level only.
+func TestSpawnDashboardPathRejectsParentID(t *testing.T) {
+	mockReg := defaultMockRegistry(t)
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	sdb := spicedb.NewMock()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
+
+	body, _ := json.Marshal(SpawnRequest{
+		AgentType: "worker",
+		UserID:    "user-1",
+		ParentID:  "parent-1",
+	})
+	req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", rec.Code)
+	}
+	var list agentv1alpha1.AgentWorkloadList
+	fakeClient.List(context.Background(), &list)
+	if len(list.Items) != 0 {
+		t.Fatalf("expected 0 AgentWorkloads, got %d", len(list.Items))
+	}
+}
+
+// TestSpawnDashboardPathControlPlaneToken asserts that when a control-plane token
+// is configured, the dashboard path (no Authorization header) is authenticated by
+// the SEPARATE X-Control-Plane-Token header: the right token → 202, and the same
+// request with the header omitted → 401 (so an attacker can't reach the open
+// dashboard path by simply dropping the agent-path JWT).
+func TestSpawnDashboardPathControlPlaneToken(t *testing.T) {
+	const token = "s3cret"
+
+	newMux := func(fakeClient client.Client) *http.ServeMux {
+		sdb := spicedb.NewMock()
+		return buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, "", fakeValidator{}, "orchestrator", "orchestrator:spawn", token)
+	}
+	makeReq := func(withToken bool) *http.Request {
+		body, _ := json.Marshal(SpawnRequest{AgentType: "worker", UserID: "user-1"})
+		req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		if withToken {
+			req.Header.Set("X-Control-Plane-Token", token)
+		}
+		return req
+	}
+
+	// With the correct X-Control-Plane-Token → 202 and a workload is created.
+	t.Run("valid token accepted", func(t *testing.T) {
+		mockReg := defaultMockRegistry(t)
+		defer mockReg.Close()
+		fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+		sdb := spicedb.NewMock()
+		mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", token)
+
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, makeReq(true))
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("got %d, want 202 (body: %s)", rec.Code, rec.Body.String())
+		}
+		var list agentv1alpha1.AgentWorkloadList
+		fakeClient.List(context.Background(), &list)
+		if len(list.Items) != 1 {
+			t.Fatalf("expected 1 AgentWorkload, got %d", len(list.Items))
+		}
+	})
+
+	// Same request WITHOUT the X-Control-Plane-Token header → 401, no workload.
+	t.Run("missing token rejected", func(t *testing.T) {
+		fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+		mux := newMux(fakeClient)
+
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, makeReq(false))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("got %d, want 401", rec.Code)
+		}
+		var list agentv1alpha1.AgentWorkloadList
+		fakeClient.List(context.Background(), &list)
+		if len(list.Items) != 0 {
+			t.Fatalf("expected 0 AgentWorkloads, got %d", len(list.Items))
+		}
+	})
+}
+
 func TestSpawnMissingRequiredFields(t *testing.T) {
 	mockReg := defaultMockRegistry(t)
 	defer mockReg.Close()
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 	// Missing userId
 	body, _ := json.Marshal(map[string]string{"agentType": "worker", "tenantId": "t1"})
@@ -293,7 +610,7 @@ func TestSpawnTenantPresenceGuard(t *testing.T) {
 
 			fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 			sdb := spicedb.NewMock()
-			mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+			mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 			body, _ := json.Marshal(SpawnRequest{
 				AgentType: "worker",
@@ -354,7 +671,7 @@ func TestSpawnDisabledTemplateRejected(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 	body, _ := json.Marshal(SpawnRequest{
 		AgentType: "worker",
@@ -382,7 +699,7 @@ func TestSpawnRequiresAgentType(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 	// A spawn with no agentType is rejected: there is no default agent type.
 	body, _ := json.Marshal(map[string]string{"userId": "u1", "tenantId": "t1"})
@@ -408,7 +725,7 @@ func TestSpawnWithTask(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 	body, _ := json.Marshal(SpawnRequest{
 		AgentType: "worker",
@@ -451,7 +768,7 @@ func TestListAgentsProxiesToRegistry(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 	req := httptest.NewRequest("GET", "/v1/agents", nil)
 	rec := httptest.NewRecorder()
@@ -483,7 +800,7 @@ func TestRevokeResumeProxyToRegistry(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 	for _, action := range []string{"revoke", "resume"} {
 		rec := httptest.NewRecorder()
@@ -507,7 +824,7 @@ func TestDeleteAgent_NotFound(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 	req := httptest.NewRequest("DELETE", "/v1/agents/missing", nil)
 	rec := httptest.NewRecorder()
@@ -582,7 +899,7 @@ func TestLogsInvalidContainerRejected(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 	req := httptest.NewRequest("GET", "/v1/agents/agent-1a2b/logs?container=bogus", nil)
 	rec := httptest.NewRecorder()
@@ -602,7 +919,7 @@ func TestLogsDefaultContainerAndWaitingState(t *testing.T) {
 	// No AgentWorkload and no pod exist. The handler must default the container
 	// to "agent", fall back to "{id}-pod" for the pod name, report phase
 	// "Pending" (no pod found), and return 200 (never 5xx).
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 	req := httptest.NewRequest("GET", "/v1/agents/agent-1a2b/logs", nil)
 	rec := httptest.NewRecorder()
@@ -668,7 +985,7 @@ func TestLogsResolvesPodNameFromStatusAndPhase(t *testing.T) {
 	cs := fakeclient.NewSimpleClientset(pod)
 
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, cs, sdb, mockReg.URL)
+	mux := buildMux(fakeClient, cs, sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 	req := httptest.NewRequest("GET", "/v1/agents/agent-zzzz/logs", nil)
 	rec := httptest.NewRecorder()
@@ -743,7 +1060,7 @@ func TestDeleteCascadeChain(t *testing.T) {
 		WithObjects(agentWorkloads("root", "a", "b", "c")...).
 		Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 	req := httptest.NewRequest("DELETE", "/v1/agents/root", nil)
 	rec := httptest.NewRecorder()
@@ -771,7 +1088,7 @@ func TestDeleteCascadeLeaf(t *testing.T) {
 		WithObjects(agentWorkloads("leaf")...).
 		Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 	req := httptest.NewRequest("DELETE", "/v1/agents/leaf", nil)
 	rec := httptest.NewRecorder()
@@ -795,7 +1112,7 @@ func TestDeleteCascadeUnknownRoot(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 	req := httptest.NewRequest("DELETE", "/v1/agents/ghost", nil)
 	rec := httptest.NewRecorder()
@@ -818,7 +1135,7 @@ func TestDeleteCascadeIdempotentAlreadyGone(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build() // no objects
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 	req := httptest.NewRequest("DELETE", "/v1/agents/root", nil)
 	rec := httptest.NewRecorder()
@@ -851,7 +1168,7 @@ func TestDeleteCascadePartialFailure(t *testing.T) {
 		}).
 		Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL)
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
 	req := httptest.NewRequest("DELETE", "/v1/agents/root", nil)
 	rec := httptest.NewRecorder()

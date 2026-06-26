@@ -34,6 +34,11 @@ func main() {
 	// the AWS/prod deploy.sh sets this to the public docs origin.
 	docsURL := getenv("DOCS_URL", "http://localhost:4321")
 
+	// Control-plane secret presented to the orchestrator's dashboard /spawn path
+	// (X-Control-Plane-Token). Comes from the optional `control-plane-auth`
+	// Secret; empty in the "none" tier, which the orchestrator accepts.
+	controlPlaneToken := getenv("CONTROL_PLANE_TOKEN", "")
+
 	staticFS, _ := fs.Sub(staticFiles, "static")
 	mux := http.NewServeMux()
 
@@ -118,7 +123,12 @@ func main() {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		req.Header = r.Header.Clone()
+		// Send CLEAN headers: the dashboard path authenticates with the
+		// control-plane secret, NOT the browser's Authorization header (which
+		// would wrongly trip the orchestrator's agent JWT path). Empty token is
+		// fine in the "none" tier.
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Control-Plane-Token", controlPlaneToken)
 		req.ContentLength = int64(len(body))
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
