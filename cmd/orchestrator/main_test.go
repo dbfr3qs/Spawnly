@@ -1015,11 +1015,19 @@ func TestLogsResolvesPodNameFromStatusAndPhase(t *testing.T) {
 // 404s unknown ids, plus the POST /events endpoint the handler may touch. The
 // subtree intentionally does NOT shrink across calls — mirroring production,
 // where deleting a CR only marks the registry record terminal, not removed.
+//
+// It REQUIRES a userId query param (404 if absent), mirroring the registry's
+// Phase A ownership gate. This proves the orchestrator propagates the inbound
+// ?userId= to the registry on every Subtree call.
 func cascadeMockRegistry(t *testing.T, subtrees map[string][]string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/subtree"):
+			if r.URL.Query().Get("userId") == "" {
+				http.NotFound(w, r) // ownership not asserted → registry denies
+				return
+			}
 			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/agents/"), "/subtree")
 			nodes, ok := subtrees[id]
 			if !ok {
@@ -1062,7 +1070,7 @@ func TestDeleteCascadeChain(t *testing.T) {
 	sdb := spicedb.NewMock()
 	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
-	req := httptest.NewRequest("DELETE", "/v1/agents/root", nil)
+	req := httptest.NewRequest("DELETE", "/v1/agents/root?userId=alice", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -1090,7 +1098,7 @@ func TestDeleteCascadeLeaf(t *testing.T) {
 	sdb := spicedb.NewMock()
 	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
-	req := httptest.NewRequest("DELETE", "/v1/agents/leaf", nil)
+	req := httptest.NewRequest("DELETE", "/v1/agents/leaf?userId=alice", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -1114,12 +1122,46 @@ func TestDeleteCascadeUnknownRoot(t *testing.T) {
 	sdb := spicedb.NewMock()
 	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
-	req := httptest.NewRequest("DELETE", "/v1/agents/ghost", nil)
+	req := httptest.NewRequest("DELETE", "/v1/agents/ghost?userId=alice", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("got %d, want 404", rec.Code)
+	}
+}
+
+// TestDeleteCascadeMissingUserID proves ownership denial surfaces as 404: with
+// no ?userId= on the inbound request, the orchestrator forwards a userId-less
+// Subtree call, the registry (Phase A gate) 404s it, Subtree returns (nil,nil),
+// and the handler's first-pass-empty path returns 404 — even though the CR and
+// its subtree exist.
+func TestDeleteCascadeMissingUserID(t *testing.T) {
+	cascadeSettleDelay = 0
+	mockReg := cascadeMockRegistry(t, map[string][]string{
+		"root": {"root", "a"},
+	})
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(newScheme()).
+		WithObjects(agentWorkloads("root", "a")...).
+		Build()
+	sdb := spicedb.NewMock()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
+
+	req := httptest.NewRequest("DELETE", "/v1/agents/root", nil) // no userId
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("got %d, want 404 (ownership denial surfaces as 404)", rec.Code)
+	}
+	// The CRs must be untouched — denial means we never deleted anything.
+	var list agentv1alpha1.AgentWorkloadList
+	fakeClient.List(context.Background(), &list)
+	if len(list.Items) != 2 {
+		t.Fatalf("expected CRs untouched on ownership denial, %d remain", len(list.Items))
 	}
 }
 
@@ -1137,7 +1179,7 @@ func TestDeleteCascadeIdempotentAlreadyGone(t *testing.T) {
 	sdb := spicedb.NewMock()
 	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
-	req := httptest.NewRequest("DELETE", "/v1/agents/root", nil)
+	req := httptest.NewRequest("DELETE", "/v1/agents/root?userId=alice", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -1170,7 +1212,7 @@ func TestDeleteCascadePartialFailure(t *testing.T) {
 	sdb := spicedb.NewMock()
 	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{}, "orchestrator", "orchestrator:spawn", "")
 
-	req := httptest.NewRequest("DELETE", "/v1/agents/root", nil)
+	req := httptest.NewRequest("DELETE", "/v1/agents/root?userId=alice", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 

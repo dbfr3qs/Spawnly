@@ -4,9 +4,28 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
+
+// TestAgentOpTargetEscapesID asserts a crafted agent id can't smuggle a
+// different userId past the ownership check: the only userId in the resulting
+// URL's query must be the authenticated session user, and the smuggled query
+// must land (escaped) inside the path segment.
+func TestAgentOpTargetEscapesID(t *testing.T) {
+	got := agentOpTarget("http://orch", `realId?userId=victim&x=`, "", "attacker")
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse %q: %v", got, err)
+	}
+	if u.Query().Get("userId") != "attacker" {
+		t.Fatalf("userId = %q, want the session user \"attacker\" (smuggled value won)", u.Query().Get("userId"))
+	}
+	if u.Path != "/v1/agents/realId?userId=victim&x=" {
+		t.Fatalf("crafted id did not stay in the path segment: path=%q", u.Path)
+	}
+}
 
 func TestInjectUserID(t *testing.T) {
 	// A browser-supplied userId is overwritten with the authenticated user.

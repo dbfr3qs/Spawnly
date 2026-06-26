@@ -24,7 +24,7 @@ type Client interface {
 	DismissAgent(ctx context.Context, agentID string) error
 	PreRegisterAgent(ctx context.Context, r AgentRecord) error
 	CheckSpawnPolicy(ctx context.Context, parentID, childType string) (SpawnDecision, error)
-	Subtree(ctx context.Context, id string) ([]string, error)
+	Subtree(ctx context.Context, id, userId string) ([]string, error)
 }
 
 type HTTPClient struct {
@@ -182,8 +182,12 @@ func (c *HTTPClient) CheckSpawnPolicy(ctx context.Context, parentID, childType s
 // regardless of their lifecycle status. An unknown id yields (nil, nil) so the
 // caller can distinguish "registry never heard of this id" (first-pass-empty →
 // 404) from a transport/registry error.
-func (c *HTTPClient) Subtree(ctx context.Context, id string) ([]string, error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", c.base+"/v1/agents/"+id+"/subtree", nil)
+func (c *HTTPClient) Subtree(ctx context.Context, id, userId string) ([]string, error) {
+	u := c.base + "/v1/agents/" + id + "/subtree"
+	if userId != "" {
+		u += "?userId=" + url.QueryEscape(userId)
+	}
+	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -285,7 +289,7 @@ func (m *Mock) DismissAgent(_ context.Context, agentID string) error {
 	return nil
 }
 
-func (m *Mock) Subtree(_ context.Context, id string) ([]string, error) {
+func (m *Mock) Subtree(_ context.Context, id, _ string) ([]string, error) {
 	return m.Subtrees[id], nil
 }
 

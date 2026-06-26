@@ -498,12 +498,13 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	mux.HandleFunc("DELETE /v1/agents/{id}", func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		id := r.PathValue("id")
+		userID := r.URL.Query().Get("userId")
 		const maxPasses = 8
 		deleted := 0
 		failedSet := map[string]bool{} // node ids whose delete errored (non-NotFound)
 
 		for pass := 0; pass < maxPasses; pass++ {
-			nodes, err := regClient.Subtree(ctx, id)
+			nodes, err := regClient.Subtree(ctx, id, userID)
 			if err != nil {
 				if pass == 0 {
 					http.Error(w, "registry unavailable", http.StatusBadGateway)
@@ -566,7 +567,11 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	mux.HandleFunc("POST /v1/agents/{id}/dismiss", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		req2, err := http.NewRequestWithContext(r.Context(), "POST", registryURL+"/v1/agents/"+id+"/dismiss", nil)
+		target := registryURL + "/v1/agents/" + id + "/dismiss"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		req2, err := http.NewRequestWithContext(r.Context(), "POST", target, nil)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -630,10 +635,10 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	// revoke/resume are cascading authorization actions owned by the registry.
 	mux.HandleFunc("POST /v1/agents/{id}/revoke", forwardToRegistry("POST", func(r *http.Request) string {
-		return "/v1/agents/" + r.PathValue("id") + "/revoke"
+		return withQuery("/v1/agents/"+r.PathValue("id")+"/revoke", r)
 	}))
 	mux.HandleFunc("POST /v1/agents/{id}/resume", forwardToRegistry("POST", func(r *http.Request) string {
-		return "/v1/agents/" + r.PathValue("id") + "/resume"
+		return withQuery("/v1/agents/"+r.PathValue("id")+"/resume", r)
 	}))
 
 	mux.HandleFunc("GET /v1/templates", forwardToRegistry("GET", func(*http.Request) string {

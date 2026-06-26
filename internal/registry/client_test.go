@@ -117,7 +117,7 @@ func TestHTTPClientSubtree(t *testing.T) {
 
 	client := registry.New(srv.URL)
 
-	got, err := client.Subtree(context.Background(), "root")
+	got, err := client.Subtree(context.Background(), "root", "alice")
 	if err != nil {
 		t.Fatalf("Subtree(root): %v", err)
 	}
@@ -132,7 +132,7 @@ func TestHTTPClientSubtree(t *testing.T) {
 	}
 
 	// Unknown id → (nil, nil), not an error.
-	got, err = client.Subtree(context.Background(), "ghost")
+	got, err = client.Subtree(context.Background(), "ghost", "alice")
 	if err != nil {
 		t.Fatalf("Subtree(ghost): unexpected error %v", err)
 	}

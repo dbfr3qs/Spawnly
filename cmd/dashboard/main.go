@@ -167,25 +167,29 @@ func main() {
 		copyResponse(w, resp)
 	})))
 	mux.Handle("DELETE /api/agents/{id}", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, _ := auth.user(r) // require() guarantees a session
 		id := r.PathValue("id")
-		proxy("DELETE", orchestratorURL+"/v1/agents/"+id)(w, r)
+		proxy("DELETE", agentOpTarget(orchestratorURL, id, "", user))(w, r)
 	})))
 	mux.Handle("POST /api/agents/{id}/message", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		proxy("POST", orchestratorURL+"/v1/agents/"+id+"/message")(w, r)
 	})))
 	mux.Handle("POST /api/agents/{id}/dismiss", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, _ := auth.user(r) // require() guarantees a session
 		id := r.PathValue("id")
-		proxy("POST", orchestratorURL+"/v1/agents/"+id+"/dismiss")(w, r)
+		proxy("POST", agentOpTarget(orchestratorURL, id, "/dismiss", user))(w, r)
 	})))
 	// revoke/resume cascade an authorization change down the agent's subtree.
 	mux.Handle("POST /api/agents/{id}/revoke", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, _ := auth.user(r) // require() guarantees a session
 		id := r.PathValue("id")
-		proxy("POST", orchestratorURL+"/v1/agents/"+id+"/revoke")(w, r)
+		proxy("POST", agentOpTarget(orchestratorURL, id, "/revoke", user))(w, r)
 	})))
 	mux.Handle("POST /api/agents/{id}/resume", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, _ := auth.user(r) // require() guarantees a session
 		id := r.PathValue("id")
-		proxy("POST", orchestratorURL+"/v1/agents/"+id+"/resume")(w, r)
+		proxy("POST", agentOpTarget(orchestratorURL, id, "/resume", user))(w, r)
 	})))
 	mux.Handle("GET /api/templates", auth.require(proxy("GET", orchestratorURL+"/v1/templates")))
 	// Template management — forward to the orchestrator (which forwards to the
@@ -253,6 +257,16 @@ func copyResponse(w http.ResponseWriter, resp *http.Response) {
 	}
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
+}
+
+// agentOpTarget builds the orchestrator URL for an ownership-scoped per-agent
+// op. The agent id is PathEscape'd into its path segment so a crafted id (e.g.
+// one containing "?userId=<victim>") can't smuggle a different userId past the
+// ownership check — without escaping, that smuggled query would win over the
+// session user appended here. The scope is bound to the authenticated session
+// user via the trailing userId query.
+func agentOpTarget(base, id, suffix, user string) string {
+	return base + "/v1/agents/" + url.PathEscape(id) + suffix + "?userId=" + url.QueryEscape(user)
 }
 
 // injectUserID overwrites the spawn request's userId with the authenticated
