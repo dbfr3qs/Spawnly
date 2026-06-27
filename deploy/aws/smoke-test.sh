@@ -25,46 +25,44 @@ if [ -z "$ready" ]; then
 fi
 
 echo "==> spawning test worker (userId=alice tenantId=acme agentType=chain-worker)"
-WL=$(curl -s -X POST localhost:8080/spawn -H 'Content-Type: application/json' \
-  -d '{"userId":"alice","tenantId":"acme","agentType":"chain-worker","task":"call the sample API"}' \
-  | jq -r .workloadName)
+# /spawn is authenticated. This is the dashboard path (no Authorization header, a
+# top-level human spawn), which authenticates with the X-Control-Plane-Token
+# shared secret from the control-plane-auth Secret. Absent secret = demo/none
+# tier, where the dashboard path runs open and no header is needed.
+CP_TOKEN=$(kubectl get secret control-plane-auth -o jsonpath='{.data.token}' 2>/dev/null | base64 -d 2>/dev/null || true)
+cp_header=()
+[ -n "$CP_TOKEN" ] && cp_header=(-H "X-Control-Plane-Token: ${CP_TOKEN}")
+resp=$(curl -s -X POST localhost:8080/spawn -H 'Content-Type: application/json' "${cp_header[@]}" \
+  -d '{"userId":"alice","tenantId":"acme","agentType":"chain-worker","task":"call the sample API"}')
+WL=$(printf '%s' "$resp" | jq -r .workloadName 2>/dev/null)
 if [ -z "$WL" ] || [ "$WL" = "null" ]; then
   echo "ERROR: spawn did not return a workloadName" >&2
+  echo "       response: ${resp:-<empty>}" >&2
+  [ -n "$CP_TOKEN" ] || echo "       (no control-plane-auth Secret found — if the orchestrator expects one, the spawn was rejected as unauthorized)" >&2
   exit 1
 fi
 echo "    workload: $WL"
 
 # chain-worker is long-lived (it loops + self-spawns one child of its own type
 # up to the template's maxDepth), so unlike a job-and-exit worker it never
-# terminates on its own. DELETE is NOT cascading on this platform (only
-# revoke/resume cascade), so reap the whole subtree explicitly: BFS the parentId
-# tree from $WL over the agents list and delete every descendant plus the root.
+# terminates on its own. DELETE /v1/agents/{id} now cascades the whole subtree
+# server-side, so one ownership-scoped DELETE reaps the root and every
+# descendant. The userId scope is mandatory: reads/lifecycle are owner-scoped and
+# an empty userId owns nothing, so an unscoped DELETE would no-op (404) and leak
+# the running subtree (AWS cost).
 teardown() {
   kill $PF 2>/dev/null || true
   [ -n "${WL:-}" ] || return 0
-  local agents to_delete frontier next p kids id
-  agents=$(curl -s --max-time 5 localhost:8080/v1/agents 2>/dev/null || echo '[]')
-  to_delete="$WL"; frontier="$WL"
-  for _ in $(seq 1 5); do # maxDepth is 4; one extra pass for safety
-    next=""
-    for p in $frontier; do
-      kids=$(echo "$agents" | jq -r --arg p "$p" '.[] | select(.parentId == $p) | .agentId' 2>/dev/null)
-      next="$next $kids"
-    done
-    next=$(echo "$next" | xargs -n1 2>/dev/null | sort -u)
-    [ -n "$next" ] || break
-    to_delete="$to_delete $next"; frontier="$next"
-  done
-  for id in $(echo "$to_delete" | xargs -n1 | sort -u); do
-    curl -s --max-time 5 -X DELETE "localhost:8080/v1/agents/$id" >/dev/null 2>&1 || true
-  done
+  curl -s --max-time 10 -X DELETE "localhost:8080/v1/agents/$WL?userId=alice" >/dev/null 2>&1 || true
 }
 trap teardown EXIT
 
 echo "==> waiting for the worker's first authorized sample-api call"
+# Events are owner-scoped too — without userId the read 404s and never observes
+# work_ok, falsely failing the test.
 events=""
 for _ in $(seq 1 45); do
-  events=$(curl -s "localhost:8080/v1/agents/$WL/events" | jq -r '.[].type')
+  events=$(curl -s "localhost:8080/v1/agents/$WL/events?userId=alice" | jq -r '.[].type' 2>/dev/null)
   echo "$events" | grep -qE 'work_ok|work_denied|pod_failed' && break
   sleep 2
 done
