@@ -643,7 +643,26 @@ func resumeNode(ctx context.Context, s registry.Store, sdb spicedb.Client, id st
 	return true
 }
 
-func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier, cpAuth controlplane.Authenticator) *http.ServeMux {
+// rejectDuplicateUserID is a defense-in-depth guard for every userId-scoped
+// ownership/consent check in the registry. Those handlers read userId with
+// url.Values.Get, which returns only the FIRST value, so a request carrying
+// userId more than once — e.g. a smuggled `?userId=victim` sitting ahead of a
+// caller-appended real one — would silently scope to the attacker-chosen value
+// (a confused deputy). A well-formed caller never sends userId twice, so a
+// duplicate is a bug or an attack: reject it (400) rather than guess which is
+// authoritative. This makes the smuggle impossible at the source, independent of
+// how any upstream caller builds the query string.
+func rejectDuplicateUserID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(r.URL.Query()["userId"]) > 1 {
+			http.Error(w, "duplicate userId query parameter", http.StatusBadRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier, cpAuth controlplane.Authenticator) http.Handler {
 	mux := http.NewServeMux()
 
 	// Control-plane caller authentication for the consent lifecycle endpoints.
@@ -1506,7 +1525,7 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		json.NewEncoder(w).Encode(types)
 	})
 
-	return mux
+	return rejectDuplicateUserID(mux)
 }
 
 func getEnv(key, fallback string) string {
