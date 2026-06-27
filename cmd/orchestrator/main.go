@@ -669,10 +669,29 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		return path
 	}
 
-	mux.HandleFunc("POST /v1/agents/{id}/dismiss", requireToken(validator, audience, writeScope, func(w http.ResponseWriter, r *http.Request) {
+	// requireOwnedAgent is the primary ownership gate for the per-agent ops the
+	// orchestrator forwards to the registry (dismiss/revoke/resume). It sits
+	// INSIDE requireToken — which has already validated the access token and put
+	// the user (token sub) in the context — and denies (404, never 403, so
+	// ownership isn't enumerable) unless that user owns the {id} agent per its
+	// registry record. This makes the validated sub authoritative, mirroring the
+	// DELETE/events/logs/message handlers; the forwarded userId + the registry's
+	// own agentOwnedBy check remain as a defense-in-depth backstop.
+	requireOwnedAgent := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !ownsAgent(r.Context(), regClient, r.PathValue("id"), userIDFrom(r.Context())) {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			next(w, r)
+		}
+	}
+
+	mux.HandleFunc("POST /v1/agents/{id}/dismiss", requireToken(validator, audience, writeScope, requireOwnedAgent(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		// The registry's dismiss handler enforces ownership via the userId
-		// query; inject it from the token so the dashboard no longer needs to.
+		// Ownership is enforced above by requireOwnedAgent (token sub); the
+		// forwarded userId keeps the registry's own agentOwnedBy check as a
+		// backstop.
 		req2, err := http.NewRequestWithContext(r.Context(), "POST",
 			registryURL+withUserID("/v1/agents/"+id+"/dismiss", r), nil)
 		if err != nil {
@@ -686,7 +705,7 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		}
 		defer resp.Body.Close()
 		w.WriteHeader(resp.StatusCode)
-	}))
+	})))
 
 	// controlPlaneBearer yields the bearer the orchestrator (a trusted
 	// control-plane caller) presents on every forwarded consent request. Its
@@ -731,12 +750,14 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	}
 
 	// revoke/resume are cascading authorization actions owned by the registry.
-	mux.HandleFunc("POST /v1/agents/{id}/revoke", requireToken(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
+	// Ownership is gated here at the orchestrator (requireOwnedAgent, token sub);
+	// the forwarded userId leaves the registry's agentOwnedBy check as a backstop.
+	mux.HandleFunc("POST /v1/agents/{id}/revoke", requireToken(validator, audience, writeScope, requireOwnedAgent(forwardToRegistry("POST", func(r *http.Request) string {
 		return withUserID("/v1/agents/"+r.PathValue("id")+"/revoke", r)
-	})))
-	mux.HandleFunc("POST /v1/agents/{id}/resume", requireToken(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
+	}))))
+	mux.HandleFunc("POST /v1/agents/{id}/resume", requireToken(validator, audience, writeScope, requireOwnedAgent(forwardToRegistry("POST", func(r *http.Request) string {
 		return withUserID("/v1/agents/"+r.PathValue("id")+"/resume", r)
-	})))
+	}))))
 
 	mux.HandleFunc("GET /v1/templates", requireToken(validator, audience, readScope, forwardToRegistry("GET", func(*http.Request) string {
 		return "/v1/templates"
