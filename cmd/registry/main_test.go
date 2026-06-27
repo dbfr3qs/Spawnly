@@ -33,6 +33,29 @@ func workerTemplate() registry.AgentTemplate {
 	}
 }
 
+// TestRejectDuplicateUserID verifies the registry rejects any request carrying
+// userId more than once. The userId-scoped handlers read it with Query().Get
+// (first value wins), so a smuggled duplicate would scope to the attacker's
+// value; the guard fails such requests closed (400) before routing, while a
+// single userId still passes through.
+func TestRejectDuplicateUserID(t *testing.T) {
+	mux := buildMux(newStore(), spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+
+	// Two userId params → 400, before the handler ever runs.
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/consents?userId=victim&userId=attacker", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate userId: got %d, want 400", rec.Code)
+	}
+
+	// A single userId is unaffected (empty result for an unknown user, 200).
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/consents?userId=alice", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("single userId: got %d, want 200", rec.Code)
+	}
+}
+
 func TestTemplateCRUD(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()
@@ -984,7 +1007,7 @@ func parentTemplate() registry.AgentTemplate {
 	}
 }
 
-func decodeDelegation(t *testing.T, mux *http.ServeMux, query string) struct {
+func decodeDelegation(t *testing.T, mux http.Handler, query string) struct {
 	Allowed         bool     `json:"allowed"`
 	GrantableScopes []string `json:"grantableScopes"`
 	MaxDepth        int      `json:"maxDepth"`
