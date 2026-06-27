@@ -25,6 +25,14 @@ spec:
               value: "poc-secret"
             - name: REGISTRY_URL
               value: "http://registry:8080"
+            # IdentityServer issuer + JWKS for validating agent spawn tokens
+            # (buildSpawnValidator). The Service listens on :8080 — without the
+            # explicit port the code default (:80) has no Service route, so the
+            # orchestrator wedges in its JWKS retry loop and never serves /spawn.
+            - name: IS_ISSUER
+              value: "http://identity-server:8080"
+            - name: IS_JWKS_URL
+              value: "http://identity-server:8080/.well-known/openid-configuration/jwks"
             # Control-plane auth the orchestrator presents to the registry's
             # template + consent endpoints; must match the registry's setting.
             # Both values come from the optional `control-plane-auth` Secret that
