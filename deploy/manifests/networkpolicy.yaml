@@ -1,0 +1,131 @@
+# Ingress NetworkPolicies for the sensitive control-plane services. They close
+# the "any in-cluster pod can reach the registry/orchestrator" lateral-movement
+# gap (flagged in the ownership-scoping security reviews): once a policy selects
+# a pod, that pod denies all ingress EXCEPT what's listed here.
+#
+# Scope & safety choices:
+#  - INGRESS ONLY. No egress rules, so pods keep full outbound + DNS — egress
+#    default-deny is the classic way to break a cluster and is deliberately avoided.
+#  - Only registry / orchestrator / spicedb are selected. Every other pod
+#    (dashboard, identity-server, sample-apis, travel-tools, agents) is left
+#    untouched and fully reachable — small blast radius. dashboard stays open as
+#    the OIDC-fronted public entry; identity-server stays open because its JWKS is
+#    fetched by nearly every token-validating service.
+#  - Agent pods are matched by the operator-stamped `agent-platform.io/managed`
+#    label (internal/operator/reconciler.go buildPod).
+#
+# Threat model & residuals (this is defense-in-depth, NOT an authz boundary):
+#  - The `app:`/`agent-platform.io/managed` selectors assume an attacker cannot
+#    create pods or set labels in `default` (no k8s API write). Anyone who can
+#    `kubectl run` a pod labelled `app: orchestrator` bypasses the policy — the
+#    real access control stays SVID/token auth at each endpoint (Phase 0/1 work).
+#    This raises the cost of lateral movement from an already-running unprivileged
+#    pod; it is not a substitute for endpoint auth.
+#  - identity-server, dashboard, sample-apis, travel-tools, and ALL egress are
+#    intentionally left open (each is independently token/SVID-authenticated, and
+#    egress default-deny would break DNS/JWKS/SpiceDB/AI calls). identity-server
+#    (token minting + JWKS fan-out) is the most sensitive unpoliced surface.
+#
+# CNI caveats (enforcement is CNI-dependent — validate on the target):
+#  - RECENT kindnet enforces NetworkPolicy: verified on a local `make bootstrap`
+#    cluster — a rogue pod (no allow-listed label) was blocked from registry:8080
+#    (8s drop) while still reaching the unpoliced identity-server, and an
+#    allow-listed caller plus a real spawn worked. Older kindnet did not enforce,
+#    so treat it as version-dependent. On EKS, enforcement requires the AWS VPC
+#    CNI network-policy controller to be ENABLED on the addon, not just installed.
+#  - registry has a readinessProbe (kubelet -> pod:8080). It stayed Ready under
+#    enforcement on kindnet (host-sourced probe traffic isn't policed); Calico and
+#    the AWS VPC CNI special-case it too. If a CNI ever polices it, add an ipBlock
+#    for the node CIDR to the registry policy.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: registry-ingress
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: registry
+  policyTypes:
+    - Ingress
+  ingress:
+    # orchestrator (templates/agents/subtree/consent), operator (Complete/Fail
+    # PATCH), identity-server (CIBA/spawn-policy/consent lookups during token
+    # minting), and agent sidecars (selfRegister, updateStatus, events).
+    - from:
+        - podSelector:
+            matchLabels:
+              app: orchestrator
+        - podSelector:
+            matchLabels:
+              app: agent-operator
+        - podSelector:
+            matchLabels:
+              app: identity-server
+        - podSelector:
+            matchLabels:
+              agent-platform.io/managed: "true"
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orchestrator-ingress
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: orchestrator
+  policyTypes:
+    - Ingress
+  ingress:
+    # dashboard (proxies the UI's /v1/* + /spawn), operator (ORCHESTRATOR_URL),
+    # and agent sidecars (/spawn, and DELETE for child teardown).
+    - from:
+        - podSelector:
+            matchLabels:
+              app: dashboard
+        - podSelector:
+            matchLabels:
+              app: agent-operator
+        - podSelector:
+            matchLabels:
+              agent-platform.io/managed: "true"
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spicedb-ingress
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: spicedb
+  policyTypes:
+    - Ingress
+  ingress:
+    # The only SpiceDB clients: registry + orchestrator (authority writes/checks)
+    # and the two sample-apis (per-request work_on chain checks). SpiceDB is also
+    # PSK-protected, so this is defense-in-depth on top of the preshared key.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: registry
+        - podSelector:
+            matchLabels:
+              app: orchestrator
+        - podSelector:
+            matchLabels:
+              app: sample-api-a
+        - podSelector:
+            matchLabels:
+              app: sample-api-b
+      ports:
+        - protocol: TCP
+          port: 50051

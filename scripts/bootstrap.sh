@@ -225,6 +225,9 @@ kubectl apply -f deploy/manifests/travel-tools.yaml
 kubectl apply -f deploy/manifests/operator.yaml
 kubectl apply -f deploy/manifests/orchestrator.yaml
 kubectl apply -f deploy/manifests/dashboard.yaml
+# Ingress NetworkPolicies for registry/orchestrator/spicedb. Inert under kind's
+# default kindnet (no NetworkPolicy enforcement) — see the file header.
+kubectl apply -f deploy/manifests/networkpolicy.yaml
 
 # On a pre-existing cluster the manifests are unchanged (image tags are
 # `:latest`), so the applies above are no-ops and the running pods keep the
