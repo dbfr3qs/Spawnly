@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -15,6 +16,11 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 )
+
+// errNoSession is returned by orchestratorToken when the request carries no
+// (valid) dashboard session — callers turn it into a fail-closed error rather
+// than calling the orchestrator unauthenticated.
+var errNoSession = errors.New("no dashboard session")
 
 // Authenticator turns the dashboard into a confidential OIDC relying party.
 //
@@ -44,7 +50,14 @@ type Authenticator struct {
 type session struct {
 	username   string
 	rawIDToken string // kept for the logout id_token_hint
-	expiresAt  time.Time
+	// tokenSrc yields the delegated OAuth access token the dashboard presents to
+	// the orchestrator (audienced for "orchestrator", sub=userId, scope
+	// orchestrator:read/write). It is a ReuseTokenSource: it caches the current
+	// access token and refreshes it (once, under its own mutex) via the refresh
+	// token when it expires — so the dashboard's concurrent /api/* calls don't
+	// race to redeem a rotating refresh token.
+	tokenSrc  oauth2.TokenSource
+	expiresAt time.Time
 }
 
 type pendingLogin struct {
@@ -92,7 +105,11 @@ func (a *Authenticator) ensure(ctx context.Context) error {
 			ClientSecret: a.clientSecret,
 			Endpoint:     endpoint,
 			RedirectURL:  a.authority + "/callback",
-			Scopes:       []string{oidc.ScopeOpenID, "profile"},
+			// openid/profile drive the human's id_token; orchestrator:read/write are
+			// the delegated authority the access token carries to the orchestrator;
+			// offline_access mints the refresh token that keeps it fresh for the
+			// session's lifetime.
+			Scopes: []string{oidc.ScopeOpenID, "profile", "orchestrator:read", "orchestrator:write", "offline_access"},
 		}
 
 		a.verifier = provider.Verifier(&oidc.Config{ClientID: a.clientID})
@@ -185,8 +202,13 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 	username := firstNonEmpty(claims.PreferredUsername, claims.Sub)
 
 	sid := randToken()
+	// Build the reusable, refresh-capable token source once for the session.
+	// context.Background() (not the request ctx) so refreshes aren't bound to a
+	// single request's lifetime; refresh runs against the discovered (internal)
+	// token endpoint, preserving split-horizon.
+	tokenSrc := a.oauth.TokenSource(context.Background(), tok)
 	a.mu.Lock()
-	a.sessions[sid] = session{username: username, rawIDToken: rawID, expiresAt: time.Now().Add(8 * time.Hour)}
+	a.sessions[sid] = session{username: username, rawIDToken: rawID, tokenSrc: tokenSrc, expiresAt: time.Now().Add(8 * time.Hour)}
 	a.mu.Unlock()
 
 	http.SetCookie(w, &http.Cookie{
@@ -256,6 +278,51 @@ func isPageNavigation(r *http.Request) bool {
 		return dest == "document"
 	}
 	return strings.Contains(r.Header.Get("Accept"), "text/html")
+}
+
+// orchestratorToken returns a valid orchestrator access token for the request's
+// session, refreshing it transparently via the OAuth refresh token when it is
+// near/after expiry. The rotated token is cached inside the session's shared
+// ReuseTokenSource (not rewritten into the session map), so it survives across
+// requests. It returns errNoSession when there is no (live) session — callers
+// map that to a 401 — and a wrapped error when the session has no token source
+// or a refresh fails (callers fail closed with a 5xx); never an empty/stale token.
+//
+// Refresh runs against the discovered token endpoint, which is the internal
+// identity-server URL (split-horizon: see ensure), so the back-channel never
+// depends on the browser-facing origin.
+func (a *Authenticator) orchestratorToken(ctx context.Context, r *http.Request) (string, error) {
+	if err := a.ensure(ctx); err != nil {
+		return "", err
+	}
+	c, err := r.Cookie(sessionCookie)
+	if err != nil || c.Value == "" {
+		return "", errNoSession
+	}
+	a.mu.Lock()
+	s, ok := a.sessions[c.Value]
+	if ok && time.Now().After(s.expiresAt) {
+		delete(a.sessions, c.Value)
+		ok = false
+	}
+	a.mu.Unlock()
+	if !ok {
+		return "", errNoSession
+	}
+	if s.tokenSrc == nil {
+		return "", errors.New("session has no orchestrator token")
+	}
+
+	// The session's ReuseTokenSource returns the cached access token, refreshing
+	// (once, under its own mutex) when expired — safe under concurrent calls.
+	tok, err := s.tokenSrc.Token()
+	if err != nil {
+		return "", fmt.Errorf("refresh orchestrator token: %w", err)
+	}
+	if tok.AccessToken == "" {
+		return "", errors.New("empty orchestrator access token")
+	}
+	return tok.AccessToken, nil
 }
 
 // user returns the logged-in username for the request, if any.

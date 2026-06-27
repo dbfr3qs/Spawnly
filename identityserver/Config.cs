@@ -42,6 +42,13 @@ public static class Config
             // Phase 0: an agent presents a token carrying this scope (audienced
             // for the orchestrator) to authenticate POST /spawn.
             new ApiScope("orchestrator:spawn", "Spawn child agents via the orchestrator"),
+            // The dashboard (a confidential OIDC relying party acting for the
+            // logged-in human) presents an orchestrator-audienced access token
+            // carrying these to authenticate its calls: read for the read-only
+            // routes (list/events/logs/templates/consents), write for every
+            // mutating route (spawn/message/dismiss/delete/revoke/resume/...).
+            new ApiScope("orchestrator:read", "Read via the orchestrator"),
+            new ApiScope("orchestrator:write", "Act via the orchestrator"),
         };
 
     // ApiResources give the access token its audience (`aud`): the resource name is
@@ -70,10 +77,11 @@ public static class Config
                 Scopes = { "registry.consent" },
             },
             // Gives a spawn token the audience the orchestrator validates
-            // ("orchestrator") when an agent calls POST /spawn.
+            // ("orchestrator") when an agent calls POST /spawn, and the same
+            // audience to the dashboard's read/write access tokens.
             new ApiResource("orchestrator", "Agent Orchestrator")
             {
-                Scopes = { "orchestrator:spawn" },
+                Scopes = { "orchestrator:spawn", "orchestrator:read", "orchestrator:write" },
             },
         };
 
@@ -102,7 +110,16 @@ public static class Config
                 },
                 RedirectUris = { $"{DashboardOrigin}/callback" },
                 PostLogoutRedirectUris = { $"{DashboardOrigin}/" },
-                AllowedScopes = { "openid", "profile" },
+                // offline_access mints a refresh token so the dashboard backend
+                // can keep its short-lived orchestrator access token fresh for
+                // the life of the 8h browser session without re-driving login.
+                AllowOfflineAccess = true,
+                // openid/profile drive the human's id_token; orchestrator:read /
+                // orchestrator:write are the delegated authority the dashboard
+                // presents to the orchestrator (aud=orchestrator, sub=userId).
+                // NOT orchestrator:spawn — human spawn uses orchestrator:write;
+                // spawn stays agent-only.
+                AllowedScopes = { "openid", "profile", "orchestrator:read", "orchestrator:write" },
             },
             // Control-plane clients (CONTROL_PLANE_AUTH=oidc). Unlike the agent
             // clients above — authenticated via SPIFFE JWT-SVID with a

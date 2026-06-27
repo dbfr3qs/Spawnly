@@ -57,3 +57,5 @@ kubeconfig
 
 # Duende auto-generated dev signing keys (local runs)
 identityserver/keys/
+plans/
+.piignore
