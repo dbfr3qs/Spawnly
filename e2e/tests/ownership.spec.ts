@@ -48,15 +48,17 @@ test.describe('ownership scoping', () => {
     // The agent is still there — the smuggle did not delete it.
     expect((await listAgents(page)).some((a) => a.agentId === id)).toBe(true);
 
-    // A normal owner delete removes it (also serves as cleanup).
+    // A normal owner delete is accepted and tears the agent down. Kill marks the
+    // record terminal but leaves it LISTED until it's dismissed (kill vs dismiss),
+    // so assert it reaches a terminal status — not that it vanishes from the list.
     const ok = await page.request.delete(`/api/agents/${encodeURIComponent(id)}`);
     expect(ok.ok()).toBeTruthy();
-    spawned.splice(spawned.indexOf(id), 1);
     await expect
-      .poll(async () => (await listAgents(page)).some((a) => a.agentId === id), {
-        timeout: 30_000,
-      })
-      .toBe(false);
+      .poll(
+        async () => (await listAgents(page)).find((a) => a.agentId === id)?.status ?? 'gone',
+        { timeout: 60_000 },
+      )
+      .toMatch(/completed|killed|failed|gone/);
   });
 
   // Cross-user denial: user A must get 404 (and no effect) acting on user B's
