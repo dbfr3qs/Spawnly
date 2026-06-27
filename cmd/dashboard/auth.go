@@ -282,9 +282,11 @@ func isPageNavigation(r *http.Request) bool {
 
 // orchestratorToken returns a valid orchestrator access token for the request's
 // session, refreshing it transparently via the OAuth refresh token when it is
-// near/after expiry and writing the rotated token back into the session. It
-// returns an error (so callers fail closed with a 5xx) when there is no session,
-// the session has no token, or a refresh fails — never an empty/stale token.
+// near/after expiry. The rotated token is cached inside the session's shared
+// ReuseTokenSource (not rewritten into the session map), so it survives across
+// requests. It returns errNoSession when there is no (live) session — callers
+// map that to a 401 — and a wrapped error when the session has no token source
+// or a refresh fails (callers fail closed with a 5xx); never an empty/stale token.
 //
 // Refresh runs against the discovered token endpoint, which is the internal
 // identity-server URL (split-horizon: see ensure), so the back-channel never

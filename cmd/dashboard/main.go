@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"log"
@@ -96,11 +97,17 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	// Every orchestrator call carries the session's delegated access token as
 	// `Authorization: Bearer` (the orchestrator derives userId + scopes from it).
 	// We send CLEAN headers — only Content-Type and the bearer — so the browser's
-	// own cookies/Authorization never leak upstream. A missing/unrefreshable token
-	// fails closed (502) rather than calling the orchestrator unauthenticated.
+	// own cookies/Authorization never leak upstream. We fail closed rather than
+	// calling the orchestrator unauthenticated: an expired/absent session is the
+	// caller's problem (401, so the UI can re-drive login), an unrefreshable token
+	// is ours (502).
 	proxy := func(method, target string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			token, err := auth.orchestratorToken(r.Context(), r)
+			if errors.Is(err, errNoSession) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
 			if err != nil {
 				http.Error(w, "auth unavailable", http.StatusBadGateway)
 				return

@@ -835,6 +835,38 @@ func TestRevokeResumeProxyToRegistry(t *testing.T) {
 	}
 }
 
+// TestForwardedRouteUserIDNotSpoofable verifies that a client-supplied userId on
+// a registry-forwarded route cannot override the token's user. The registry reads
+// userId with url.Values.Get (first value wins), so withUserID must Del the
+// inbound userId and Set the token's — appending would let the spoofed value win.
+func TestForwardedRouteUserIDNotSpoofable(t *testing.T) {
+	var gotUserIDs []string
+	mockReg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUserIDs = append(gotUserIDs, r.URL.Query().Get("userId"))
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{}`))
+	}))
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	sdb := spicedb.NewMock()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: humanClaims("alice", "orchestrator:write", "orchestrator:read")}, "orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
+
+	// Attacker (token sub=alice) tries to act on victim's records by smuggling a
+	// userId query param.
+	req := httptest.NewRequest("POST", "/v1/agents/a1/revoke?userId=victim", nil)
+	req.Header.Set("Authorization", "Bearer alice-token")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+	if len(gotUserIDs) != 1 || gotUserIDs[0] != "alice" {
+		t.Fatalf("registry saw userId %v, want [alice] (token sub, not the spoofed value)", gotUserIDs)
+	}
+}
+
 func TestDeleteAgent_NotFound(t *testing.T) {
 	mockReg := defaultMockRegistry(t)
 	defer mockReg.Close()

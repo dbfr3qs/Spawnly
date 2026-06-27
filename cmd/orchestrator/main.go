@@ -10,7 +10,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -651,36 +650,23 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		w.WriteHeader(http.StatusNoContent) // 204
 	}))
 
-	// withUserID adds the authenticated userId (from the token context) as a
-	// query parameter to a registry path, appended after any existing query
-	// params so the userId wins for ownership scoping. Used by every route whose
-	// handler ultimately calls a registry endpoint that requires userId.
+	// withUserID returns a registry path that forwards the inbound query string
+	// but forces userId to the token's authenticated user, for every route whose
+	// registry endpoint scopes ownership by userId. Any client-supplied userId is
+	// dropped and replaced: the registry reads userId with url.Values.Get, which
+	// returns the FIRST value, so appending a second userId would let an injected
+	// one win — we Set instead, making the token's user authoritative. Empty token
+	// context leaves userId unset and lets the registry reject.
 	withUserID := func(path string, r *http.Request) string {
-		uid := userIDFrom(r.Context())
-		if uid == "" {
-			return path // no auth context — let the registry reject
-		}
-		sep := "?"
-		if strings.Contains(path, "?") {
-			sep = "&"
-		}
-		return path + sep + "userId=" + url.QueryEscape(uid)
-	}
-	withQuery := func(path string, r *http.Request) string {
-		p := path
-		if r.URL.RawQuery != "" {
-			p += "?" + r.URL.RawQuery
-		}
-		// Inject the token userId as a final query parameter so the registry
-		// scopes to this user (the dashboard no longer sends it).
+		q := r.URL.Query()
+		q.Del("userId")
 		if uid := userIDFrom(r.Context()); uid != "" {
-			if strings.Contains(p, "?") {
-				p += "&userId=" + url.QueryEscape(uid)
-			} else {
-				p += "?userId=" + url.QueryEscape(uid)
-			}
+			q.Set("userId", uid)
 		}
-		return p
+		if enc := q.Encode(); enc != "" {
+			return path + "?" + enc
+		}
+		return path
 	}
 
 	mux.HandleFunc("POST /v1/agents/{id}/dismiss", requireToken(validator, audience, writeScope, func(w http.ResponseWriter, r *http.Request) {
@@ -746,10 +732,10 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	// revoke/resume are cascading authorization actions owned by the registry.
 	mux.HandleFunc("POST /v1/agents/{id}/revoke", requireToken(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
-		return withQuery("/v1/agents/"+r.PathValue("id")+"/revoke", r)
+		return withUserID("/v1/agents/"+r.PathValue("id")+"/revoke", r)
 	})))
 	mux.HandleFunc("POST /v1/agents/{id}/resume", requireToken(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
-		return withQuery("/v1/agents/"+r.PathValue("id")+"/resume", r)
+		return withUserID("/v1/agents/"+r.PathValue("id")+"/resume", r)
 	})))
 
 	mux.HandleFunc("GET /v1/templates", requireToken(validator, audience, readScope, forwardToRegistry("GET", func(*http.Request) string {
@@ -772,10 +758,10 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	// management view (list per user, revoke to force a re-prompt next spawn).
 	// The query string carries the dashboard's session-user scoping.
 	mux.HandleFunc("GET /v1/consents", requireToken(validator, audience, readScope, forwardToRegistry("GET", func(r *http.Request) string {
-		return withQuery("/v1/consents", r)
+		return withUserID("/v1/consents", r)
 	})))
 	mux.HandleFunc("POST /v1/consents/{id}/revoke", requireToken(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
-		return withQuery("/v1/consents/"+r.PathValue("id")+"/revoke", r)
+		return withUserID("/v1/consents/"+r.PathValue("id")+"/revoke", r)
 	})))
 
 	// Brokered consent requests (Phase 5b): registry passthroughs for the
@@ -783,13 +769,13 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	// string carries the session-user scoping (status=pending&userId=... on the
 	// list, userId=... on approve/deny for confused-deputy protection).
 	mux.HandleFunc("GET /v1/consent-requests", requireToken(validator, audience, readScope, forwardToRegistry("GET", func(r *http.Request) string {
-		return withQuery("/v1/consent-requests", r)
+		return withUserID("/v1/consent-requests", r)
 	})))
 	mux.HandleFunc("POST /v1/consent-requests/{id}/approve", requireToken(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
-		return withQuery("/v1/consent-requests/"+r.PathValue("id")+"/approve", r)
+		return withUserID("/v1/consent-requests/"+r.PathValue("id")+"/approve", r)
 	})))
 	mux.HandleFunc("POST /v1/consent-requests/{id}/deny", requireToken(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
-		return withQuery("/v1/consent-requests/"+r.PathValue("id")+"/deny", r)
+		return withUserID("/v1/consent-requests/"+r.PathValue("id")+"/deny", r)
 	})))
 
 	mux.HandleFunc("POST /v1/agents/{id}/message", requireToken(validator, audience, writeScope, func(w http.ResponseWriter, r *http.Request) {
