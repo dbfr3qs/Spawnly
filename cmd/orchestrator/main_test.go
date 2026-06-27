@@ -807,6 +807,14 @@ func TestListAgentsProxiesToRegistry(t *testing.T) {
 func TestRevokeResumeProxyToRegistry(t *testing.T) {
 	var gotPaths []string
 	mockReg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The orchestrator's requireOwnedAgent pre-check looks up the agent; serve
+		// it as alice-owned (the token's user) so the gate passes. Not recorded in
+		// gotPaths, which asserts only the forwarded action paths.
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/agents/a1" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(registry.AgentRecord{AgentID: "a1", UserID: "alice"})
+			return
+		}
 		gotPaths = append(gotPaths, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"revoked":["a1","a2"]}`))
@@ -842,6 +850,13 @@ func TestRevokeResumeProxyToRegistry(t *testing.T) {
 func TestForwardedRouteUserIDNotSpoofable(t *testing.T) {
 	var gotUserIDs []string
 	mockReg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The requireOwnedAgent pre-check looks up the agent (no userId query);
+		// serve it as alice-owned so the gate passes, without recording it.
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/agents/a1" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(registry.AgentRecord{AgentID: "a1", UserID: "alice"})
+			return
+		}
 		gotUserIDs = append(gotUserIDs, r.URL.Query().Get("userId"))
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{}`))
@@ -1500,5 +1515,70 @@ func TestMessageOwnershipGate(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code == http.StatusNotFound {
 		t.Fatalf("owner message: got 404, want past the ownership gate")
+	}
+}
+
+// ownershipActionMock serves the agent lookups requireOwnedAgent needs (parent-1
+// owned by alice, bob-1 owned by bob) and records every per-agent ACTION path
+// (dismiss/revoke/resume) the orchestrator forwards, so a test can assert a
+// blocked request never reached the registry's action handler. The recorded
+// hits are appended to *hits.
+func ownershipActionMock(t *testing.T, hits *[]string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents/parent-1":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(registry.AgentRecord{AgentID: "parent-1", UserID: "alice"})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents/bob-1":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(registry.AgentRecord{AgentID: "bob-1", UserID: "bob"})
+		case r.Method == http.MethodPost:
+			*hits = append(*hits, r.URL.Path)
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+// TestForwardedOpsOwnershipGate covers requireOwnedAgent on the three per-agent
+// ops the orchestrator forwards: a non-owner (alice acting on bob's agent) is
+// rejected (404) at the orchestrator and the registry action is NEVER reached;
+// the owner's request is gated through and forwarded.
+func TestForwardedOpsOwnershipGate(t *testing.T) {
+	for _, op := range []string{"dismiss", "revoke", "resume"} {
+		t.Run(op, func(t *testing.T) {
+			var hits []string
+			mockReg := ownershipActionMock(t, &hits)
+			defer mockReg.Close()
+			mux := newScopedMux(t, mockReg, "alice", "orchestrator:write")
+
+			// Non-owner → 404, and the registry action is never forwarded.
+			req := httptest.NewRequest("POST", "/v1/agents/bob-1/"+op, nil)
+			req.Header.Set("Authorization", "Bearer alice-token")
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("non-owner %s: status = %d, want 404", op, rec.Code)
+			}
+			if len(hits) != 0 {
+				t.Fatalf("non-owner %s: registry action hit %v, want none", op, hits)
+			}
+
+			// Owner → gated through and forwarded to the registry's action path.
+			req = httptest.NewRequest("POST", "/v1/agents/parent-1/"+op, nil)
+			req.Header.Set("Authorization", "Bearer alice-token")
+			rec = httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("owner %s: status = %d, want 200", op, rec.Code)
+			}
+			wantPath := "/v1/agents/parent-1/" + op
+			if len(hits) != 1 || hits[0] != wantPath {
+				t.Fatalf("owner %s: registry action hits = %v, want [%s]", op, hits, wantPath)
+			}
+		})
 	}
 }
