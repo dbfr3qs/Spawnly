@@ -1,0 +1,9 @@
+{
+  "skills": [
+    "~/.claude/skills",
+    "../.claude/skills"
+  ],
+  "packages": [
+    "~/.claude/plugins/cache/claude-plugins-official/superpowers/6.0.3"
+  ]
+}
