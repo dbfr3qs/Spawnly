@@ -35,11 +35,14 @@ spec:
               value: "http://identity-server:8080/.well-known/openid-configuration/jwks"
             # Control-plane auth the orchestrator presents to the registry's
             # template + consent endpoints; must match the registry's setting.
-            # Both values come from the optional `control-plane-auth` Secret that
-            # bootstrap.sh generates (shared with the registry, so the tokens
-            # match by construction). Absent Secret → env unset → "none" (sends
-            # no credential, demo). For "oidc" instead, drop the secretKeyRefs,
-            # set CONTROL_PLANE_AUTH=oidc, and uncomment the client-credentials
+            # (NOT used for dashboard→orchestrator spawn auth — that now uses
+            # the human's delegated OAuth access token, validated by the same
+            # IS_ISSUER/IS_JWKS_URL validator.) Both values come from the
+            # optional `control-plane-auth` Secret that bootstrap.sh generates
+            # (shared with the registry, so the tokens match by construction).
+            # Absent Secret → env unset → "none" (sends no credential, demo).
+            # For "oidc" instead, drop the secretKeyRefs, set
+            # CONTROL_PLANE_AUTH=oidc, and uncomment the client-credentials
             # block (the "orchestrator" IdP client).
             - name: CONTROL_PLANE_AUTH
               valueFrom:

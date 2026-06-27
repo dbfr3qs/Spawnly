@@ -1,85 +1,181 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"testing/fstest"
 	"time"
+
+	"golang.org/x/oauth2"
 )
 
-// TestAgentOpTargetEscapesID asserts a crafted agent id can't smuggle a
-// different userId past the ownership check: the only userId in the resulting
-// URL's query must be the authenticated session user, and the smuggled query
-// must land (escaped) inside the path segment.
+// TestAgentOpTargetEscapesID asserts the per-agent target PathEscape's the id
+// (so a crafted id can't smuggle a query parameter) and carries NO userId — the
+// orchestrator now derives the user from the access token's sub.
 func TestAgentOpTargetEscapesID(t *testing.T) {
-	got := agentOpTarget("http://orch", `realId?userId=victim&x=`, "", "attacker")
+	got := agentOpTarget("http://orch", `realId?userId=victim&x=`, "")
 	u, err := url.Parse(got)
 	if err != nil {
 		t.Fatalf("parse %q: %v", got, err)
 	}
-	if u.Query().Get("userId") != "attacker" {
-		t.Fatalf("userId = %q, want the session user \"attacker\" (smuggled value won)", u.Query().Get("userId"))
+	if u.RawQuery != "" {
+		t.Fatalf("target must carry no query, got %q", u.RawQuery)
 	}
 	if u.Path != "/v1/agents/realId?userId=victim&x=" {
-		t.Fatalf("crafted id did not stay in the path segment: path=%q", u.Path)
+		t.Fatalf("crafted id did not stay (escaped) in the path segment: path=%q", u.Path)
 	}
 }
 
-// TestLogsOpTargetCarriesUserAndParams asserts the logs target keeps the inbound
-// logs params, always carries the session userId (winning over any smuggled
-// value), and PathEscape's the id so a crafted id can't smuggle a userId.
-func TestLogsOpTargetCarriesUserAndParams(t *testing.T) {
+// TestLogsOpTargetCarriesParams asserts the logs target keeps the inbound logs
+// params and PathEscape's the id, but carries no userId (token-derived now).
+func TestLogsOpTargetCarriesParams(t *testing.T) {
 	q := url.Values{}
 	q.Set("container", "agent-sidecar")
 	q.Set("tailLines", "100")
-	q.Set("userId", "victim") // a smuggled inbound userId must be overwritten
 
-	got := logsOpTarget("http://orch", `realId?userId=victim`, "attacker", q)
+	got := logsOpTarget("http://orch", `realId?x=1`, q)
 	u, err := url.Parse(got)
 	if err != nil {
 		t.Fatalf("parse %q: %v", got, err)
 	}
-	if u.Path != "/v1/agents/realId?userId=victim/logs" {
+	if u.Path != "/v1/agents/realId?x=1/logs" {
 		t.Fatalf("crafted id did not stay (escaped) in the path: path=%q", u.Path)
 	}
-	if u.Query().Get("userId") != "attacker" {
-		t.Fatalf("userId = %q, want session user \"attacker\"", u.Query().Get("userId"))
+	if u.Query().Has("userId") {
+		t.Fatalf("target must not carry userId, query=%q", u.RawQuery)
 	}
 	if u.Query().Get("container") != "agent-sidecar" || u.Query().Get("tailLines") != "100" {
 		t.Fatalf("logs params not carried through: query=%q", u.RawQuery)
 	}
 }
 
-func TestInjectUserID(t *testing.T) {
-	// A browser-supplied userId is overwritten with the authenticated user.
-	out, err := injectUserID([]byte(`{"agentType":"worker","userId":"evil","tenantId":"t1"}`), "alice")
-	if err != nil {
-		t.Fatalf("injectUserID: %v", err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(out, &m); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if m["userId"] != "alice" {
-		t.Errorf("userId = %v, want alice", m["userId"])
-	}
-	if m["agentType"] != "worker" || m["tenantId"] != "t1" {
-		t.Errorf("other fields not preserved: %v", m)
-	}
+// stubAuth returns an Authenticator wired with a no-op ensure() and the given
+// oauth config, so token-handling can be exercised without real OIDC discovery.
+func stubAuth(oauth *oauth2.Config) *Authenticator {
+	a := NewAuthenticator("http://localhost:8090", "http://identity-server:8080", "dashboard", "secret")
+	a.once.Do(func() {}) // mark ensure() done so it won't hit the network
+	a.oauth = oauth
+	return a
+}
 
-	// An empty body still yields a valid spawn body carrying the identity.
-	out, err = injectUserID(nil, "alice")
+// TestOrchestratorTokenReturnsValidToken: an unexpired access token is returned
+// as-is, with no refresh round-trip.
+func TestOrchestratorTokenReturnsValidToken(t *testing.T) {
+	oauth := &oauth2.Config{Endpoint: oauth2.Endpoint{TokenURL: "http://refresh.invalid/token"}}
+	a := stubAuth(oauth)
+	a.sessions["sid"] = session{
+		username:  "alice",
+		tokenSrc:  oauth.TokenSource(context.Background(), &oauth2.Token{AccessToken: "at-1", Expiry: time.Now().Add(time.Hour)}),
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	req := httptest.NewRequest("GET", "/api/agents", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "sid"})
+
+	got, err := a.orchestratorToken(req.Context(), req)
 	if err != nil {
-		t.Fatalf("injectUserID(empty): %v", err)
+		t.Fatalf("orchestratorToken: %v", err)
 	}
-	m = nil
-	if err := json.Unmarshal(out, &m); err != nil {
-		t.Fatalf("unmarshal empty: %v", err)
+	if got != "at-1" {
+		t.Errorf("token = %q, want at-1", got)
 	}
-	if m["userId"] != "alice" {
-		t.Errorf("userId = %v, want alice", m["userId"])
+}
+
+// TestOrchestratorTokenRefreshes: an expired access token is refreshed via the
+// refresh token, and the rotated token is persisted back into the session.
+func TestOrchestratorTokenRefreshes(t *testing.T) {
+	var refreshes int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		refreshes++
+		_ = r.ParseForm()
+		if r.Form.Get("grant_type") != "refresh_token" || r.Form.Get("refresh_token") != "rt-1" {
+			t.Errorf("unexpected refresh request: %v", r.Form)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"at-new","token_type":"Bearer","refresh_token":"rt-2","expires_in":3600}`))
+	}))
+	defer ts.Close()
+
+	oauth := &oauth2.Config{
+		ClientID:     "dashboard",
+		ClientSecret: "secret",
+		Endpoint:     oauth2.Endpoint{TokenURL: ts.URL + "/token"},
+	}
+	a := stubAuth(oauth)
+	a.sessions["sid"] = session{
+		username:  "alice",
+		tokenSrc:  oauth.TokenSource(context.Background(), &oauth2.Token{AccessToken: "at-old", RefreshToken: "rt-1", Expiry: time.Now().Add(-time.Minute)}),
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	req := httptest.NewRequest("GET", "/api/agents", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "sid"})
+
+	got, err := a.orchestratorToken(req.Context(), req)
+	if err != nil {
+		t.Fatalf("orchestratorToken: %v", err)
+	}
+	if got != "at-new" {
+		t.Errorf("token = %q, want at-new", got)
+	}
+	// A second call must reuse the cached (refreshed) token — no second redeem of
+	// the (now-rotated) refresh token.
+	if got2, err := a.orchestratorToken(req.Context(), req); err != nil || got2 != "at-new" {
+		t.Errorf("second call = %q,%v want at-new,nil", got2, err)
+	}
+	if refreshes != 1 {
+		t.Errorf("refresh endpoint hit %d times, want 1 (ReuseTokenSource dedupe)", refreshes)
+	}
+}
+
+// TestOrchestratorTokenNoSession: without a session, fail closed (no token).
+func TestOrchestratorTokenNoSession(t *testing.T) {
+	a := stubAuth(&oauth2.Config{})
+	req := httptest.NewRequest("GET", "/api/agents", nil)
+	if _, err := a.orchestratorToken(req.Context(), req); err == nil {
+		t.Fatal("expected an error with no session")
+	}
+}
+
+// TestProxyAttachesBearerNoUserID drives a real /api/agents request through the
+// mux and asserts the orchestrator-bound request carries Authorization: Bearer
+// and NO userId query param (and no browser cookie leak upstream).
+func TestProxyAttachesBearerNoUserID(t *testing.T) {
+	var gotAuth, gotCookie, gotQuery string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotCookie = r.Header.Get("Cookie")
+		gotQuery = r.URL.RawQuery
+		w.Write([]byte("[]"))
+	}))
+	defer upstream.Close()
+
+	oauth := &oauth2.Config{Endpoint: oauth2.Endpoint{TokenURL: "http://refresh.invalid/token"}}
+	a := stubAuth(oauth)
+	a.sessions["sid"] = session{
+		username:  "alice",
+		tokenSrc:  oauth.TokenSource(context.Background(), &oauth2.Token{AccessToken: "at-1", Expiry: time.Now().Add(time.Hour)}),
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	mux := buildMux(a, upstream.URL, "http://identity-server:8080", "http://docs", fstest.MapFS{})
+
+	req := httptest.NewRequest("GET", "/api/agents", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "sid"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if gotAuth != "Bearer at-1" {
+		t.Errorf("upstream Authorization = %q, want \"Bearer at-1\"", gotAuth)
+	}
+	if gotQuery != "" {
+		t.Errorf("upstream query = %q, want empty (no userId)", gotQuery)
+	}
+	if gotCookie != "" {
+		t.Errorf("browser cookie leaked upstream: %q", gotCookie)
 	}
 }
 

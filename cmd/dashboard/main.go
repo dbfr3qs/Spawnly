@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"embed"
 	"encoding/json"
 	"io"
@@ -35,12 +34,31 @@ func main() {
 	// the AWS/prod deploy.sh sets this to the public docs origin.
 	docsURL := getenv("DOCS_URL", "http://localhost:4321")
 
-	// Control-plane secret presented to the orchestrator's dashboard /spawn path
-	// (X-Control-Plane-Token). Comes from the optional `control-plane-auth`
-	// Secret; empty in the "none" tier, which the orchestrator accepts.
-	controlPlaneToken := getenv("CONTROL_PLANE_TOKEN", "")
-
 	staticFS, _ := fs.Sub(staticFiles, "static")
+	mux := buildMux(auth, orchestratorURL, identityInternalURL, docsURL, staticFS)
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("dashboard listening on :%s (orchestrator: %s, oidc authority: %s)", port, orchestratorURL, authority)
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second, // Slowloris defense; no risk to legit responses.
+		ReadTimeout:       30 * time.Second, // request bodies are all small JSON.
+		IdleTimeout:       120 * time.Second,
+		// No WriteTimeout: the dashboard PROXIES the orchestrator's
+		// /v1/agents/{id}/logs and /v1/agents/{id}/message, which are
+		// legitimately long-lived; a write deadline would truncate them.
+	}
+	log.Fatal(srv.ListenAndServe())
+}
+
+// buildMux wires the dashboard's HTTP routes: the public OIDC relying-party /
+// reverse-proxy endpoints, the session-gated static UI, and the /api/* handlers
+// that proxy to the orchestrator carrying the session's delegated access token.
+func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL string, staticFS fs.FS) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// Reverse-proxy the browser-facing OIDC endpoints to identity-server so the
@@ -74,15 +92,28 @@ func main() {
 	// prefixes (Go 1.22 mux rejects a "GET /" catch-all alongside "/connect/").
 	mux.Handle("/", auth.require(http.FileServer(http.FS(staticFS))))
 
-	// Proxy handlers — forward to orchestrator, copy status+headers+body verbatim
+	// Proxy handlers — forward to orchestrator, copy status+headers+body verbatim.
+	// Every orchestrator call carries the session's delegated access token as
+	// `Authorization: Bearer` (the orchestrator derives userId + scopes from it).
+	// We send CLEAN headers — only Content-Type and the bearer — so the browser's
+	// own cookies/Authorization never leak upstream. A missing/unrefreshable token
+	// fails closed (502) rather than calling the orchestrator unauthenticated.
 	proxy := func(method, target string) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
+			token, err := auth.orchestratorToken(r.Context(), r)
+			if err != nil {
+				http.Error(w, "auth unavailable", http.StatusBadGateway)
+				return
+			}
 			req, err := http.NewRequestWithContext(r.Context(), method, target, r.Body)
 			if err != nil {
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}
-			req.Header = r.Header.Clone()
+			if ct := r.Header.Get("Content-Type"); ct != "" {
+				req.Header.Set("Content-Type", ct)
+			}
+			req.Header.Set("Authorization", "Bearer "+token)
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				http.Error(w, "upstream error", http.StatusBadGateway)
@@ -103,99 +134,39 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"docsUrl": docsURL})
 	})))
-	// List — inject the authenticated session user as userId so the orchestrator
-	// scopes the result to this user's agents (no cross-user enumeration).
-	mux.Handle("GET /api/agents", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, _ := auth.user(r) // require() guarantees a session
-		proxy("GET", orchestratorURL+"/v1/agents?userId="+url.QueryEscape(user))(w, r)
-	})))
+	// List — the orchestrator scopes the result to the token's user (no
+	// cross-user enumeration); the dashboard no longer supplies userId.
+	mux.Handle("GET /api/agents", auth.require(proxy("GET", orchestratorURL+"/v1/agents")))
 
-	// Spawn — inject the authenticated user's identity as userId so the human
-	// principal (not a browser-supplied value) flows into the agent's token sub.
-	mux.Handle("POST /api/spawn", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, _ := auth.user(r) // require() guarantees a session
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		body, err = injectUserID(body, user)
-		if err != nil {
-			http.Error(w, "bad request body", http.StatusBadRequest)
-			return
-		}
-		req, err := http.NewRequestWithContext(r.Context(), "POST", orchestratorURL+"/spawn", bytes.NewReader(body))
-		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		// Send CLEAN headers: the dashboard path authenticates with the
-		// control-plane secret, NOT the browser's Authorization header (which
-		// would wrongly trip the orchestrator's agent JWT path). Empty token is
-		// fine in the "none" tier.
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Control-Plane-Token", controlPlaneToken)
-		req.ContentLength = int64(len(body))
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			http.Error(w, "upstream error", http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-		copyResponse(w, resp)
-	})))
+	// Spawn — the human principal is the token's sub; the orchestrator derives
+	// userId from it (a browser cannot spoof it), so we just forward the body.
+	mux.Handle("POST /api/spawn", auth.require(proxy("POST", orchestratorURL+"/spawn")))
 
-	// For endpoints with path params, extract and forward
+	// For endpoints with path params, extract and forward. Ownership is enforced
+	// at the orchestrator off the token sub, so no userId is carried here.
 	mux.Handle("GET /api/agents/{id}/events", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, _ := auth.user(r) // require() guarantees a session
-		id := r.PathValue("id")
-		proxy("GET", agentOpTarget(orchestratorURL, id, "/events", user))(w, r)
+		proxy("GET", agentOpTarget(orchestratorURL, r.PathValue("id"), "/events"))(w, r)
 	})))
 	// Logs route — unlike the generic proxy, this MUST forward the inbound
 	// query string (container, sinceTime, tailLines) to the orchestrator.
 	mux.Handle("GET /api/agents/{id}/logs", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, _ := auth.user(r) // require() guarantees a session
-		id := r.PathValue("id")
-		target := logsOpTarget(orchestratorURL, id, user, r.URL.Query())
-		req, err := http.NewRequestWithContext(r.Context(), "GET", target, nil)
-		if err != nil {
-			http.Error(w, "bad request", http.StatusBadRequest)
-			return
-		}
-		req.Header = r.Header.Clone()
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			http.Error(w, "upstream error", http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-		copyResponse(w, resp)
+		proxy("GET", logsOpTarget(orchestratorURL, r.PathValue("id"), r.URL.Query()))(w, r)
 	})))
 	mux.Handle("DELETE /api/agents/{id}", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, _ := auth.user(r) // require() guarantees a session
-		id := r.PathValue("id")
-		proxy("DELETE", agentOpTarget(orchestratorURL, id, "", user))(w, r)
+		proxy("DELETE", agentOpTarget(orchestratorURL, r.PathValue("id"), ""))(w, r)
 	})))
 	mux.Handle("POST /api/agents/{id}/message", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, _ := auth.user(r) // require() guarantees a session
-		id := r.PathValue("id")
-		proxy("POST", agentOpTarget(orchestratorURL, id, "/message", user))(w, r)
+		proxy("POST", agentOpTarget(orchestratorURL, r.PathValue("id"), "/message"))(w, r)
 	})))
 	mux.Handle("POST /api/agents/{id}/dismiss", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, _ := auth.user(r) // require() guarantees a session
-		id := r.PathValue("id")
-		proxy("POST", agentOpTarget(orchestratorURL, id, "/dismiss", user))(w, r)
+		proxy("POST", agentOpTarget(orchestratorURL, r.PathValue("id"), "/dismiss"))(w, r)
 	})))
 	// revoke/resume cascade an authorization change down the agent's subtree.
 	mux.Handle("POST /api/agents/{id}/revoke", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, _ := auth.user(r) // require() guarantees a session
-		id := r.PathValue("id")
-		proxy("POST", agentOpTarget(orchestratorURL, id, "/revoke", user))(w, r)
+		proxy("POST", agentOpTarget(orchestratorURL, r.PathValue("id"), "/revoke"))(w, r)
 	})))
 	mux.Handle("POST /api/agents/{id}/resume", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, _ := auth.user(r) // require() guarantees a session
-		id := r.PathValue("id")
-		proxy("POST", agentOpTarget(orchestratorURL, id, "/resume", user))(w, r)
+		proxy("POST", agentOpTarget(orchestratorURL, r.PathValue("id"), "/resume"))(w, r)
 	})))
 	mux.Handle("GET /api/templates", auth.require(proxy("GET", orchestratorURL+"/v1/templates")))
 	// Template management — forward to the orchestrator (which forwards to the
@@ -204,64 +175,33 @@ func main() {
 	// {agentType} path param (Go 1.22 mux), mirroring the /api/agents/{id} routes.
 	mux.Handle("POST /api/templates", auth.require(proxy("POST", orchestratorURL+"/v1/templates")))
 	mux.Handle("PATCH /api/templates/{agentType}", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		agentType := r.PathValue("agentType")
-		proxy("PATCH", orchestratorURL+"/v1/templates/"+agentType)(w, r)
+		proxy("PATCH", orchestratorURL+"/v1/templates/"+url.PathEscape(r.PathValue("agentType")))(w, r)
 	})))
 	mux.Handle("DELETE /api/templates/{agentType}", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		agentType := r.PathValue("agentType")
-		proxy("DELETE", orchestratorURL+"/v1/templates/"+agentType)(w, r)
+		proxy("DELETE", orchestratorURL+"/v1/templates/"+url.PathEscape(r.PathValue("agentType")))(w, r)
 	})))
 
-	// Stored spawn consents (management view). Scoped server-side to the
-	// session user — the browser cannot list or revoke another user's grants.
-	mux.Handle("GET /api/consents", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, _ := auth.user(r)
-		proxy("GET", orchestratorURL+"/v1/consents?userId="+url.QueryEscape(user))(w, r)
-	})))
+	// Stored spawn consents (management view). Scoped at the orchestrator to the
+	// token's user — the browser cannot list or revoke another user's grants.
+	mux.Handle("GET /api/consents", auth.require(proxy("GET", orchestratorURL+"/v1/consents")))
 	mux.Handle("POST /api/consents/{id}/revoke", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, _ := auth.user(r)
-		id := r.PathValue("id")
-		// userId scopes the registry lookup to the session user's own records,
-		// so a guessed consent id belonging to someone else 404s.
-		proxy("POST", orchestratorURL+"/v1/consents/"+id+"/revoke?userId="+url.QueryEscape(user))(w, r)
+		proxy("POST", orchestratorURL+"/v1/consents/"+url.PathEscape(r.PathValue("id"))+"/revoke")(w, r)
 	})))
 
 	// Pending consent requests (Phase 5b broker). The registry owns the
 	// pending->approved/denied lifecycle, so the dashboard banner reads pending
 	// requests for the session user and approves/denies them here rather than
-	// via IdentityServer's CIBA endpoints. userId scopes every call to the
-	// session user (confused-deputy protection on approve/deny).
-	mux.Handle("GET /api/consent-requests", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, _ := auth.user(r)
-		proxy("GET", orchestratorURL+"/v1/consent-requests?status=pending&userId="+url.QueryEscape(user))(w, r)
-	})))
+	// via IdentityServer's CIBA endpoints. The orchestrator scopes every call to
+	// the token's user (confused-deputy protection on approve/deny).
+	mux.Handle("GET /api/consent-requests", auth.require(proxy("GET", orchestratorURL+"/v1/consent-requests?status=pending")))
 	mux.Handle("POST /api/consent-requests/{id}/approve", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, _ := auth.user(r)
-		id := r.PathValue("id")
-		proxy("POST", orchestratorURL+"/v1/consent-requests/"+id+"/approve?userId="+url.QueryEscape(user))(w, r)
+		proxy("POST", orchestratorURL+"/v1/consent-requests/"+url.PathEscape(r.PathValue("id"))+"/approve")(w, r)
 	})))
 	mux.Handle("POST /api/consent-requests/{id}/deny", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user, _ := auth.user(r)
-		id := r.PathValue("id")
-		proxy("POST", orchestratorURL+"/v1/consent-requests/"+id+"/deny?userId="+url.QueryEscape(user))(w, r)
+		proxy("POST", orchestratorURL+"/v1/consent-requests/"+url.PathEscape(r.PathValue("id"))+"/deny")(w, r)
 	})))
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	log.Printf("dashboard listening on :%s (orchestrator: %s, oidc authority: %s)", port, orchestratorURL, authority)
-	srv := &http.Server{
-		Addr:              ":" + port,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second, // Slowloris defense; no risk to legit responses.
-		ReadTimeout:       30 * time.Second, // request bodies are all small JSON.
-		IdleTimeout:       120 * time.Second,
-		// No WriteTimeout: the dashboard PROXIES the orchestrator's
-		// /v1/agents/{id}/logs and /v1/agents/{id}/message, which are
-		// legitimately long-lived; a write deadline would truncate them.
-	}
-	log.Fatal(srv.ListenAndServe())
+	return mux
 }
 
 // copyResponse copies an upstream response's status, headers, and body verbatim.
@@ -275,37 +215,22 @@ func copyResponse(w http.ResponseWriter, resp *http.Response) {
 	io.Copy(w, resp.Body)
 }
 
-// agentOpTarget builds the orchestrator URL for an ownership-scoped per-agent
-// op. The agent id is PathEscape'd into its path segment so a crafted id (e.g.
-// one containing "?userId=<victim>") can't smuggle a different userId past the
-// ownership check — without escaping, that smuggled query would win over the
-// session user appended here. The scope is bound to the authenticated session
-// user via the trailing userId query.
-func agentOpTarget(base, id, suffix, user string) string {
-	return base + "/v1/agents/" + url.PathEscape(id) + suffix + "?userId=" + url.QueryEscape(user)
+// agentOpTarget builds the orchestrator URL for a per-agent op. The agent id is
+// PathEscape'd into its path segment so a crafted id can't smuggle a query
+// parameter. Ownership is enforced at the orchestrator off the access token's
+// sub, so no userId is carried here.
+func agentOpTarget(base, id, suffix string) string {
+	return base + "/v1/agents/" + url.PathEscape(id) + suffix
 }
 
-// logsOpTarget builds the orchestrator logs URL, carrying BOTH the inbound logs
-// params (container/sinceTime/tailLines, in q) AND the session userId so the
-// orchestrator can enforce ownership. Like agentOpTarget, the id is PathEscape'd
-// so a crafted id can't smuggle a different userId; userId is always Set last so
-// it wins over any inbound value.
-func logsOpTarget(base, id, user string, q url.Values) string {
-	q.Set("userId", user)
-	return base + "/v1/agents/" + url.PathEscape(id) + "/logs?" + q.Encode()
-}
-
-// injectUserID overwrites the spawn request's userId with the authenticated
-// user, so the human identity is authoritative (a browser cannot spoof it).
-func injectUserID(body []byte, user string) ([]byte, error) {
-	var m map[string]any
-	if len(body) == 0 {
-		m = map[string]any{}
-	} else if err := json.Unmarshal(body, &m); err != nil {
-		return nil, err
+// logsOpTarget builds the orchestrator logs URL, carrying the inbound logs
+// params (container/sinceTime/tailLines, in q). Like agentOpTarget, the id is
+// PathEscape'd; ownership is enforced at the orchestrator off the token sub.
+func logsOpTarget(base, id string, q url.Values) string {
+	if enc := q.Encode(); enc != "" {
+		return base + "/v1/agents/" + url.PathEscape(id) + "/logs?" + enc
 	}
-	m["userId"] = user
-	return json.Marshal(m)
+	return base + "/v1/agents/" + url.PathEscape(id) + "/logs"
 }
 
 func getenv(key, def string) string {

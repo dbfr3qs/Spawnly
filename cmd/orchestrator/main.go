@@ -5,12 +5,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -146,7 +146,67 @@ func ownsAgent(ctx context.Context, regClient registry.Client, id, userId string
 	return err == nil && rec.UserID == userId
 }
 
-func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Client, registryURL string, spawnValidator tokenvalidator.TokenValidator, spawnAudience, spawnScope, controlPlaneToken string) *http.ServeMux {
+// ctxKey is the private type for orchestrator request-context values.
+type ctxKey int
+
+const ctxUserID ctxKey = iota
+
+// userIDFrom returns the authenticated user id placed in the context by
+// requireToken (the dashboard token's sub). Empty if the request was not
+// token-authenticated — ownership checks then deny by construction (empty userId
+// never owns), so this never silently widens access.
+func userIDFrom(ctx context.Context) string {
+	s, _ := ctx.Value(ctxUserID).(string)
+	return s
+}
+
+// requireToken gates a dashboard-facing handler behind a valid delegated access
+// token: it must be a Bearer token the validator accepts (signature/issuer/
+// expiry), have `aud` containing audience, not be a delegation-only token, and
+// carry the required scope. The authenticated user (the token `sub`, minus any
+// "user:" prefix for parity with agent tokens) is stashed in the request context
+// for the handler to scope on — the orchestrator never trusts a client-supplied
+// userId. Missing/invalid/wrong-audience → 401; valid token missing scope → 403.
+func requireToken(v tokenvalidator.TokenValidator, audience, scope string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authz := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authz, "Bearer ") {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		claims, err := v.ValidateAccessToken(r.Context(), strings.TrimPrefix(authz, "Bearer "))
+		if err != nil {
+			log.Printf("dashboard auth: token validation failed: %v", err)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if claims.TokenUse == "delegation" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !claims.HasAudience(audience) {
+			log.Printf("dashboard auth: aud %v does not contain %q", claims.Audience, audience)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !claims.HasScope(scope) {
+			log.Printf("dashboard auth: missing scope %q (have %v)", scope, claims.Scopes)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		userID := strings.TrimPrefix(claims.User, "user:")
+		if userID == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r.WithContext(context.WithValue(r.Context(), ctxUserID, userID)))
+	}
+}
+
+// buildMux wires the orchestrator's routes. validator/audience/spawnScope gate
+// the agent spawn path; readScope/writeScope gate the dashboard-facing routes
+// (the human's delegated token, validated by the same validator).
+func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Client, registryURL string, validator tokenvalidator.TokenValidator, audience, spawnScope, readScope, writeScope string) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	regClient := registry.New(registryURL)
@@ -159,60 +219,56 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			return
 		}
 
-		// Two authenticated paths derive the spawn's authority; the body is never
-		// trusted for who/where except as noted.
+		// /spawn is authenticated by a Bearer token — the same validator, issuer,
+		// and audience serve both the agent and human paths, but the paths differ
+		// in required scope and how they derive authority:
 		//
-		//   Agent path (Authorization header present): validate the agent's ACT-AS
-		//   access token with the same tokenvalidator the resource servers use. The
-		//   token's `sub` is the human owner ("user:<userId>", authoritative) and its
-		//   outermost `act.sub` is the acting agent's SPIFFE URI (ActingAgentName is
-		//   the bare parent agent id). The child's userId/parentId come from those
-		//   claims and its tenantId from the PARENT's registry record — body
-		//   userId/parentId/tenantId are ignored, so an agent can't forge who it
-		//   spawns for or graft the child elsewhere. Audience + scope are enforced so
-		//   a token minted for another resource server (e.g. sample-api) can't be
-		//   replayed at /spawn.
+		//   Agent path (token has an actor chain `act`): the agent's ACT-AS
+		//   access token. Requires orchestrator:spawn; userId from the token's sub;
+		//   parentId from the outermost act.sub (ActingAgentName); tenantId from
+		//   the PARENT's registry record. Body fields are ignored (can't forge).
 		//
-		//   Dashboard path (no Authorization header): authenticate via a SEPARATE
-		//   X-Control-Plane-Token header (not Authorization — that key drives the
-		//   agent path, so sharing it would let an attacker bypass the JWT by simply
-		//   omitting the token). The body userId is trusted (the dashboard injects the
-		//   session user), but parentId is rejected — human spawns are top-level only.
-		//   An empty controlPlaneToken is the demo/none tier: the dashboard path runs
-		//   open.
-		if r.Header.Get("Authorization") != "" {
-			rawToken := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if rawToken == "" {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			claims, err := spawnValidator.ValidateAccessToken(r.Context(), rawToken)
-			if err != nil {
-				log.Printf("spawn: token validation failed: %v", err)
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			// Reject delegation-only tokens and tokens minted for a different audience
-			// (the cross-audience-replay defense).
-			if claims.TokenUse == "delegation" {
-				log.Printf("spawn: rejecting token_use=delegation")
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			if !claims.HasAudience(spawnAudience) {
-				log.Printf("spawn: rejecting token: aud %v does not contain %q", claims.Audience, spawnAudience)
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
+		//   Human path (token has NO actor chain — no `act` claim, or an empty
+		//   one): the dashboard's delegated access token acting for the logged-in
+		//   human. Requires orchestrator:write; userId from sub; parentId MUST be
+		//   empty (top-level only).
+		//
+		// Both are rejected if token_use=delegation, or aud doesn't contain the
+		// orchestrator audience.
+		authz := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authz, "Bearer ") {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		claims, err := validator.ValidateAccessToken(r.Context(), strings.TrimPrefix(authz, "Bearer "))
+		if err != nil {
+			log.Printf("spawn: token validation failed: %v", err)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if claims.TokenUse == "delegation" {
+			log.Printf("spawn: rejecting token_use=delegation")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !claims.HasAudience(audience) {
+			log.Printf("spawn: rejecting token: aud %v does not contain %q", claims.Audience, audience)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		userID := strings.TrimPrefix(claims.User, "user:")
+		if userID == "" {
+			log.Printf("spawn: token has no user subject")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		if len(claims.Chain) > 0 {
+			// Agent path: the token carries an actor chain (the outermost is the
+			// acting agent — the parent of this child).
 			if !claims.HasScope(spawnScope) {
 				log.Printf("spawn: rejecting token: missing scope %q (have %v)", spawnScope, claims.Scopes)
 				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-			userID := strings.TrimPrefix(claims.User, "user:")
-			if userID == "" {
-				log.Printf("spawn: token has no user subject")
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
 			parentID := claims.ActingAgentName
@@ -231,21 +287,17 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			req.ParentID = parentID
 			req.TenantID = parent.TenantID
 		} else {
-			if controlPlaneToken != "" {
-				got := r.Header.Get("X-Control-Plane-Token")
-				if subtle.ConstantTimeCompare([]byte(got), []byte(controlPlaneToken)) != 1 {
-					log.Printf("spawn: invalid control-plane token on dashboard spawn")
-					http.Error(w, "unauthorized", http.StatusUnauthorized)
-					return
-				}
+			// Human path: the dashboard's delegated token, acting for the human.
+			if !claims.HasScope(writeScope) {
+				log.Printf("spawn: rejecting token: missing scope %q (have %v)", writeScope, claims.Scopes)
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
 			}
-			// controlPlaneToken == "" means the demo/none tier — dashboard path open.
 			if req.ParentID != "" {
 				http.Error(w, "parentId not allowed on dashboard spawn", http.StatusBadRequest)
 				return
 			}
-			// req.UserID is trusted here (dashboard injected it from the session);
-			// the existing "userId required" check below still applies.
+			req.UserID = userID
 		}
 
 		if req.UserID == "" {
@@ -369,17 +421,15 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		json.NewEncoder(w).Encode(SpawnResponse{WorkloadName: workloadName})
 	})
 
-	mux.HandleFunc("GET /v1/agents", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/agents", requireToken(validator, audience, readScope, func(w http.ResponseWriter, r *http.Request) {
 		agents, err := regClient.ListAgents(r.Context())
 		if err != nil {
 			http.Error(w, "registry unavailable", http.StatusBadGateway)
 			return
 		}
-		// Ownership scoping: when the caller supplies a userId (the dashboard
-		// injects the session user), only return that user's agents so one user
-		// can't enumerate another's. Empty userId is internal/back-compat and
-		// returns everything.
-		if userId := r.URL.Query().Get("userId"); userId != "" {
+		// Ownership scoping: the token's userId (the authenticated human) limits
+		// the result to this user's agents — no cross-user enumeration.
+		if userId := userIDFrom(r.Context()); userId != "" {
 			owned := make([]registry.AgentRecord, 0, len(agents))
 			for _, a := range agents {
 				if a.UserID == userId {
@@ -390,11 +440,11 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(agents)
-	})
+	}))
 
-	mux.HandleFunc("GET /v1/agents/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/agents/{id}/events", requireToken(validator, audience, readScope, func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		if !ownsAgent(r.Context(), regClient, id, r.URL.Query().Get("userId")) {
+		if !ownsAgent(r.Context(), regClient, id, userIDFrom(r.Context())) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -405,11 +455,11 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(evts)
-	})
+	}))
 
-	mux.HandleFunc("GET /v1/agents/{id}/logs", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/agents/{id}/logs", requireToken(validator, audience, readScope, func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		if !ownsAgent(r.Context(), regClient, id, r.URL.Query().Get("userId")) {
+		if !ownsAgent(r.Context(), regClient, id, userIDFrom(r.Context())) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -505,7 +555,7 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		resp.Lines = parseLogLines(string(raw), sinceTime)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
-	})
+	}))
 
 	// DELETE /v1/agents/{id} tears down an agent AND its entire descendant
 	// subtree (the pods). It asks the registry for the subtree (root-first) and
@@ -527,10 +577,14 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	// Status codes: 204 success, 207 if some node deletes errored (non-NotFound),
 	// 404 if the registry never heard of the id (first pass empty), 502 if the
 	// registry is unavailable on the first pass.
-	mux.HandleFunc("DELETE /v1/agents/{id}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("DELETE /v1/agents/{id}", requireToken(validator, audience, writeScope, func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		id := r.PathValue("id")
-		userID := r.URL.Query().Get("userId")
+		userID := userIDFrom(ctx)
+		if !ownsAgent(ctx, regClient, id, userID) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 		const maxPasses = 8
 		deleted := 0
 		failedSet := map[string]bool{} // node ids whose delete errored (non-NotFound)
@@ -595,15 +649,46 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			return
 		}
 		w.WriteHeader(http.StatusNoContent) // 204
-	})
+	}))
 
-	mux.HandleFunc("POST /v1/agents/{id}/dismiss", func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
-		target := registryURL + "/v1/agents/" + id + "/dismiss"
-		if r.URL.RawQuery != "" {
-			target += "?" + r.URL.RawQuery
+	// withUserID adds the authenticated userId (from the token context) as a
+	// query parameter to a registry path, appended after any existing query
+	// params so the userId wins for ownership scoping. Used by every route whose
+	// handler ultimately calls a registry endpoint that requires userId.
+	withUserID := func(path string, r *http.Request) string {
+		uid := userIDFrom(r.Context())
+		if uid == "" {
+			return path // no auth context — let the registry reject
 		}
-		req2, err := http.NewRequestWithContext(r.Context(), "POST", target, nil)
+		sep := "?"
+		if strings.Contains(path, "?") {
+			sep = "&"
+		}
+		return path + sep + "userId=" + url.QueryEscape(uid)
+	}
+	withQuery := func(path string, r *http.Request) string {
+		p := path
+		if r.URL.RawQuery != "" {
+			p += "?" + r.URL.RawQuery
+		}
+		// Inject the token userId as a final query parameter so the registry
+		// scopes to this user (the dashboard no longer sends it).
+		if uid := userIDFrom(r.Context()); uid != "" {
+			if strings.Contains(p, "?") {
+				p += "&userId=" + url.QueryEscape(uid)
+			} else {
+				p += "?userId=" + url.QueryEscape(uid)
+			}
+		}
+		return p
+	}
+
+	mux.HandleFunc("POST /v1/agents/{id}/dismiss", requireToken(validator, audience, writeScope, func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		// The registry's dismiss handler enforces ownership via the userId
+		// query; inject it from the token so the dashboard no longer needs to.
+		req2, err := http.NewRequestWithContext(r.Context(), "POST",
+			registryURL+withUserID("/v1/agents/"+id+"/dismiss", r), nil)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -615,7 +700,7 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		}
 		defer resp.Body.Close()
 		w.WriteHeader(resp.StatusCode)
-	})
+	}))
 
 	// controlPlaneBearer yields the bearer the orchestrator (a trusted
 	// control-plane caller) presents on every forwarded consent request. Its
@@ -658,64 +743,58 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			io.Copy(w, resp.Body)
 		}
 	}
-	withQuery := func(path string, r *http.Request) string {
-		if r.URL.RawQuery != "" {
-			return path + "?" + r.URL.RawQuery
-		}
-		return path
-	}
 
 	// revoke/resume are cascading authorization actions owned by the registry.
-	mux.HandleFunc("POST /v1/agents/{id}/revoke", forwardToRegistry("POST", func(r *http.Request) string {
+	mux.HandleFunc("POST /v1/agents/{id}/revoke", requireToken(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
 		return withQuery("/v1/agents/"+r.PathValue("id")+"/revoke", r)
-	}))
-	mux.HandleFunc("POST /v1/agents/{id}/resume", forwardToRegistry("POST", func(r *http.Request) string {
+	})))
+	mux.HandleFunc("POST /v1/agents/{id}/resume", requireToken(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
 		return withQuery("/v1/agents/"+r.PathValue("id")+"/resume", r)
-	}))
+	})))
 
-	mux.HandleFunc("GET /v1/templates", forwardToRegistry("GET", func(*http.Request) string {
+	mux.HandleFunc("GET /v1/templates", requireToken(validator, audience, readScope, forwardToRegistry("GET", func(*http.Request) string {
 		return "/v1/templates"
-	}))
+	})))
 	// Template management (control-plane-auth'd at the registry): create, update
 	// status, and delete. forwardToRegistry streams the body through, so the
 	// body-carrying create/update and the bodyless delete all use it.
-	mux.HandleFunc("POST /v1/templates", forwardToRegistry("POST", func(*http.Request) string {
+	mux.HandleFunc("POST /v1/templates", requireToken(validator, audience, writeScope, forwardToRegistry("POST", func(*http.Request) string {
 		return "/v1/templates"
-	}))
-	mux.HandleFunc("PATCH /v1/templates/{agentType}", forwardToRegistry("PATCH", func(r *http.Request) string {
+	})))
+	mux.HandleFunc("PATCH /v1/templates/{agentType}", requireToken(validator, audience, writeScope, forwardToRegistry("PATCH", func(r *http.Request) string {
 		return "/v1/templates/" + r.PathValue("agentType")
-	}))
-	mux.HandleFunc("DELETE /v1/templates/{agentType}", forwardToRegistry("DELETE", func(r *http.Request) string {
+	})))
+	mux.HandleFunc("DELETE /v1/templates/{agentType}", requireToken(validator, audience, writeScope, forwardToRegistry("DELETE", func(r *http.Request) string {
 		return "/v1/templates/" + r.PathValue("agentType")
-	}))
+	})))
 
 	// Stored spawn consents: registry passthroughs for the dashboard's consent
 	// management view (list per user, revoke to force a re-prompt next spawn).
 	// The query string carries the dashboard's session-user scoping.
-	mux.HandleFunc("GET /v1/consents", forwardToRegistry("GET", func(r *http.Request) string {
+	mux.HandleFunc("GET /v1/consents", requireToken(validator, audience, readScope, forwardToRegistry("GET", func(r *http.Request) string {
 		return withQuery("/v1/consents", r)
-	}))
-	mux.HandleFunc("POST /v1/consents/{id}/revoke", forwardToRegistry("POST", func(r *http.Request) string {
+	})))
+	mux.HandleFunc("POST /v1/consents/{id}/revoke", requireToken(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
 		return withQuery("/v1/consents/"+r.PathValue("id")+"/revoke", r)
-	}))
+	})))
 
 	// Brokered consent requests (Phase 5b): registry passthroughs for the
 	// dashboard's pending-consent banner and approve/deny actions. The query
 	// string carries the session-user scoping (status=pending&userId=... on the
 	// list, userId=... on approve/deny for confused-deputy protection).
-	mux.HandleFunc("GET /v1/consent-requests", forwardToRegistry("GET", func(r *http.Request) string {
+	mux.HandleFunc("GET /v1/consent-requests", requireToken(validator, audience, readScope, forwardToRegistry("GET", func(r *http.Request) string {
 		return withQuery("/v1/consent-requests", r)
-	}))
-	mux.HandleFunc("POST /v1/consent-requests/{id}/approve", forwardToRegistry("POST", func(r *http.Request) string {
+	})))
+	mux.HandleFunc("POST /v1/consent-requests/{id}/approve", requireToken(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
 		return withQuery("/v1/consent-requests/"+r.PathValue("id")+"/approve", r)
-	}))
-	mux.HandleFunc("POST /v1/consent-requests/{id}/deny", forwardToRegistry("POST", func(r *http.Request) string {
+	})))
+	mux.HandleFunc("POST /v1/consent-requests/{id}/deny", requireToken(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
 		return withQuery("/v1/consent-requests/"+r.PathValue("id")+"/deny", r)
-	}))
+	})))
 
-	mux.HandleFunc("POST /v1/agents/{id}/message", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /v1/agents/{id}/message", requireToken(validator, audience, writeScope, func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		if !ownsAgent(r.Context(), regClient, id, r.URL.Query().Get("userId")) {
+		if !ownsAgent(r.Context(), regClient, id, userIDFrom(r.Context())) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -755,7 +834,7 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		}
 		w.WriteHeader(resp.StatusCode)
 		io.Copy(w, resp.Body)
-	})
+	}))
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -916,20 +995,18 @@ func main() {
 	// can't hit SpiceDB before any schema exists.
 	waitForRegistrySchema(registryURL)
 
-	// Inbound spawn auth: the agent path validates the agent's ACT-AS access
-	// token (waits for the IdP's JWKS) and enforces audience + scope; the
-	// dashboard path authenticates via a separate X-Control-Plane-Token header.
-	// An empty token (CONTROL_PLANE_AUTH != shared-secret) runs the dashboard path
-	// open (demo/none tier).
-	spawnValidator := buildSpawnValidator(context.Background())
-	spawnAudience := getEnv("SPAWN_OIDC_AUDIENCE", "orchestrator")
+	// Inbound auth: the single JWKS validator serves both the agent /spawn path
+	// (scope orchestrator:spawn) and the dashboard-facing routes (scopes
+	// orchestrator:read / orchestrator:write). All tokens carry aud=orchestrator.
+	// The dashboard path is now ALWAYS token-authenticated via the human's
+	// delegated access token — no more X-Control-Plane-Token or open tier.
+	v := buildSpawnValidator(context.Background())
+	audience := getEnv("SPAWN_OIDC_AUDIENCE", "orchestrator")
 	spawnScope := getEnv("SPAWN_SCOPE", "orchestrator:spawn")
-	controlPlaneToken := ""
-	if os.Getenv("CONTROL_PLANE_AUTH") == "shared-secret" {
-		controlPlaneToken = os.Getenv("CONTROL_PLANE_TOKEN")
-	}
+	readScope := getEnv("ORCH_READ_SCOPE", "orchestrator:read")
+	writeScope := getEnv("ORCH_WRITE_SCOPE", "orchestrator:write")
 
-	mux := buildMux(k8s, clientset, sdb, registryURL, spawnValidator, spawnAudience, spawnScope, controlPlaneToken)
+	mux := buildMux(k8s, clientset, sdb, registryURL, v, audience, spawnScope, readScope, writeScope)
 	log.Println("orchestrator listening on :8080")
 	srv := &http.Server{
 		Addr:              ":8080",
