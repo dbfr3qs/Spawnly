@@ -5,6 +5,12 @@ dist/
 web-build/
 *.log
 
+# Local env (may hold a LAN IP / per-machine config). The committed template is
+# .env.local.example.
+.env
+.env.local
+!.env.local.example
+
 # Native build output (iOS is built on EAS cloud macOS; Android locally)
 ios/
 android/

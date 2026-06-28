@@ -14,6 +14,13 @@ const EXPIRY_KEY = 'spawnly.accessExpiry';
 const EXPIRY_SKEW_MS = 30_000;
 
 async function discovery(): Promise<AuthSession.DiscoveryDocument> {
+  // Local dev: use the explicitly-configured authorize/token endpoints (the
+  // dashboard-proxied /connect/*) rather than discovery, whose advertised
+  // endpoint host is the unreachable in-cluster issuer. Production leaves these
+  // unset and uses real discovery against the issuer.
+  if (config.authEndpoint && config.tokenEndpoint) {
+    return { authorizationEndpoint: config.authEndpoint, tokenEndpoint: config.tokenEndpoint };
+  }
   return AuthSession.fetchDiscoveryAsync(config.issuer);
 }
 
