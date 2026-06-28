@@ -82,12 +82,16 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    # dashboard (proxies the UI's /v1/* + /spawn), operator (ORCHESTRATOR_URL),
-    # and agent sidecars (/spawn, and DELETE for child teardown).
+    # dashboard (proxies the UI's /v1/* + /spawn), mobile-gateway (proxies the
+    # app's user-scoped consent actions), operator (ORCHESTRATOR_URL), and agent
+    # sidecars (/spawn, and DELETE for child teardown).
     - from:
         - podSelector:
             matchLabels:
               app: dashboard
+        - podSelector:
+            matchLabels:
+              app: mobile-gateway
         - podSelector:
             matchLabels:
               app: agent-operator
@@ -97,6 +101,41 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mobile-gateway-ingress
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: mobile-gateway
+  policyTypes:
+    - Ingress
+  ingress:
+    # The gateway runs TWO ports. The public surface (8080: /me/* + SSE) stays
+    # OPEN — it's token-authenticated and fronted by the ALB/port-forward, the
+    # same posture as the (unpoliced) dashboard. A rule with ports but no `from`
+    # allows all sources to that port.
+    - ports:
+        - protocol: TCP
+          port: 8080
+    # The internal control-plane webhook (8081: /internal/notify) has only ONE
+    # legitimate caller — the registry's consent webhook. Locking ingress on this
+    # port to app:registry closes the gap the Phase 2 security review flagged:
+    # without it any managed agent pod could POST a forged consent_pending event
+    # and spam/spoof prompts at any user (the endpoint runs control-plane AllowAll
+    # in the no-secret demo tier). Splitting the webhook onto its own port lets us
+    # police it without touching the ALB-facing public port. Defense-in-depth on
+    # top of the control-plane shared secret bootstrap.sh provisions.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: registry
+      ports:
+        - protocol: TCP
+          port: 8081
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

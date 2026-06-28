@@ -1545,15 +1545,34 @@ func notifyWebhook(cr registry.ConsentRequest) {
 	if url == "" {
 		return
 	}
+	// id and agentId let a notifier (e.g. the mobile-gateway) deep-link the
+	// prompt to the specific pending request/agent and fetch fresh detail over
+	// an authenticated channel — the push itself carries no secrets.
 	body, _ := json.Marshal(map[string]any{
 		"type":           "consent_pending",
+		"id":             cr.ID,
+		"agentId":        cr.AgentID,
 		"user":           cr.UserID,
 		"parentType":     cr.ParentType,
 		"childType":      cr.ChildType,
 		"scopes":         cr.Scopes,
 		"bindingMessage": cr.BindingMessage,
 	})
-	resp, err := http.Post(url, "application/json", bytes.NewReader(body))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		log.Printf("consent notifier webhook build failed: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	// The registry→notifier hop is a control-plane call: present the same shared
+	// secret the registry's own callers use, so the notifier can reject anyone
+	// who isn't the platform. Empty in the local/demo tier (auth=none).
+	if token := os.Getenv("CONTROL_PLANE_TOKEN"); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("consent notifier webhook failed: %v", err)
 		return

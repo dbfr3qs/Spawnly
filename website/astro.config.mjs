@@ -54,6 +54,7 @@ export default defineConfig({
           items: [
             { slug: 'internals/token-minting', label: 'How a token is minted' },
             { slug: 'internals/spawn-consent', label: 'CIBA spawn consent' },
+            { slug: 'internals/mobile-ciba', label: 'Mobile CIBA consent' },
           ],
         },
         {

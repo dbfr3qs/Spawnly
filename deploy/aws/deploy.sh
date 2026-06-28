@@ -97,6 +97,26 @@ kubectl create secret generic ai-provider \
   --from-literal=provider="$_AI_PROVIDER" --from-literal=api-key="$_AI_API_KEY" --from-literal=model="$_AI_MODEL" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+# ── 2b. Mobile push credentials (only when the gateway runs NOTIFIER=fcmapns) ──
+# The aws overlay mounts this Secret into mobile-gateway as files + env. The FCM
+# service-account JSON and APNs .p8 come from operator-provided file PATHS in the
+# environment, so the key bytes never appear in argv/process listing; the APNs
+# identifiers are non-secret. Skipped (with a warning) when the files aren't set,
+# so a deploy that doesn't need real push still succeeds.
+echo "==> mobile-push-credentials secret"
+if [ -n "${FCM_SERVICE_ACCOUNT_JSON_PATH:-}" ] && [ -n "${APNS_KEY_P8_PATH:-}" ]; then
+  kubectl create secret generic mobile-push-credentials \
+    --from-file=fcm-service-account.json="$FCM_SERVICE_ACCOUNT_JSON_PATH" \
+    --from-file=apns-key.p8="$APNS_KEY_P8_PATH" \
+    --from-literal=apns-key-id="${APNS_KEY_ID:?set APNS_KEY_ID}" \
+    --from-literal=apns-team-id="${APNS_TEAM_ID:?set APNS_TEAM_ID}" \
+    --from-literal=apns-bundle-id="${APNS_BUNDLE_ID:-run.spawnly.app}" \
+    --dry-run=client -o yaml | kubectl apply -f -
+else
+  echo "  SKIP: set FCM_SERVICE_ACCOUNT_JSON_PATH + APNS_KEY_P8_PATH (+ APNS_KEY_ID/TEAM_ID) to enable real push."
+  echo "        Without it, leave the gateway on NOTIFIER=dev (remove the fcmapns patch) or the pod will FailMount."
+fi
+
 # ── 3. Agent ServiceAccount (Pod Identity binds it to the role; no annotation) ──
 echo "==> agent ServiceAccount $AGENT_SA"
 kubectl create serviceaccount "$AGENT_SA" --dry-run=client -o yaml | kubectl apply -f -

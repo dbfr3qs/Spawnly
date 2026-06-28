@@ -121,6 +121,37 @@ public static class Config
                 // spawn stays agent-only.
                 AllowedScopes = { "openid", "profile", "orchestrator:read", "orchestrator:write" },
             },
+            // Interactive human login for the native MOBILE app (iOS/Android).
+            // Unlike the dashboard (a confidential backend relying party), a
+            // native app cannot keep a secret, so this is a PUBLIC client:
+            // authorization_code + PKCE with NO client secret. The app calls the
+            // SAME orchestrator consent endpoints the dashboard does (via the
+            // mobile-gateway), so it carries the same orchestrator:read/write
+            // delegated scopes and aud=orchestrator — NOT orchestrator:spawn.
+            new Client
+            {
+                ClientId = "mobile",
+                ClientName = "Spawnly Mobile",
+                AllowedGrantTypes = GrantTypes.Code,
+                RequirePkce = true,
+                // Public client: PKCE is the proof, there is no secret to check.
+                RequireClientSecret = false,
+                RequireConsent = false,
+                // Native redirect targets: the app's custom URI scheme, plus the
+                // Expo dev auth-proxy/loopback used during local development.
+                RedirectUris =
+                {
+                    "spawnly://auth",
+                    "exp://127.0.0.1:19000/--/auth",
+                },
+                PostLogoutRedirectUris = { "spawnly://auth" },
+                // A refresh token lets the app silently renew its short-lived
+                // orchestrator access token; it is stored in OS secure storage
+                // (Keychain/Keystore). One-time-use rotation limits replay.
+                AllowOfflineAccess = true,
+                RefreshTokenUsage = TokenUsage.OneTimeOnly,
+                AllowedScopes = { "openid", "profile", "offline_access", "orchestrator:read", "orchestrator:write" },
+            },
             // Control-plane clients (CONTROL_PLANE_AUTH=oidc). Unlike the agent
             // clients above — authenticated via SPIFFE JWT-SVID with a
             // "placeholder" secret — these are platform services authenticating

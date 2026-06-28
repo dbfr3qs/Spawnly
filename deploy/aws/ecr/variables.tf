@@ -16,6 +16,7 @@ variable "ecr_repositories" {
     "agent-sample-api",
     "agent-sidecar",
     "agent-dashboard",
+    "agent-mobile-gateway",
     "agent-chain-worker",
     "agent-identity-server",
     "agent-weather-monitor",
