@@ -1,19 +1,15 @@
 {
   "cli": { "version": ">= 5.9.0" },
   "build": {
-    "//": "iOS binaries are built on EAS's cloud macOS workers — there is no way to build/sign iOS on Linux. Android builds locally OR on EAS.",
     "development": {
       "developmentClient": true,
       "distribution": "internal",
-      "//": "ios.simulator=false → a real-device build (your iPhone). EAS handles ad-hoc/development provisioning; a free Apple ID works (7-day signing). Register the device first with `eas device:create`.",
       "ios": { "simulator": false },
       "android": { "buildType": "apk" },
-      "//env": "Cleartext is a NATIVE Info.plist/manifest setting baked into the binary at build time (app.config.js reads this), so it must be set HERE — .env.local is gitignored and never reaches EAS. Dev profiles only; production must NOT allow cleartext. Runtime endpoints (GATEWAY_URL/ISSUER/AUTH/TOKEN) are picked up by Metro from .env.local at `expo start`.",
       "env": { "EXPO_PUBLIC_ALLOW_CLEARTEXT": "true" }
     },
     "development-simulator": {
       "extends": "development",
-      "//": "For anyone with a Mac: an iOS Simulator dev-client build.",
       "ios": { "simulator": true }
     },
     "preview": {
@@ -26,7 +22,5 @@
       "android": { "buildType": "app-bundle" }
     }
   },
-  "submit": {
-    "//": "No public store submission in v1 — internal/TestFlight/EAS-internal distribution only."
-  }
+  "submit": {}
 }
