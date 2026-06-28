@@ -18,7 +18,7 @@ EXTRA_AGENTS  := identity-server weather-monitor
 MCP_SERVERS   := travel-tools
 SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS) $(EXTRA_AGENTS) $(MCP_SERVERS)
 
-.PHONY: build test test-provider docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed print-% e2e-setup e2e
+.PHONY: build test test-provider docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed print-% e2e-setup e2e mobile-dev
 
 # print-<VAR> — echo a make variable so shell scripts can read the authoritative
 # lists instead of re-declaring them. e.g. `make -s print-SERVICES`.
@@ -160,6 +160,14 @@ dash: kubeconfig port-forward
 
 bootstrap:
 	./scripts/bootstrap.sh
+
+# mobile-dev — one command to run the mobile app against a local cluster
+# (Tier A: SSE, no cloud push): deploy/reseed the gateway if needed, LAN-bound
+# port-forwards, generate mobile/.env.local for this host's IP, and start Expo.
+# Run on the HOST (it needs the LAN IP + firewall). Ctrl+C tears it down.
+# See plans/mobile-ciba/testing-plan.md for the one-time device-build setup.
+mobile-dev:
+	./scripts/mobile-dev.sh
 
 demo:
 	./scripts/demo.sh
