@@ -7,7 +7,9 @@
       "distribution": "internal",
       "//": "ios.simulator=false → a real-device build (your iPhone). EAS handles ad-hoc/development provisioning; a free Apple ID works (7-day signing). Register the device first with `eas device:create`.",
       "ios": { "simulator": false },
-      "android": { "buildType": "apk" }
+      "android": { "buildType": "apk" },
+      "//env": "Cleartext is a NATIVE Info.plist/manifest setting baked into the binary at build time (app.config.js reads this), so it must be set HERE — .env.local is gitignored and never reaches EAS. Dev profiles only; production must NOT allow cleartext. Runtime endpoints (GATEWAY_URL/ISSUER/AUTH/TOKEN) are picked up by Metro from .env.local at `expo start`.",
+      "env": { "EXPO_PUBLIC_ALLOW_CLEARTEXT": "true" }
     },
     "development-simulator": {
       "extends": "development",
