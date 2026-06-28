@@ -30,6 +30,7 @@ resources:
   - ../manifests/orchestrator.yaml
   - ../manifests/operator.yaml
   - ../manifests/dashboard.yaml
+  - ../manifests/mobile-gateway.yaml
   - ../manifests/sample-api-a.yaml
   - ../manifests/sample-api-b.yaml
   - ../manifests/travel-tools.yaml
@@ -78,3 +79,59 @@ patches:
         value:
           name: ATTESTOR
           value: aws-stsweb
+  # mobile-gateway: switch to real push (NOTIFIER=fcmapns) and mount the FCM
+  # service-account JSON + APNs .p8 from the `mobile-push-credentials` Secret.
+  # That Secret is created by deploy.sh from the operator's environment (like the
+  # ai-provider / control-plane-auth secrets) and is NEVER committed or imaged.
+  # The APNs identifiers (key id / team id / bundle id, production flag) are
+  # non-secret and come from the same Secret for one source of truth.
+  - target:
+      kind: Deployment
+      name: mobile-gateway
+    patch: |
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: mobile-gateway
+      spec:
+        template:
+          spec:
+            containers:
+              - name: mobile-gateway
+                env:
+                  - name: NOTIFIER
+                    value: fcmapns
+                  - name: FCM_SERVICE_ACCOUNT_FILE
+                    value: /etc/mobile-push/fcm-service-account.json
+                  - name: APNS_KEY_FILE
+                    value: /etc/mobile-push/apns-key.p8
+                  - name: APNS_KEY_ID
+                    valueFrom:
+                      secretKeyRef:
+                        name: mobile-push-credentials
+                        key: apns-key-id
+                  - name: APNS_TEAM_ID
+                    valueFrom:
+                      secretKeyRef:
+                        name: mobile-push-credentials
+                        key: apns-team-id
+                  - name: APNS_BUNDLE_ID
+                    valueFrom:
+                      secretKeyRef:
+                        name: mobile-push-credentials
+                        key: apns-bundle-id
+                  - name: APNS_PRODUCTION
+                    value: "true"
+                volumeMounts:
+                  - name: push-creds
+                    mountPath: /etc/mobile-push
+                    readOnly: true
+            volumes:
+              - name: push-creds
+                secret:
+                  secretName: mobile-push-credentials
+                  items:
+                    - key: fcm-service-account.json
+                      path: fcm-service-account.json
+                    - key: apns-key.p8
+                      path: apns-key.p8

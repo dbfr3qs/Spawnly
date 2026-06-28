@@ -1,0 +1,32 @@
+{
+  "expo": {
+    "name": "Spawnly",
+    "slug": "spawnly-mobile",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "scheme": "spawnly",
+    "ios": {
+      "bundleIdentifier": "run.spawnly.app",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSFaceIDUsageDescription": "Confirm it's you before approving an agent authorization."
+      }
+    },
+    "android": {
+      "package": "run.spawnly.app",
+      "permissions": ["USE_BIOMETRIC", "USE_FINGERPRINT"]
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-local-authentication",
+      "expo-notifications"
+    ],
+    "extra": {
+      "// note": "Build-time config; override per environment via EAS env or app config. issuer/gateway must be HTTPS in production.",
+      "issuer": "https://auth.spawnly.run",
+      "gatewayUrl": "https://mobile.spawnly.run",
+      "clientId": "mobile"
+    }
+  }
+}

@@ -50,6 +50,13 @@ FROM gcr.io/distroless/static-debian12 AS agent-sidecar
 COPY --from=build-agent-sidecar /bin/agent-sidecar /
 ENTRYPOINT ["/agent-sidecar"]
 
+FROM builder AS build-mobile-gateway
+RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/mobile-gateway ./cmd/mobile-gateway
+
+FROM gcr.io/distroless/static-debian12 AS mobile-gateway
+COPY --from=build-mobile-gateway /bin/mobile-gateway /
+ENTRYPOINT ["/mobile-gateway"]
+
 # Shared SDK build — compiles @spawnly/sdk from source so the dist is
 # reproducible (agents/*/dist is gitignored). Consumed by every node agent image.
 FROM node:22-alpine AS build-ts-sdk

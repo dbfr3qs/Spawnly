@@ -41,3 +41,17 @@ spec:
                 name: identity-server
                 port:
                   number: 8080
+    # The mobile app's public origin. Routes ONLY to the gateway's public port
+    # (8080: /me/* + SSE); the internal webhook port (8081) is never exposed.
+    # Requires the ACM cert to cover mobile.spawnly.run (add it to the SANs in
+    # deploy/aws/dns); external-dns creates the record from this host rule.
+    - host: mobile.spawnly.run
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mobile-gateway
+                port:
+                  number: 8080

@@ -120,3 +120,6 @@ the dashboard; once approved, every deeper link auto-approves from the stored
 consent. Deny instead and the link fails while its parent keeps working. The
 E2E spec walks all of it
 ([`e2e/tests/ciba-consent.spec.ts`](../../e2e/tests/ciba-consent.spec.ts)).
+
+The same prompt can be answered from a phone instead of the dashboard — see
+[Mobile CIBA consent](./mobile-ciba.md).

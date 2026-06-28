@@ -1,0 +1,17 @@
+# Expo / RN
+node_modules/
+.expo/
+dist/
+web-build/
+*.log
+
+# Native build output (iOS is built on EAS cloud macOS; Android locally)
+ios/
+android/
+
+# Credentials — NEVER commit. Push keys/service accounts are mounted on the
+# server (mobile-gateway), not bundled in the app.
+*.p8
+*.keystore
+google-services.json
+GoogleService-Info.plist
