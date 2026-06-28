@@ -5,8 +5,14 @@
     "development": {
       "developmentClient": true,
       "distribution": "internal",
-      "ios": { "simulator": true },
+      "//": "ios.simulator=false → a real-device build (your iPhone). EAS handles ad-hoc/development provisioning; a free Apple ID works (7-day signing). Register the device first with `eas device:create`.",
+      "ios": { "simulator": false },
       "android": { "buildType": "apk" }
+    },
+    "development-simulator": {
+      "extends": "development",
+      "//": "For anyone with a Mac: an iOS Simulator dev-client build.",
+      "ios": { "simulator": true }
     },
     "preview": {
       "distribution": "internal",
