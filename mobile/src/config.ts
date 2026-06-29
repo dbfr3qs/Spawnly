@@ -14,6 +14,14 @@ export const config = {
   gatewayUrl: process.env.EXPO_PUBLIC_GATEWAY_URL ?? extra.gatewayUrl ?? 'https://mobile.spawnly.run',
   // The public PKCE client registered in identityserver/Config.cs.
   clientId: process.env.EXPO_PUBLIC_CLIENT_ID ?? extra.clientId ?? 'mobile',
+  // Explicit OIDC endpoints, for LOCAL dev only. When both are set, auth.ts uses
+  // them directly instead of OIDC discovery — locally the discovery doc
+  // advertises the in-cluster issuer host (http://identity-server:8080/...) that
+  // a phone can't reach, so the native client must be pointed at the
+  // dashboard-proxied /connect endpoints explicitly. Unset in production, where
+  // discovery against `issuer` (auth.spawnly.run) is correct.
+  authEndpoint: process.env.EXPO_PUBLIC_AUTH_ENDPOINT,
+  tokenEndpoint: process.env.EXPO_PUBLIC_TOKEN_ENDPOINT,
   // Scopes: openid/profile for the id_token, offline_access for the refresh
   // token (stored in SecureStore), and the delegated authority the gateway
   // forwards to the orchestrator's consent endpoints.

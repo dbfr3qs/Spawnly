@@ -137,12 +137,12 @@ public static class Config
                 // Public client: PKCE is the proof, there is no secret to check.
                 RequireClientSecret = false,
                 RequireConsent = false,
-                // Native redirect targets: the app's custom URI scheme, plus the
-                // Expo dev auth-proxy/loopback used during local development.
+                // Native redirect target: the app's custom URI scheme. The dev
+                // build (expo-dev-client) uses this same scheme, so no Expo Go
+                // loopback redirect is needed.
                 RedirectUris =
                 {
                     "spawnly://auth",
-                    "exp://127.0.0.1:19000/--/auth",
                 },
                 PostLogoutRedirectUris = { "spawnly://auth" },
                 // A refresh token lets the app silently renew its short-lived

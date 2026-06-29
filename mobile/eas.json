@@ -1,12 +1,16 @@
 {
   "cli": { "version": ">= 5.9.0" },
   "build": {
-    "//": "iOS binaries are built on EAS's cloud macOS workers — there is no way to build/sign iOS on Linux. Android builds locally OR on EAS.",
     "development": {
       "developmentClient": true,
       "distribution": "internal",
-      "ios": { "simulator": true },
-      "android": { "buildType": "apk" }
+      "ios": { "simulator": false },
+      "android": { "buildType": "apk" },
+      "env": { "EXPO_PUBLIC_ALLOW_CLEARTEXT": "true" }
+    },
+    "development-simulator": {
+      "extends": "development",
+      "ios": { "simulator": true }
     },
     "preview": {
       "distribution": "internal",
@@ -18,7 +22,5 @@
       "android": { "buildType": "app-bundle" }
     }
   },
-  "submit": {
-    "//": "No public store submission in v1 — internal/TestFlight/EAS-internal distribution only."
-  }
+  "submit": {}
 }
