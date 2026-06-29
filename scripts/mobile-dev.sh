@@ -84,7 +84,7 @@ forward mobile-gateway "$GW_PORT"
 forward dashboard "$DASH_PORT"
 sleep 3
 curl -fsS "http://localhost:$GW_PORT/health" >/dev/null 2>&1 && echo "   gateway healthy on $GW_PORT" || echo "   WARN: gateway not answering on $GW_PORT yet"
-curl -fsS -o /dev/null "http://localhost:$DASH_PORT/" 2>/dev/null; echo "   dashboard reachable on $DASH_PORT (401 at / is expected)"
+curl -sS -o /dev/null "http://localhost:$DASH_PORT/" 2>/dev/null || true; echo "   dashboard reachable on $DASH_PORT (401 at / is expected)"
 
 # --- 5. generate mobile/.env.local -------------------------------------------
 cat > mobile/.env.local <<EOF
