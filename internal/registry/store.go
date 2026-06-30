@@ -29,6 +29,12 @@ type Store interface {
 	// ListTemplateTypes returns only the spawnable set — it EXCLUDES templates
 	// whose Status is "disabled".
 	ListTemplateTypes(ctx context.Context) ([]string, error)
+	// ListTemplates returns the FULL template records. When includeDisabled is
+	// false it returns only active templates; when true it returns active AND
+	// disabled. The full-detail (incl. disabled) view is the admin capability
+	// behind the control-plane/admin gate (the admin Agent Types view); the
+	// spawn dropdown keeps using ListTemplateTypes.
+	ListTemplates(ctx context.Context, includeDisabled bool) ([]AgentTemplate, error)
 	// UpdateTemplateStatus sets the Status of an existing template, returning the
 	// updated template and whether it was found.
 	UpdateTemplateStatus(ctx context.Context, agentType, status string) (AgentTemplate, bool, error)

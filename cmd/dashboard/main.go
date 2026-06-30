@@ -176,15 +176,23 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 		proxy("POST", agentOpTarget(orchestratorURL, r.PathValue("id"), "/resume"))(w, r)
 	})))
 	mux.Handle("GET /api/templates", auth.require(proxy("GET", orchestratorURL+"/v1/templates")))
+	// Admin full-detail template list (incl. disabled) for the Agent Types
+	// admin view. Admin-gated at the BFF (defense in depth with the
+	// orchestrator's GET /v1/admin/templates); a non-admin session gets 403 here
+	// before the orchestrator is reached.
+	mux.Handle("GET /api/admin/templates", auth.requireAdmin(proxy("GET", orchestratorURL+"/v1/admin/templates")))
 	// Template management — forward to the orchestrator (which forwards to the
-	// registry). POST/PATCH carry a JSON body; the proxy helper forwards method
-	// and body verbatim. PATCH/DELETE build the target per-request from the
-	// {agentType} path param (Go 1.22 mux), mirroring the /api/agents/{id} routes.
-	mux.Handle("POST /api/templates", auth.require(proxy("POST", orchestratorURL+"/v1/templates")))
-	mux.Handle("PATCH /api/templates/{agentType}", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// registry) and gate on admin at this BFF tier too (defense in depth with
+	// the orchestrator's admin gate). POST/PATCH carry a JSON body; the proxy
+	// helper forwards method and body verbatim. PATCH/DELETE build the target
+	// per-request from the {agentType} path param (Go 1.22 mux), mirroring the
+	// /api/agents/{id} routes. A non-admin session gets 403 here before the
+	// orchestrator is even reached.
+	mux.Handle("POST /api/templates", auth.requireAdmin(proxy("POST", orchestratorURL+"/v1/templates")))
+	mux.Handle("PATCH /api/templates/{agentType}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxy("PATCH", orchestratorURL+"/v1/templates/"+url.PathEscape(r.PathValue("agentType")))(w, r)
 	})))
-	mux.Handle("DELETE /api/templates/{agentType}", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("DELETE /api/templates/{agentType}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxy("DELETE", orchestratorURL+"/v1/templates/"+url.PathEscape(r.PathValue("agentType")))(w, r)
 	})))
 

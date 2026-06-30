@@ -50,6 +50,7 @@ type Authenticator struct {
 type session struct {
 	username   string
 	rawIDToken string // kept for the logout id_token_hint
+	isAdmin    bool
 	// tokenSrc yields the delegated OAuth access token the dashboard presents to
 	// the orchestrator (audienced for "orchestrator", sub=userId, scope
 	// orchestrator:read/write). It is a ReuseTokenSource: it caches the current
@@ -105,11 +106,12 @@ func (a *Authenticator) ensure(ctx context.Context) error {
 			ClientSecret: a.clientSecret,
 			Endpoint:     endpoint,
 			RedirectURL:  a.authority + "/callback",
-			// openid/profile drive the human's id_token; orchestrator:read/write are
-			// the delegated authority the access token carries to the orchestrator;
-			// offline_access mints the refresh token that keeps it fresh for the
-			// session's lifetime.
-			Scopes: []string{oidc.ScopeOpenID, "profile", "orchestrator:read", "orchestrator:write", "offline_access"},
+			// openid/profile drive the human's id_token; roles carries the user's
+			// `role` claim (admin gating) into the id_token; orchestrator:read/write
+			// are the delegated authority the access token carries to the
+			// orchestrator; offline_access mints the refresh token that keeps it
+			// fresh for the session's lifetime.
+			Scopes: []string{oidc.ScopeOpenID, "profile", "roles", "orchestrator:read", "orchestrator:write", "offline_access"},
 		}
 
 		a.verifier = provider.Verifier(&oidc.Config{ClientID: a.clientID})
@@ -194,12 +196,14 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 		Sub               string `json:"sub"`
 		PreferredUsername string `json:"preferred_username"`
 		Name              string `json:"name"`
+		Role              any    `json:"role"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
 		http.Error(w, "cannot read id_token claims", http.StatusBadGateway)
 		return
 	}
 	username := firstNonEmpty(claims.PreferredUsername, claims.Sub)
+	isAdmin := roleIsAdmin(claims.Role)
 
 	sid := randToken()
 	// Build the reusable, refresh-capable token source once for the session.
@@ -208,7 +212,7 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// token endpoint, preserving split-horizon.
 	tokenSrc := a.oauth.TokenSource(context.Background(), tok)
 	a.mu.Lock()
-	a.sessions[sid] = session{username: username, rawIDToken: rawID, tokenSrc: tokenSrc, expiresAt: time.Now().Add(8 * time.Hour)}
+	a.sessions[sid] = session{username: username, isAdmin: isAdmin, rawIDToken: rawID, tokenSrc: tokenSrc, expiresAt: time.Now().Add(8 * time.Hour)}
 	a.mu.Unlock()
 
 	http.SetCookie(w, &http.Cookie{
@@ -240,11 +244,12 @@ func (a *Authenticator) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, end, http.StatusFound)
 }
 
-// handleMe reports the logged-in user (the UI shows it and confirms the session).
+// handleMe reports the logged-in user and whether they are an admin (the UI
+// shows it, confirms the session, and gates the Agent Types admin view).
 func (a *Authenticator) handleMe(w http.ResponseWriter, r *http.Request) {
 	user, _ := a.user(r) // require() guarantees a session before this runs
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"user": user})
+	json.NewEncoder(w).Encode(map[string]any{"user": user, "isAdmin": a.isAdmin(r)})
 }
 
 // require gates a handler behind a valid session. Unauthenticated API calls get
@@ -267,6 +272,68 @@ func (a *Authenticator) require(next http.Handler) http.Handler {
 		}
 		http.Redirect(w, r, "/signin", http.StatusFound)
 	})
+}
+
+// isAdmin reports whether the request's session belongs to an admin user.
+func (a *Authenticator) isAdmin(r *http.Request) bool {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	a.mu.Lock()
+	s, ok := a.sessions[c.Value]
+	if ok && time.Now().After(s.expiresAt) {
+		delete(a.sessions, c.Value)
+		ok = false
+	}
+	a.mu.Unlock()
+	return ok && s.isAdmin
+}
+
+// requireAdmin gates a handler behind an admin session (role=admin) in addition
+// to a valid session. An unauthenticated caller gets 401 (admin routes are
+// API-only, so no login redirect); an authenticated non-admin gets 403. This is
+// the dashboard-side enforcement of the admin role — the orchestrator enforces
+// the same role on its own admin routes (defense in depth). UI hiding is
+// cosmetic and must not be the only gate.
+func (a *Authenticator) requireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := a.user(r); !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if !a.isAdmin(r) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// roleIsAdmin reports whether a raw "role" claim value includes "admin". The
+// claim is a JSON string for a single role and a JSON array for multiple; absent
+// or empty ⇒ false (fail-closed: a user with no role claim is not an admin).
+// Mirrors tokenvalidator.parseStringOrArray's three shapes (string, []string,
+// []any) so the BFF and orchestrator enforce the same claim identically and
+// cannot drift.
+func roleIsAdmin(v any) bool {
+	switch t := v.(type) {
+	case string:
+		return t == "admin"
+	case []string:
+		for _, s := range t {
+			if s == "admin" {
+				return true
+			}
+		}
+	case []any:
+		for _, e := range t {
+			if s, ok := e.(string); ok && s == "admin" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isPageNavigation reports whether the request is a top-level browser navigation

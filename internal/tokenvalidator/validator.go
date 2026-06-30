@@ -25,6 +25,8 @@ import (
 //     SPIFFE URI. Chain[0] == ActingAgent.
 //   - Scopes are the granted scopes (parsed from `scope`, string or array).
 //   - Audience is the token audience (`aud`, string or array).
+//   - Roles are the user's role claims (parsed from `role`, string or array).
+//     Used to gate admin-only operations (e.g. template management).
 //   - TokenUse is the optional `token_use` claim.
 type Claims struct {
 	User            string
@@ -33,6 +35,7 @@ type Claims struct {
 	Chain           []string
 	Scopes          []string
 	Audience        []string
+	Roles           []string
 	TokenUse        string
 }
 
@@ -50,6 +53,16 @@ func (c Claims) HasScope(s string) bool {
 func (c Claims) HasAudience(a string) bool {
 	for _, got := range c.Audience {
 		if got == a {
+			return true
+		}
+	}
+	return false
+}
+
+// HasRole reports whether the given role was granted.
+func (c Claims) HasRole(r string) bool {
+	for _, got := range c.Roles {
+		if got == r {
 			return true
 		}
 	}
@@ -125,6 +138,13 @@ func claimsFromToken(tok jwt.Token) Claims {
 		}
 	}
 
+	// Role claim(s): a single role is a string ("admin"); multiple are a JSON
+	// array. Both shapes are accepted so HasRole works regardless of how the
+	// IdP serializes one vs many role claims.
+	if v, ok := tok.Get("role"); ok {
+		c.Roles = parseStringOrArray(v)
+	}
+
 	// Walk the nested `act` chain, outermost first.
 	if v, ok := tok.Get("act"); ok {
 		c.Chain = parseActChain(v)
@@ -180,6 +200,33 @@ func parseSpaceOrArray(v any) []string {
 		for _, e := range t {
 			if s, ok := e.(string); ok {
 				out = append(out, splitNonEmpty(s)...)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// parseStringOrArray handles a claim that may be a single string or an array of
+// strings (e.g. "role"). Unlike parseSpaceOrArray it does NOT space-split, since
+// role values are opaque identifiers. It returns defensive copies so a caller
+// can't mutate the parsed slice and affect shared state.
+func parseStringOrArray(v any) []string {
+	switch t := v.(type) {
+	case string:
+		if t == "" {
+			return nil
+		}
+		return []string{t}
+	case []string:
+		out := make([]string, len(t))
+		copy(out, t)
+		return out
+	case []any:
+		var out []string
+		for _, e := range t {
+			if s, ok := e.(string); ok && s != "" {
+				out = append(out, s)
 			}
 		}
 		return out

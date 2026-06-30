@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -251,5 +253,185 @@ func TestExpiredSessionRejected(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "old"})
 	if _, ok := a.user(req); ok {
 		t.Error("expired session should not authenticate")
+	}
+}
+
+// TestTemplateRoutesRequireAdminAtBFF proves the dashboard BFF's template
+// POST/PATCH/DELETE routes are actually wired through auth.requireAdmin in
+// buildMux (not just the wrapper): a non-admin session gets 403 on each, AND
+// the upstream orchestrator is never hit (the proxy would forward if the gate
+// were bypassed). GET /api/templates stays on auth.require and is allowed for a
+// non-admin (the spawn dropdown is unchanged). This is the BFF-tier twin of the
+// orchestrator's TestTemplateManagementRequiresAdmin.
+func TestTemplateRoutesRequireAdminAtBFF(t *testing.T) {
+	var upstreamHits int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	oauth := &oauth2.Config{Endpoint: oauth2.Endpoint{TokenURL: "http://refresh.invalid/token"}}
+	a := stubAuth(oauth)
+	a.sessions["admin-sid"] = session{
+		username: "alice", isAdmin: true,
+		tokenSrc:  oauth.TokenSource(context.Background(), &oauth2.Token{AccessToken: "at-1", Expiry: time.Now().Add(time.Hour)}),
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	a.sessions["viewer-sid"] = session{
+		username: "viewer", isAdmin: false,
+		tokenSrc:  oauth.TokenSource(context.Background(), &oauth2.Token{AccessToken: "at-1", Expiry: time.Now().Add(time.Hour)}),
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	mux := buildMux(a, upstream.URL, "http://identity-server:8080", "http://docs", fstest.MapFS{})
+
+	mutateCases := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/api/templates"},
+		{http.MethodPatch, "/api/templates/worker"},
+		{http.MethodDelete, "/api/templates/worker"},
+	}
+
+	// Non-admin: every template-mutate route is 403 AND the orchestrator is
+	// never reached (the requireAdmin gate returns before proxy runs).
+	for _, tc := range mutateCases {
+		upstreamHits = 0
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}"))
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "viewer-sid"})
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("non-admin %s: status = %d, want 403", tc.method, rec.Code)
+		}
+		if upstreamHits != 0 {
+			t.Errorf("non-admin %s: orchestrator hit %d times, want 0 (gate must run before proxy)", tc.method, upstreamHits)
+		}
+	}
+
+	// Unauthenticated: admin routes are API-only → 401 (no login redirect).
+	for _, tc := range mutateCases {
+		upstreamHits = 0
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}"))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("unauth %s: status = %d, want 401", tc.method, rec.Code)
+		}
+		if upstreamHits != 0 {
+			t.Errorf("unauth %s: orchestrator hit %d times, want 0", tc.method, upstreamHits)
+		}
+	}
+
+	// Admin: each mutate route passes the gate and is forwarded to the
+	// orchestrator (proves the gate is requireAdmin, not a 403-everything).
+	for _, tc := range mutateCases {
+		upstreamHits = 0
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}"))
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "admin-sid"})
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("admin %s: status = %d, want 200 (forwarded; upstream returns 200)", tc.method, rec.Code)
+		}
+		if upstreamHits != 1 {
+			t.Errorf("admin %s: orchestrator hit %d times, want 1 (forwarded once)", tc.method, upstreamHits)
+		}
+	}
+
+	// GET /api/templates stays on auth.require: a non-admin is allowed (spawn
+	// dropdown unchanged) and forwarded to the orchestrator.
+	upstreamHits = 0
+	req := httptest.NewRequest(http.MethodGet, "/api/templates", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "viewer-sid"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("non-admin GET /api/templates: status = %d, want 200 (readScope, not admin-gated)", rec.Code)
+	}
+	if upstreamHits != 1 {
+		t.Errorf("non-admin GET /api/templates: orchestrator hit %d times, want 1", upstreamHits)
+	}
+}
+
+// TestHandleMeReportsIsAdmin asserts /api/me returns isAdmin=true for an admin
+// session and isAdmin=false for an ordinary (non-admin) session — the UI gates
+// the Agent Types admin view on this flag.
+func TestHandleMeReportsIsAdmin(t *testing.T) {
+	a := NewAuthenticator("http://localhost:8090", "http://identity-server:8080", "dashboard", "secret")
+	a.sessions["admin-sid"] = session{username: "alice", isAdmin: true, expiresAt: time.Now().Add(time.Hour)}
+	a.sessions["viewer-sid"] = session{username: "viewer", isAdmin: false, expiresAt: time.Now().Add(time.Hour)}
+
+	cases := []struct {
+		sid         string
+		wantUser    string
+		wantIsAdmin bool
+	}{
+		{"admin-sid", "alice", true},
+		{"viewer-sid", "viewer", false},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest("GET", "/api/me", nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tc.sid})
+		rec := httptest.NewRecorder()
+		a.handleMe(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200", tc.sid, rec.Code)
+		}
+		var got map[string]any
+		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+			t.Fatalf("%s: decode: %v", tc.sid, err)
+		}
+		if got["user"] != tc.wantUser {
+			t.Errorf("%s: user = %v, want %q", tc.sid, got["user"], tc.wantUser)
+		}
+		if isAdmin, _ := got["isAdmin"].(bool); isAdmin != tc.wantIsAdmin {
+			t.Errorf("%s: isAdmin = %v, want %v", tc.sid, got["isAdmin"], tc.wantIsAdmin)
+		}
+	}
+}
+
+// TestRequireAdmin asserts the requireAdmin gate rejects a non-admin session
+// with 403, an unauthenticated call with 401, and passes an admin session
+// through to the wrapped handler. This is the dashboard-BFF enforcement; the
+// orchestrator enforces the same role independently (defense in depth).
+func TestRequireAdmin(t *testing.T) {
+	a := NewAuthenticator("http://localhost:8090", "http://identity-server:8080", "dashboard", "secret")
+	a.sessions["admin-sid"] = session{username: "alice", isAdmin: true, expiresAt: time.Now().Add(time.Hour)}
+	a.sessions["viewer-sid"] = session{username: "viewer", isAdmin: false, expiresAt: time.Now().Add(time.Hour)}
+
+	called := false
+	h := a.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	cases := []struct {
+		name       string
+		sid        string
+		wantStatus int
+		wantCalled bool
+	}{
+		{"admin passes", "admin-sid", http.StatusOK, true},
+		{"non-admin forbidden", "viewer-sid", http.StatusForbidden, false},
+		{"no session unauthorized", "", http.StatusUnauthorized, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called = false
+			req := httptest.NewRequest("POST", "/api/templates", nil)
+			if tc.sid != "" {
+				req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tc.sid})
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			if called != tc.wantCalled {
+				t.Fatalf("handler called = %v, want %v", called, tc.wantCalled)
+			}
+		})
 	}
 }
