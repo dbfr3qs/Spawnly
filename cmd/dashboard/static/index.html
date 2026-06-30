@@ -1128,8 +1128,8 @@
       <div class="form-group">
         <label>Lifecycle</label>
         <select id="tf-lifecycle">
-          <option value="oneshot">oneshot</option>
-          <option value="longlived">longlived</option>
+          <option value="long-lived">long-lived</option>
+          <option value="short-lived">short-lived</option>
         </select>
       </div>
       <div class="form-group">
@@ -1611,7 +1611,7 @@
     setVal('tf-displayName', (src.meta && src.meta.displayName) || '');
     document.getElementById('tf-description').value = (src.meta && src.meta.description) || '';
     setVal('tf-image', rt.image || '');
-    setVal('tf-lifecycle', rt.lifecycle || 'oneshot');
+    setVal('tf-lifecycle', rt.lifecycle || 'long-lived');
     setVal('tf-supportsChat', rt.supportsChat ? 'true' : 'false');
     setVal('tf-cpu', (rt.resources && rt.resources.cpuLimits) || '');
     setVal('tf-memory', (rt.resources && rt.resources.memoryLimits) || '');

@@ -120,6 +120,13 @@ test.describe('admin agent-types UI', () => {
       await page.locator('button[type="submit"]').click();
       await expect(page.locator('#agent-list')).toBeVisible({ timeout: 30_000 });
 
+      // /api/me must report the viewer as a non-admin — this is the signal that
+      // drives the nav gating, so assert it directly (the button ships `hidden`
+      // by default, so toBeHidden() alone would pass even if gating regressed).
+      const me = await page.request.get('/api/me');
+      expect(me.ok(), '/api/me should succeed for a logged-in viewer').toBeTruthy();
+      expect((await me.json()).isAdmin, 'viewer must not be reported as admin').toBe(false);
+
       // The admin nav entry is cosmetic convenience and must be hidden for a
       // non-admin (the server-side gate is the real boundary — see below).
       await expect(page.locator('#open-agent-types-btn')).toBeHidden();
