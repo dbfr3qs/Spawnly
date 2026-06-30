@@ -165,6 +165,13 @@ provider — `terraform apply` upserts it through the same control-plane API, an
 `terraform destroy` disables-then-deletes it. See
 [Config-as-code with Terraform](../operating/config-as-code.md).
 
+Admins can also manage templates from the dashboard UI — create, edit,
+duplicate, disable, and delete — without leaving the browser. It drives the
+same control-plane API, so it's handy for iteration, but the changes are
+**in-memory only** and won't survive a registry restart unless committed to a
+`template.json`. See
+[Managing agent types from the dashboard (admin)](../operating/dashboard-agent-types.md).
+
 ### 5. Spawn and verify
 
 ```bash

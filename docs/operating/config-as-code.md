@@ -110,3 +110,18 @@ whole gate — fmt/vet, unit + acceptance tests, and a parity check that the
 provider can reproduce every seeded template — against an ephemeral registry it
 stands up and tears down. No Kind cluster required; just `docker` and the
 `terraform` CLI.
+
+---
+
+## The dashboard UI is a third, lighter writer over the same control plane
+
+Admins can also manage templates from the dashboard — create, edit, duplicate,
+disable, and delete — without leaving the browser. It drives the **same
+control-plane API** this provider does, so it's handy for iteration and
+incident response. Two caveats: the UI writes to the registry's **in-memory
+store** (changes don't survive a restart unless committed to a
+`template.json`), and it does **not** touch Terraform state, so the two can
+drift (a `terraform apply` overwrites a UI-only edit; a UI delete shows as
+drift on the next plan). Use the provider for the durable, reviewable record;
+use the UI for quick experiments. See
+[Managing agent types from the dashboard (admin)](dashboard-agent-types.md).
