@@ -148,6 +148,14 @@ public static class Config
                 // NOT orchestrator:spawn — human spawn uses orchestrator:write;
                 // spawn stays agent-only.
                 AllowedScopes = { "openid", "profile", "roles", "orchestrator:read", "orchestrator:write" },
+                // Put the identity-resource user claims (profile, role) into the
+                // id_token itself. Duende OMITS them from the id_token by default
+                // when an access token is also issued (the client is expected to
+                // call userinfo). The dashboard's Go backend reads `role` (and
+                // name/preferred_username) straight from the id_token to gate the
+                // admin UI, so they must ride in it — without this the `role`
+                // claim never arrives and every admin is treated as a non-admin.
+                AlwaysIncludeUserClaimsInIdToken = true,
             },
             // Interactive human login for the native MOBILE app (iOS/Android).
             // Unlike the dashboard (a confidential backend relying party), a
@@ -179,6 +187,10 @@ public static class Config
                 AllowOfflineAccess = true,
                 RefreshTokenUsage = TokenUsage.OneTimeOnly,
                 AllowedScopes = { "openid", "profile", "offline_access", "roles", "orchestrator:read", "orchestrator:write" },
+                // Same reason as the dashboard client above: the app reads the
+                // user claims (incl. `role`) from the id_token, and Duende omits
+                // them by default once an access token is issued.
+                AlwaysIncludeUserClaimsInIdToken = true,
             },
             // Control-plane clients (CONTROL_PLANE_AUTH=oidc). Unlike the agent
             // clients above — authenticated via SPIFFE JWT-SVID with a

@@ -48,7 +48,10 @@ test.describe('admin agent-types UI', () => {
       page.waitForResponse((r) => r.url().includes('/api/templates') && r.request().method() === 'POST'),
       page.locator('#tmpl-form-save').click(),
     ]);
-    expect(createResp.ok(), `create failed: ${createResp.status()} ${await createResp.text()}`).toBeTruthy();
+    // NB: don't read createResp.text() in the assertion message — a successful
+    // create is 201 with an empty body, and Playwright's getResponseBody throws
+    // ("No data found for resource") on a bodyless response. Status is enough.
+    expect(createResp.ok(), `create failed: ${createResp.status()}`).toBeTruthy();
     await expect(page.locator('#tmpl-form-modal.open')).toHaveCount(0);
 
     // 3. It appears in the admin table (full list, incl. active).
@@ -108,8 +111,11 @@ test.describe('admin agent-types UI', () => {
   test('non-admin viewer: nav hidden + admin routes 403', async ({ browser }: { browser: Browser }) => {
     // The cached storageState belongs to alice (admin). The viewer is a
     // different user, so drive the real OIDC login in a FRESH context that
-    // carries no cached session, then assert the deny path.
-    const ctx = await browser.newContext();
+    // carries no cached session, then assert the deny path. Pass an EMPTY
+    // storageState explicitly: browser.newContext() inherits the project's
+    // configured storageState (alice's session), which would otherwise land us
+    // straight on alice's dashboard instead of the login page.
+    const ctx = await browser.newContext({ storageState: { cookies: [], origins: [] } });
     const page = await ctx.newPage();
     try {
       // Real OIDC login as the seeded non-admin viewer.

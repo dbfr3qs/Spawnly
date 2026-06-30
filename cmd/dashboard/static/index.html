@@ -110,6 +110,11 @@
     }
 
     /* ── Buttons ── */
+    /* The HTML `hidden` attribute must win over .btn's display rule — without
+       this, .btn{display:inline-flex} overrides [hidden]{display:none} and a
+       hidden button (e.g. the admin-only "Agent Types" nav for non-admins)
+       stays visible. */
+    .btn[hidden] { display: none; }
     .btn {
       display: inline-flex;
       align-items: center;
