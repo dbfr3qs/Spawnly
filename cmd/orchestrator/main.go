@@ -148,7 +148,10 @@ func ownsAgent(ctx context.Context, regClient registry.Client, id, userId string
 // ctxKey is the private type for orchestrator request-context values.
 type ctxKey int
 
-const ctxUserID ctxKey = iota
+const (
+	ctxUserID ctxKey = iota
+	ctxRoles
+)
 
 // userIDFrom returns the authenticated user id placed in the context by
 // requireToken (the dashboard token's sub). Empty if the request was not
@@ -198,8 +201,51 @@ func requireToken(v tokenvalidator.TokenValidator, audience, scope string, next 
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		next(w, r.WithContext(context.WithValue(r.Context(), ctxUserID, userID)))
+		ctx := context.WithValue(r.Context(), ctxUserID, userID)
+		ctx = context.WithValue(ctx, ctxRoles, claims.Roles)
+		next(w, r.WithContext(ctx))
 	}
+}
+
+// requireAdmin gates a dashboard-facing handler behind an admin role in addition
+// to a valid delegated token: it runs requireToken's token/audience/scope
+// checks, then requires the token's `role` claim to include "admin" (else 403).
+// The admin role is issued by IdentityServer (TestUsers) and rides in the
+// orchestrator-audience access token via the orchestrator ApiResource's
+// UserClaims. This is the orchestrator-side enforcement; the dashboard BFF
+// gates the same routes with requireAdmin too (defense in depth), so a
+// non-admin is rejected at both tiers — UI hiding is cosmetic and never the
+// only gate.
+func requireAdmin(v tokenvalidator.TokenValidator, audience, scope string, next http.HandlerFunc) http.HandlerFunc {
+	return requireToken(v, audience, scope, func(w http.ResponseWriter, r *http.Request) {
+		if !hasRole(r.Context(), "admin") {
+			// Attribute the attempted privilege escalation to the authenticated user
+			// (the token sub) so a deny is investigable in logs.
+			log.Printf("admin auth: user %s missing admin role (have %v)", userIDFrom(r.Context()), rolesFrom(r.Context()))
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	})
+}
+
+// rolesFrom returns the role claims stashed in the request context by
+// requireToken (the dashboard token's `role` claim). Empty for a non-admin —
+// hasRole then denies by construction, so a token with no role claim can never
+// widen access.
+func rolesFrom(ctx context.Context) []string {
+	r, _ := ctx.Value(ctxRoles).([]string)
+	return r
+}
+
+// hasRole reports whether the context's roles include want.
+func hasRole(ctx context.Context, want string) bool {
+	for _, r := range rolesFrom(ctx) {
+		if r == want {
+			return true
+		}
+	}
+	return false
 }
 
 // buildMux wires the orchestrator's routes. validator/audience/spawnScope gate
@@ -762,16 +808,30 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	mux.HandleFunc("GET /v1/templates", requireToken(validator, audience, readScope, forwardToRegistry("GET", func(*http.Request) string {
 		return "/v1/templates"
 	})))
-	// Template management (control-plane-auth'd at the registry): create, update
-	// status, and delete. forwardToRegistry streams the body through, so the
-	// body-carrying create/update and the bodyless delete all use it.
-	mux.HandleFunc("POST /v1/templates", requireToken(validator, audience, writeScope, forwardToRegistry("POST", func(*http.Request) string {
+	// Admin full-detail template list (incl. disabled) for the dashboard's Agent
+	// Types admin view. Admin-gated (role=admin on top of read scope) at the
+	// orchestrator; the BFF gates its /api/admin/templates twin with
+	// requireAdmin too (defense in depth). forwardToRegistry carries the
+	// orchestrator's control-plane bearer, so the registry's detail=full route
+	// (control-plane gated) authorizes — the caller's admin role is checked
+	// here, not relied on at the registry.
+	mux.HandleFunc("GET /v1/admin/templates", requireAdmin(validator, audience, readScope, forwardToRegistry("GET", func(*http.Request) string {
+		return "/v1/templates?detail=full"
+	})))
+	// Template management (control-plane-auth'd at the registry, admin-gated at
+	// both the orchestrator and the dashboard BFF): create, update status, and
+	// delete. requireAdmin requires role=admin on top of the write scope, so a
+	// valid orchestrator:write token without the admin role gets 403. The thin
+	// GET /v1/templates above stays on readScope (the spawn dropdown).
+	// forwardToRegistry streams the body through, so the body-carrying
+	// create/update and the bodyless delete all use it.
+	mux.HandleFunc("POST /v1/templates", requireAdmin(validator, audience, writeScope, forwardToRegistry("POST", func(*http.Request) string {
 		return "/v1/templates"
 	})))
-	mux.HandleFunc("PATCH /v1/templates/{agentType}", requireToken(validator, audience, writeScope, forwardToRegistry("PATCH", func(r *http.Request) string {
+	mux.HandleFunc("PATCH /v1/templates/{agentType}", requireAdmin(validator, audience, writeScope, forwardToRegistry("PATCH", func(r *http.Request) string {
 		return "/v1/templates/" + r.PathValue("agentType")
 	})))
-	mux.HandleFunc("DELETE /v1/templates/{agentType}", requireToken(validator, audience, writeScope, forwardToRegistry("DELETE", func(r *http.Request) string {
+	mux.HandleFunc("DELETE /v1/templates/{agentType}", requireAdmin(validator, audience, writeScope, forwardToRegistry("DELETE", func(r *http.Request) string {
 		return "/v1/templates/" + r.PathValue("agentType")
 	})))
 

@@ -942,6 +942,93 @@
       background: #fecaca;
     }
 
+    /* ── Admin: Agent Types view ──────────────────────────────────── */
+    .admin-view {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 18px 40px;
+    }
+    .admin-view[hidden] { display: none; }
+    .admin-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    .admin-toolbar .admin-title { font-size: 20px; font-weight: 700; }
+    .caveat-note {
+      font-size: 12px;
+      color: var(--text-dim);
+      background: rgba(243,156,18,.08);
+      border: 1px solid rgba(243,156,18,.25);
+      border-radius: 8px;
+      padding: 10px 14px;
+      margin-bottom: 16px;
+      line-height: 1.5;
+    }
+    :root[data-theme="light"] .caveat-note {
+      background: rgba(234,88,12,.06);
+      border-color: rgba(234,88,12,.2);
+    }
+    .caveat-note strong { color: var(--text); }
+
+    .agent-types-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .agent-types-table th, .agent-types-table td {
+      text-align: left;
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: middle;
+    }
+    .agent-types-table th {
+      font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+      color: var(--text-dim); font-weight: 700; white-space: nowrap;
+    }
+    .agent-types-table td.type-cell { font-family: var(--mono, ui-monospace, monospace); font-weight: 600; }
+    .agent-types-table tr.row-disabled td { opacity: .65; }
+    .row-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+    .row-actions .btn { padding: 3px 9px; font-size: 11px; }
+    .btn-warn { background: rgba(243,156,18,.15); color: #f39c12; border: 1px solid rgba(243,156,18,.35); }
+    .btn-warn:hover { background: rgba(243,156,18,.3); }
+    :root[data-theme="light"] .btn-warn { background: rgba(234,88,12,.1); color: #ea580c; border-color: rgba(234,88,12,.25); }
+    :root[data-theme="light"] .btn-warn:hover { background: rgba(234,88,12,.18); }
+
+    .badge-disabled { background: rgba(93,109,126,.15); color: #95a5a6; border-color: rgba(93,109,126,.35); }
+    :root[data-theme="light"] .badge-disabled { background: rgba(107,114,128,.1); color: #4b5563; border-color: rgba(107,114,128,.25); }
+
+    .tmpl-detail { background: rgba(255,255,255,.02); border: 1px solid var(--border); border-radius: 8px; margin: 4px 0 10px; }
+    .tmpl-detail[hidden] { display: none; }
+    .tmpl-detail-grid { display: grid; grid-template-columns: 140px 1fr; gap: 6px 14px; padding: 12px 14px; font-size: 12px; }
+    .tmpl-detail-grid dt { color: var(--text-dim); font-weight: 600; }
+    .tmpl-detail-grid dd { margin: 0; word-break: break-word; }
+    .tmpl-raw {
+      margin: 0 14px 12px; padding: 12px; background: var(--bg, #0f172a);
+      border: 1px solid var(--border); border-radius: 6px;
+      font-family: var(--mono, ui-monospace, monospace); font-size: 11px;
+      white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto;
+    }
+
+    /* Create/edit form lives in a wide modal */
+    #tmpl-form-modal .modal { max-width: 760px; width: 92vw; max-height: 90vh; overflow: auto; }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+    .form-grid .full { grid-column: 1 / -1; }
+    .form-grid .form-group { margin-bottom: 14px; }
+    .form-group .hint { font-size: 11px; color: var(--text-dim); margin-top: 3px; }
+    .json-editor {
+      width: 100%; min-height: 120px; font-family: var(--mono, ui-monospace, monospace);
+      font-size: 11px; line-height: 1.45; padding: 10px; border-radius: 6px;
+      background: var(--bg, #0f172a); color: var(--text, #e0e6f0); border: 1px solid var(--border);
+      resize: vertical;
+    }
+    .inline-error {
+      margin-top: 12px; padding: 10px 14px; border-radius: 6px; font-size: 12px;
+      background: rgba(192,57,43,.12); color: #e74c3c; border: 1px solid rgba(192,57,43,.3);
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .inline-error[hidden] { display: none; }
+    :root[data-theme="light"] .inline-error { background: rgba(220,38,38,.08); color: #dc2626; border-color: rgba(220,38,38,.25); }
+
     /* ── Scrollbar ── */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -959,6 +1046,9 @@
   <div class="header-actions">
     <button class="btn btn-primary" id="open-modal-btn">+ New Agent</button>
     <button class="btn btn-ghost" id="open-consents-btn">Consents</button>
+    <!-- Admin-only (shown when /api/me reports isAdmin). Server-side gates
+         are the real boundary; this nav button is cosmetic convenience. -->
+    <button class="btn btn-ghost" id="open-agent-types-btn" hidden>Agent Types</button>
     <!-- href is overwritten from /api/config on load (local docs by default,
          the public docs origin in prod); the default keeps the link working in
          local dev even if that fetch fails. -->
@@ -981,6 +1071,117 @@
   </div>
   <div id="agent-list"></div>
 </main>
+
+<!-- Admin: Agent Types view (admin-only; hidden until /api/me isAdmin) -->
+<section class="admin-view" id="agent-types-view" hidden>
+  <div class="admin-toolbar">
+    <span class="admin-title">Agent Types</span>
+    <div style="display:flex; gap:10px;">
+      <button class="btn btn-ghost" id="agent-types-back-btn">← Back to Agents</button>
+      <button class="btn btn-primary" id="new-agent-type-btn">+ New Agent Type</button>
+    </div>
+  </div>
+  <div class="caveat-note">
+    <strong>In-memory store.</strong> Types created or edited here live in the
+    registry's memory and <strong>do not survive a registry restart</strong>
+    unless also committed to <code>agents/*/template.json</code> in the repo.
+    This view complements — it does not replace — config-as-code; a redeploy
+    from git will not carry UI changes unless you commit them.
+  </div>
+  <div id="agent-types-table-wrap">Loading…</div>
+</section>
+
+<!-- Admin: Create / edit template modal -->
+<div class="modal-overlay" id="tmpl-form-modal">
+  <div class="modal">
+    <h2 id="tmpl-form-title">New Agent Type</h2>
+    <div class="form-grid">
+      <div class="form-group">
+        <label>Agent Type</label>
+        <input id="tf-agentType" type="text" autocomplete="off" spellcheck="false"
+               placeholder="e.g. data-wrangler" />
+        <div class="hint">Immutable key. Read-only when editing. Lowercase, no spaces.</div>
+      </div>
+      <div class="form-group">
+        <label>Version</label>
+        <input id="tf-version" type="text" autocomplete="off" spellcheck="false" placeholder="1" />
+      </div>
+      <div class="form-group">
+        <label>Display Name</label>
+        <input id="tf-displayName" type="text" autocomplete="off" placeholder="Data Wrangler" />
+      </div>
+      <div class="form-group">
+        <label>Status</label>
+        <select id="tf-status">
+          <option value="active">active</option>
+          <option value="disabled">disabled</option>
+        </select>
+      </div>
+      <div class="form-group full">
+        <label>Description</label>
+        <textarea id="tf-description" rows="2" placeholder="What this agent does"></textarea>
+      </div>
+      <div class="form-group full">
+        <label>Runtime Image</label>
+        <input id="tf-image" type="text" spellcheck="false" placeholder="ghcr.io/.../agent:latest" />
+      </div>
+      <div class="form-group">
+        <label>Lifecycle</label>
+        <select id="tf-lifecycle">
+          <option value="oneshot">oneshot</option>
+          <option value="longlived">longlived</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Supports Chat</label>
+        <select id="tf-supportsChat">
+          <option value="false">false</option>
+          <option value="true">true</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>CPU Limit</label>
+        <input id="tf-cpu" type="text" spellcheck="false" placeholder="1000m" />
+      </div>
+      <div class="form-group">
+        <label>Memory Limit</label>
+        <input id="tf-memory" type="text" spellcheck="false" placeholder="1Gi" />
+      </div>
+      <div class="form-group full">
+        <label>Env Defaults <span class="hint">(one KEY=VALUE per line)</span></label>
+        <textarea id="tf-env" rows="3" spellcheck="false" placeholder="LOG_LEVEL=info"></textarea>
+      </div>
+      <div class="form-group full">
+        <label>OAuth Scopes <span class="hint">(comma-separated)</span></label>
+        <input id="tf-oauthScopes" type="text" spellcheck="false" placeholder="orchestrator:spawn, orchestrator:read" />
+      </div>
+      <div class="form-group">
+        <label>Requires Tenant</label>
+        <select id="tf-requiresTenant">
+          <option value="false">false</option>
+          <option value="true">true</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Allowed Child Types <span class="hint">(comma-separated)</span></label>
+        <input id="tf-allowedChildren" type="text" spellcheck="false" placeholder="child-a, child-b" />
+      </div>
+      <div class="form-group full">
+        <label>AuthZ Template <span class="hint">(raw JSON: <code>{"spiceDbRelations":[...]}</code>)</span></label>
+        <textarea class="json-editor" id="tf-authz" spellcheck="false">{"spiceDbRelations":[]}</textarea>
+      </div>
+      <div class="form-group full">
+        <label>Delegation <span class="hint">(raw JSON: <code>{"allowedChildTypes":[...],"grantableScopes":[...],"maxDepth":0,"childPolicies":{}}</code>)</span></label>
+        <textarea class="json-editor" id="tf-delegation" spellcheck="false">{"allowedChildTypes":[],"grantableScopes":[],"maxDepth":0}</textarea>
+      </div>
+    </div>
+    <div class="inline-error" id="tmpl-form-error" hidden></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="tmpl-form-cancel">Cancel</button>
+      <button class="btn btn-primary" id="tmpl-form-save">Save</button>
+    </div>
+  </div>
+</div>
 
 <!-- Spawn modal -->
 <div class="modal-overlay" id="spawn-modal">
@@ -1197,6 +1398,347 @@
   async function fetchTemplates() {
     try { const r = await fetch('/api/templates'); return r.ok ? r.json() : []; }
     catch { return []; }
+  }
+
+  // ── Admin: Agent Types management ──────────────────────────────────────
+  // All routes are admin-gated server-side (requireAdmin at the BFF +
+  // orchestrator). The nav button is shown only when /api/me isAdmin, but the
+  // gate is enforced regardless of the client. Denied calls (e.g. a tampered
+  // non-admin client) surface as 403 and are shown as a toast/inline error.
+  async function fetchAdminTemplates() {
+    const r = await fetch('/api/admin/templates');
+    if (!r.ok) throw new Error(`list templates: ${r.status}`);
+    return r.json();
+  }
+
+  function templateStatusBadge(status) {
+    const s = (status || 'active').toLowerCase();
+    const cls = s === 'disabled' ? 'badge-disabled' : 'badge-active';
+    return `<span class="badge ${cls}">${escHtml(s)}</span>`;
+  }
+
+  function childSummary(t) {
+    const kids = (t && t.delegation && t.delegation.allowedChildTypes) || [];
+    if (!kids.length) return '—';
+    return kids.length + (kids.length === 1 ? ' child' : ' children');
+  }
+
+  function fmtJSON(obj) {
+    // JSON.stringify on a plain parsed object won't throw; the try/catch is a
+    // guard for unexpected input (circular refs etc.) — fall back to a best
+    // effort rather than the misleading "[object Object]".
+    try { return JSON.stringify(obj, null, 2); }
+    catch { return String(obj && typeof obj === 'object' ? JSON.stringify(obj) : obj); }
+  }
+
+  // Render the admin templates table into #agent-types-table-wrap. Each row
+  // carries the template on a data attribute (agentType) so actions can
+  // re-resolve from the in-memory `adminTemplates` cache (never trust
+  // attribute payloads beyond the key, which is escaped + used as a lookup).
+  let adminTemplates = [];
+  function renderAgentTypesTable(templates) {
+    adminTemplates = Array.isArray(templates) ? templates : [];
+    const wrap = document.getElementById('agent-types-table-wrap');
+    if (!adminTemplates.length) {
+      wrap.innerHTML = '<div class="no-events">No agent types registered.</div>';
+      return;
+    }
+    const sorted = [...adminTemplates].sort((a, b) =>
+      (a.agentType || '').localeCompare(b.agentType || '', undefined, { sensitivity: 'base' }));
+    wrap.innerHTML = `
+      <table class="agent-types-table">
+        <thead><tr>
+          <th>Agent Type</th><th>Display Name</th><th>Version</th>
+          <th>Status</th><th>Tenant</th><th>Delegation</th><th style="text-align:right">Actions</th>
+        </tr></thead>
+        <tbody>
+        ${sorted.map(t => agentTypeRow(t)).join('')}
+        </tbody>
+      </table>`;
+  }
+
+  function agentTypeRow(t) {
+    const key = escHtml(t.agentType || '');
+    const disabled = (t.status || '').toLowerCase() === 'disabled';
+    const display = escHtml((t.meta && t.meta.displayName) || t.agentType || '');
+    const ver = escHtml(t.version || '');
+    const tenant = t.requiresTenant ? 'required' : 'optional';
+    return `
+      <tr class="${disabled ? 'row-disabled' : ''}" data-agent-type="${key}">
+        <td class="type-cell">${key}</td>
+        <td>${display}</td>
+        <td>${ver}</td>
+        <td>${templateStatusBadge(t.status)}</td>
+        <td>${tenant}</td>
+        <td>${childSummary(t)}</td>
+        <td>
+          <div class="row-actions">
+            <button class="btn btn-ghost" data-act="detail" data-type="${key}">View</button>
+            <button class="btn btn-ghost" data-act="edit" data-type="${key}">Edit</button>
+            <button class="btn btn-ghost" data-act="dup" data-type="${key}">Duplicate</button>
+            ${disabled
+              ? `<button class="btn btn-warn" data-act="enable" data-type="${key}">Enable</button>`
+              : `<button class="btn btn-warn" data-act="disable" data-type="${key}">Disable</button>`}
+            <button class="btn btn-danger" data-act="delete" data-type="${key}" ${disabled ? '' : 'disabled title="Disable before deleting"'}>Delete</button>
+          </div>
+        </td>
+      </tr>
+      <tr class="tmpl-detail-row" data-detail-for="${key}" hidden>
+        <td colspan="7" style="padding:0">
+          <div class="tmpl-detail">
+            <dl class="tmpl-detail-grid">
+              <dt>Agent Type</dt><dd>${key}</dd>
+              <dt>Version</dt><dd>${ver}</dd>
+              <dt>Status</dt><dd>${escHtml(t.status || 'active')}</dd>
+              <dt>Requires Tenant</dt><dd>${t.requiresTenant ? 'true' : 'false'}</dd>
+              <dt>Image</dt><dd>${escHtml((t.runtimeSpec && t.runtimeSpec.image) || '—')}</dd>
+              <dt>Lifecycle</dt><dd>${escHtml((t.runtimeSpec && t.runtimeSpec.lifecycle) || '—')}</dd>
+              <dt>Supports Chat</dt><dd>${(t.runtimeSpec && t.runtimeSpec.supportsChat) ? 'true' : 'false'}</dd>
+              <dt>OAuth Scopes</dt><dd>${escHtml(((t.oauthScopes || []).join(', ')) || '—')}</dd>
+              <dt>Delegation</dt><dd>${childSummary(t)}; maxDepth ${escHtml((t.delegation && t.delegation.maxDepth) || 0)}</dd>
+            </dl>
+            <details class="tmpl-raw-wrap"><summary class="children-label" style="margin:0 14px 8px">Raw JSON</summary>
+              <pre class="tmpl-raw">${escHtml(fmtJSON(t))}</pre>
+            </details>
+          </div>
+        </td>
+      </tr>`;
+  }
+
+  function findAdminTemplate(agentType) {
+    return adminTemplates.find(t => t.agentType === agentType);
+  }
+
+  // Lifecycle + view actions on the table (event delegation: one listener).
+  function handleTableAction(e) {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const agentType = btn.getAttribute('data-type');
+    const act = btn.getAttribute('data-act');
+    const t = findAdminTemplate(agentType);
+    if (!t) return;
+    if (act === 'detail') {
+      const row = document.querySelector(`tr[data-detail-for="${cssEsc(agentType)}"]`);
+      if (row) row.hidden = !row.hidden;
+    } else if (act === 'edit') {
+      openTemplateForm(t, { edit: true });
+    } else if (act === 'dup') {
+      openTemplateForm(t, { edit: false });
+    } else if (act === 'enable' || act === 'disable') {
+      setTemplateStatus(agentType, act === 'disable' ? 'disabled' : 'active');
+    } else if (act === 'delete') {
+      confirmDelete(agentType);
+    }
+  }
+
+  // CSS.escape for attribute selectors keyed by agentType; fall back to a
+  // quote-safe comparator if unavailable.
+  function cssEsc(s) {
+    if (window.CSS && typeof CSS.escape === 'function') return CSS.escape(s);
+    return String(s).replace(/(["\\])/g, '\\$1');
+  }
+
+  async function setTemplateStatus(agentType, status) {
+    try {
+      const r = await fetch(`/api/templates/${encodeURIComponent(agentType)}`, {
+        method: 'PATCH', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ status }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      showToast(`${agentType}: ${status}`);
+      await reloadAdminTemplates();
+    } catch (e) {
+      showToast(`Update failed: ${e.message}`, true);
+    }
+  }
+
+  function confirmDelete(agentType) {
+    const t = findAdminTemplate(agentType);
+    const disabled = t && (t.status || '').toLowerCase() === 'disabled';
+    if (!disabled) {
+      showToast('Disable the type before deleting (active types are protected).', true);
+      return;
+    }
+    if (!confirm(`Delete agent type "${agentType}"? This cannot be undone.`)) return;
+    deleteTemplateType(agentType);
+  }
+
+  async function deleteTemplateType(agentType) {
+    try {
+      const r = await fetch(`/api/templates/${encodeURIComponent(agentType)}`, { method: 'DELETE' });
+      if (r.status === 409) {
+        showToast('Type is still active — disable it first (409).', true);
+        return;
+      }
+      if (!r.ok && r.status !== 204) throw new Error(await r.text());
+      showToast(`Deleted: ${agentType}`);
+      await reloadAdminTemplates();
+    } catch (e) {
+      showToast(`Delete failed: ${e.message}`, true);
+    }
+  }
+
+  async function reloadAdminTemplates() {
+    try {
+      const tpls = await fetchAdminTemplates();
+      renderAgentTypesTable(tpls);
+    } catch (e) {
+      document.getElementById('agent-types-table-wrap').innerHTML =
+        `<div class="inline-error">Failed to load agent types: ${escHtml(e.message)}</div>`;
+    }
+  }
+
+  // ── Create / edit form ────────────────────────────────────────────────
+  // Assembles a template JSON from the guided fields + raw JSON editors.
+  // `agentType` is read-only when editing (immutable key). authzTemplate and
+  // delegation are edited as raw JSON (validated before submit; a parse error
+  // surfaces inline rather than firing a bad request).
+  function openTemplateForm(t, { edit }) {
+    const form = document.getElementById('tmpl-form-modal');
+    document.getElementById('tmpl-form-error').hidden = true;
+    document.getElementById('tmpl-form-error').textContent = '';
+    document.getElementById('tmpl-form-title').textContent = edit ? `Edit ${t.agentType}` : (t ? 'Duplicate Agent Type' : 'New Agent Type');
+
+    const at = document.getElementById('tf-agentType');
+    at.value = edit ? t.agentType : '';
+    at.readOnly = edit;
+    at.disabled = false;
+
+    const src = t || {};
+    const rt = src.runtimeSpec || {};
+    setVal('tf-version', src.version || '1');
+    setVal('tf-status', (src.status || 'active').toLowerCase());
+    setVal('tf-displayName', (src.meta && src.meta.displayName) || '');
+    document.getElementById('tf-description').value = (src.meta && src.meta.description) || '';
+    setVal('tf-image', rt.image || '');
+    setVal('tf-lifecycle', rt.lifecycle || 'oneshot');
+    setVal('tf-supportsChat', rt.supportsChat ? 'true' : 'false');
+    setVal('tf-cpu', (rt.resources && rt.resources.cpuLimits) || '');
+    setVal('tf-memory', (rt.resources && rt.resources.memoryLimits) || '');
+    document.getElementById('tf-env').value = envMapToText(rt.envDefaults);
+    setVal('tf-oauthScopes', (src.oauthScopes || []).join(', '));
+    setVal('tf-requiresTenant', src.requiresTenant ? 'true' : 'false');
+    setVal('tf-allowedChildren', ((src.delegation && src.delegation.allowedChildTypes) || []).join(', '));
+    // Both raw editors are verbatim (no field filtering) so an operator who
+    // hand-edits a field we don't have a guided control for round-trips it.
+    document.getElementById('tf-authz').value = JSON.stringify(src.authzTemplate || { spiceDbRelations: [] }, null, 2);
+    document.getElementById('tf-delegation').value = JSON.stringify(src.delegation || { allowedChildTypes: [], grantableScopes: [], maxDepth: 0 }, null, 2);
+
+    form.dataset.edit = edit ? '1' : '0';
+    form.classList.add('open');
+    at.focus();
+  }
+
+  function setVal(id, v) {
+    const el = document.getElementById(id);
+    if (el) el.value = v == null ? '' : String(v);
+  }
+
+  function envMapToText(m) {
+    if (!m) return '';
+    return Object.entries(m).map(([k, v]) => `${k}=${v}`).join('\n');
+  }
+  function envTextToMap(text) {
+    const out = {};
+    (text || '').split('\n').map(s => s.trim()).filter(Boolean).forEach(line => {
+      const i = line.indexOf('=');
+      if (i <= 0) throw new Error(`Bad env line (expected KEY=VALUE): ${line}`);
+      out[line.slice(0, i).trim()] = line.slice(i + 1);
+    });
+    return out;
+  }
+  function csvList(s) {
+    return (s || '').split(',').map(x => x.trim()).filter(Boolean);
+  }
+
+  function showFormError(msg) {
+    const el = document.getElementById('tmpl-form-error');
+    el.textContent = msg;
+    el.hidden = !msg;
+  }
+
+  function assembleTemplate() {
+    const agentType = document.getElementById('tf-agentType').value.trim();
+    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(agentType)) {
+      throw new Error('Agent Type must be lowercase, alphanumeric with optional hyphens (e.g. data-wrangler).');
+    }
+    const authz = JSON.parse(document.getElementById('tf-authz').value || '{}');
+    const delegation = JSON.parse(document.getElementById('tf-delegation').value || '{}');
+    const envDefaults = envTextToMap(document.getElementById('tf-env').value);
+    const allowedChildren = csvList(document.getElementById('tf-allowedChildren').value);
+    // Mirror allowedChildTypes into delegation if the editor left it empty —
+    // keeps the two fields consistent without surprising the operator.
+    if (allowedChildren.length && !(delegation.allowedChildTypes && delegation.allowedChildTypes.length)) {
+      delegation.allowedChildTypes = allowedChildren;
+    }
+    return {
+      agentType,
+      version: document.getElementById('tf-version').value.trim() || '1',
+      status: document.getElementById('tf-status').value,
+      meta: {
+        displayName: document.getElementById('tf-displayName').value.trim(),
+        description: document.getElementById('tf-description').value.trim(),
+      },
+      runtimeSpec: {
+        image: document.getElementById('tf-image').value.trim(),
+        lifecycle: document.getElementById('tf-lifecycle').value,
+        supportsChat: document.getElementById('tf-supportsChat').value === 'true',
+        resources: {
+          cpuLimits: document.getElementById('tf-cpu').value.trim(),
+          memoryLimits: document.getElementById('tf-memory').value.trim(),
+        },
+        envDefaults,
+      },
+      requiresTenant: document.getElementById('tf-requiresTenant').value === 'true',
+      oauthScopes: csvList(document.getElementById('tf-oauthScopes').value),
+      authzTemplate: authz,
+      delegation,
+    };
+  }
+
+  async function saveTemplateForm() {
+    const form = document.getElementById('tmpl-form-modal');
+    const edit = form.dataset.edit === '1';
+    const saveBtn = document.getElementById('tmpl-form-save');
+    showFormError('');
+    let body;
+    try { body = assembleTemplate(); }
+    catch (e) { showFormError(e.message); return; }
+    saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
+    try {
+      const r = await fetch('/api/templates', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        // Surface server validation errors inline (400 body) not just a toast.
+        const detail = await r.text();
+        showFormError(`Server rejected (${r.status}): ${detail}`);
+        return;
+      }
+      showToast(edit ? `Updated: ${body.agentType}` : `Created: ${body.agentType}`);
+      closeTemplateForm();
+      await reloadAdminTemplates();
+    } catch (e) {
+      showFormError(e.message);
+    } finally {
+      saveBtn.disabled = false; saveBtn.textContent = 'Save';
+    }
+  }
+
+  function closeTemplateForm() {
+    document.getElementById('tmpl-form-modal').classList.remove('open');
+  }
+
+  // ── Admin view switching ───────────────────────────────────────────────
+  function openAgentTypesView() {
+    document.querySelector('main').hidden = true;
+    document.getElementById('agent-types-view').hidden = false;
+    reloadAdminTemplates();
+  }
+  function closeAgentTypesView() {
+    document.getElementById('agent-types-view').hidden = true;
+    document.querySelector('main').hidden = false;
   }
 
   async function sendMessage(agentId, message) {
@@ -1976,6 +2518,17 @@
     document.getElementById('spawn-modal').classList.add('open');
     document.getElementById('f-task').focus();
   });
+
+  // ── Admin: Agent Types view + form wiring ──────────────────────────────
+  document.getElementById('open-agent-types-btn').addEventListener('click', openAgentTypesView);
+  document.getElementById('agent-types-back-btn').addEventListener('click', closeAgentTypesView);
+  document.getElementById('new-agent-type-btn').addEventListener('click', () => openTemplateForm(null, { edit: false }));
+  document.getElementById('agent-types-table-wrap').addEventListener('click', handleTableAction);
+  document.getElementById('tmpl-form-cancel').addEventListener('click', closeTemplateForm);
+  document.getElementById('tmpl-form-save').addEventListener('click', saveTemplateForm);
+  document.getElementById('tmpl-form-modal').addEventListener('click', e => {
+    if (e.target === e.currentTarget) closeTemplateForm();
+  });
   document.getElementById('close-modal-btn').addEventListener('click', closeModal);
   document.getElementById('spawn-modal').addEventListener('click', e => {
     if (e.target === e.currentTarget) closeModal();
@@ -2138,19 +2691,24 @@
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
     closeModal();
+    closeTemplateForm();
     document.getElementById('consents-modal').classList.remove('open');
   });
 
   // Show the logged-in user in the header. The page itself is only reachable
   // with a session (the server redirects to /login otherwise), so this is just
   // a label; a 401 here means the session lapsed, so bounce to login.
+  // Also surface isAdmin to toggle the admin-only "Agent Types" nav entry.
+  // The nav button is cosmetic convenience; the BFF/orchestrator gates are the
+  // real boundary, so a tampered client that unhides it still 403s on every call.
   (async () => {
     try {
       const r = await fetch('/api/me');
       if (r.status === 401) { window.location = '/login'; return; }
       if (!r.ok) return;
-      const { user } = await r.json();
-      if (user) document.getElementById('current-user').textContent = user;
+      const me = await r.json();
+      if (me.user) document.getElementById('current-user').textContent = me.user;
+      if (me.isAdmin) document.getElementById('open-agent-types-btn').hidden = false;
     } catch (_) {}
   })();
 

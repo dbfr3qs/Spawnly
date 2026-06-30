@@ -1582,3 +1582,205 @@ func TestForwardedOpsOwnershipGate(t *testing.T) {
 		})
 	}
 }
+
+// TestTemplateManagementRequiresAdmin asserts the template create/update/delete
+// routes require the admin role: an admin token is forwarded to the registry
+// (and relays its status), while a valid orchestrator:write token WITHOUT the
+// admin role gets 403 and is NOT forwarded. The thin GET /v1/templates stays on
+// readScope, so it still works for the non-admin (the spawn dropdown).
+func TestTemplateManagementRequiresAdmin(t *testing.T) {
+	var forwarded string
+	mockReg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded = r.Method + " " + r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/templates":
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/v1/templates/"):
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/templates/"):
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/templates":
+			w.Write([]byte(`[]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockReg.Close()
+
+	muxFor := func(claims tokenvalidator.Claims) *http.ServeMux {
+		fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+		sdb := spicedb.NewMock()
+		return buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: claims}, "orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
+	}
+
+	adminClaims := humanClaims("alice", "orchestrator:write", "orchestrator:read")
+	adminClaims.Roles = []string{"admin"}
+	nonAdminClaims := humanClaims("viewer", "orchestrator:write", "orchestrator:read") // no role claim
+
+	mutateCases := []struct {
+		method     string
+		path       string
+		body       string
+		wantStatus int // the status the relayed registry response yields
+	}{
+		{http.MethodPost, "/v1/templates", `{}`, http.StatusCreated},
+		{http.MethodPatch, "/v1/templates/worker", "", http.StatusOK},
+		{http.MethodDelete, "/v1/templates/worker", "", http.StatusNoContent},
+	}
+
+	// Admin: each mutate route forwards to the registry and relays its status.
+	adminMux := muxFor(adminClaims)
+	for _, tc := range mutateCases {
+		forwarded = ""
+		// strings.NewReader("") is a valid empty reader, so the bodyless
+		// PATCH/DELETE routes pass a real (empty) reader and avoid the typed-nil
+		// io.Reader pitfall.
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		req.Header.Set("Authorization", "Bearer admin-token")
+		if tc.body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		adminMux.ServeHTTP(rec, req)
+		if rec.Code != tc.wantStatus {
+			t.Errorf("admin %s: status = %d, want %d (body: %s)", tc.method, rec.Code, tc.wantStatus, rec.Body.String())
+		}
+		if forwarded == "" {
+			t.Errorf("admin %s: not forwarded to registry", tc.method)
+		}
+	}
+
+	// Non-admin (write scope, no role): each mutate route is 403 and NOT forwarded.
+	nonAdminMux := muxFor(nonAdminClaims)
+	for _, tc := range mutateCases {
+		forwarded = ""
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		req.Header.Set("Authorization", "Bearer viewer-token")
+		if tc.body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		nonAdminMux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("non-admin %s: status = %d, want 403 (body: %s)", tc.method, rec.Code, rec.Body.String())
+		}
+		if forwarded != "" {
+			t.Errorf("non-admin %s: unexpectedly forwarded to registry (%s)", tc.method, forwarded)
+		}
+	}
+
+	// Thin GET /v1/templates stays on readScope: works for the non-admin
+	// (the spawn dropdown is unchanged).
+	forwarded = ""
+	req := httptest.NewRequest(http.MethodGet, "/v1/templates", nil)
+	req.Header.Set("Authorization", "Bearer viewer-token")
+	rec := httptest.NewRecorder()
+	nonAdminMux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("non-admin GET /v1/templates: status = %d, want 200", rec.Code)
+	}
+	if forwarded == "" {
+		t.Errorf("non-admin GET /v1/templates: not forwarded to registry")
+	}
+}
+
+// TestAdminTemplatesListRequiresAdmin asserts the orchestrator's admin
+// full-detail template list (GET /v1/admin/templates) is admin-gated: an admin
+// token is forwarded to the registry's /v1/templates?detail=full (carrying the
+// control-plane bearer) and relays its status; a valid read-scope token WITHOUT
+// the admin role gets 403 and is NOT forwarded. The thin GET /v1/templates stays
+// on readScope and is forwarded for the non-admin (spawn dropdown). It also
+// asserts the control-plane bearer is actually attached on the forwarded call
+// (so a regression in forwardToRegistry that dropped it would surface, rather
+// than silently 401ing in production).
+func TestAdminTemplatesListRequiresAdmin(t *testing.T) {
+	// controlPlaneBearerSource reads CONTROL_PLANE_AUTH/TOKEN at buildMux time;
+	// set them before constructing the mux so forwardToRegistry attaches a
+	// known shared-secret bearer we can assert on the forwarded request.
+	t.Setenv("CONTROL_PLANE_AUTH", "shared-secret")
+	t.Setenv("CONTROL_PLANE_TOKEN", "cp-sekrit")
+
+	var forwarded string
+	var gotAuth string
+	mockReg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwarded = r.Method + " " + r.URL.Path + "?" + r.URL.RawQuery
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/templates" && r.URL.Query().Get("detail") == "full":
+			w.Write([]byte(`[{"agentType":"worker","status":"active"},{"agentType":"worker-disabled","status":"disabled"}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/templates":
+			w.Write([]byte(`["worker"]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockReg.Close()
+
+	muxFor := func(claims tokenvalidator.Claims) *http.ServeMux {
+		fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+		sdb := spicedb.NewMock()
+		return buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: claims}, "orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
+	}
+
+	adminClaims := humanClaims("alice", "orchestrator:read")
+	adminClaims.Roles = []string{"admin"}
+	nonAdminClaims := humanClaims("viewer", "orchestrator:read") // no role claim
+
+	// Admin: forwarded to /v1/templates?detail=full, control-plane bearer
+	// attached (NOT the caller's dashboard bearer), body relayed.
+	adminMux := muxFor(adminClaims)
+	forwarded, gotAuth = "", ""
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/templates", nil)
+	req.Header.Set("Authorization", "Bearer admin-token")
+	rec := httptest.NewRecorder()
+	adminMux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin: status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if forwarded != "GET /v1/templates?detail=full" {
+		t.Errorf("admin forwarded = %q, want GET /v1/templates?detail=full", forwarded)
+	}
+	if gotAuth != "Bearer cp-sekrit" {
+		t.Errorf("admin forwarded Authorization = %q, want Bearer cp-sekrit (control-plane bearer must overwrite the caller's dashboard bearer)", gotAuth)
+	}
+	if !strings.Contains(rec.Body.String(), "worker-disabled") {
+		t.Errorf("admin body did not relay disabled template; got %s", rec.Body.String())
+	}
+
+	// Non-admin (read scope, no role): 403, NOT forwarded (so no bearer sent).
+	nonAdminMux := muxFor(nonAdminClaims)
+	forwarded, gotAuth = "", ""
+	req = httptest.NewRequest(http.MethodGet, "/v1/admin/templates", nil)
+	req.Header.Set("Authorization", "Bearer viewer-token")
+	rec = httptest.NewRecorder()
+	nonAdminMux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin: status = %d, want 403", rec.Code)
+	}
+	if forwarded != "" {
+		t.Errorf("non-admin unexpectedly forwarded to registry (%s); want no forward", forwarded)
+	}
+	if gotAuth != "" {
+		t.Errorf("non-admin sent Authorization %q to registry; want none (gate must run before forward)", gotAuth)
+	}
+
+	// Thin GET /v1/templates stays on readScope: forwarded for the non-admin
+	// (spawn dropdown unchanged), to the plain (not detail=full) path, and the
+	// control-plane bearer is attached there too (forwardToRegistry always does).
+	forwarded, gotAuth = "", ""
+	req = httptest.NewRequest(http.MethodGet, "/v1/templates", nil)
+	req.Header.Set("Authorization", "Bearer viewer-token")
+	rec = httptest.NewRecorder()
+	nonAdminMux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("non-admin GET /v1/templates: status = %d, want 200", rec.Code)
+	}
+	if forwarded != "GET /v1/templates?" {
+		t.Errorf("non-admin GET /v1/templates forwarded = %q, want GET /v1/templates?", forwarded)
+	}
+	if gotAuth != "Bearer cp-sekrit" {
+		t.Errorf("non-admin GET /v1/templates forwarded Authorization = %q, want Bearer cp-sekrit", gotAuth)
+	}
+}

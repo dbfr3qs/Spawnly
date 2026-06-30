@@ -133,3 +133,59 @@ func TestParseActChain_Malformed(t *testing.T) {
 		t.Errorf("chain = %v, want %v", chain, want)
 	}
 }
+
+// TestClaims_Role asserts the `role` claim is parsed in both shapes Duende
+// emits (a single role as a JSON string, multiple as a JSON array), and that a
+// token with no role claim yields no roles (fail-closed for admin gating).
+func TestClaims_Role(t *testing.T) {
+	// Single role as a string (how Duende emits one role claim).
+	tok := mkToken(t, map[string]any{
+		"sub":  "user:alice",
+		"aud":  "orchestrator",
+		"role": "admin",
+	})
+	c := claimsFromToken(tok)
+	if !c.HasRole("admin") {
+		t.Errorf("HasRole(admin) = false, want true; Roles = %v", c.Roles)
+	}
+	if c.HasRole("superuser") {
+		t.Errorf("HasRole(superuser) = true, want false")
+	}
+
+	// Multiple roles as a JSON array.
+	tok2 := mkToken(t, map[string]any{
+		"sub":  "user:bob",
+		"aud":  "orchestrator",
+		"role": []any{"admin", "auditor"},
+	})
+	c2 := claimsFromToken(tok2)
+	if !c2.HasRole("admin") || !c2.HasRole("auditor") {
+		t.Errorf("HasRole failed; Roles = %v", c2.Roles)
+	}
+
+	// Multiple roles as a []string (the shape jwx can produce depending on the
+	// claim's JSON type descriptor). parseStringOrArray's []string branch.
+	tokArr := mkToken(t, map[string]any{
+		"sub":  "user:carol",
+		"aud":  "orchestrator",
+		"role": []string{"admin", "auditor"},
+	})
+	cArr := claimsFromToken(tokArr)
+	if !cArr.HasRole("admin") || !cArr.HasRole("auditor") {
+		t.Errorf("[]string HasRole failed; Roles = %v", cArr.Roles)
+	}
+
+	// No role claim -> not an admin (fail-closed: a user with no role claim is
+	// never an admin, so requireAdmin denies by construction).
+	tok3 := mkToken(t, map[string]any{
+		"sub": "user:viewer",
+		"aud": "orchestrator",
+	})
+	c3 := claimsFromToken(tok3)
+	if c3.HasRole("admin") {
+		t.Errorf("HasRole(admin) = true with no role claim, want false (fail-closed)")
+	}
+	if c3.Roles != nil {
+		t.Errorf("Roles = %v, want nil", c3.Roles)
+	}
+}

@@ -20,6 +20,12 @@ public static class Config
         {
             new IdentityResources.OpenId(),
             new IdentityResources.Profile(),
+            // The "role" user claim (value "admin" for an admin user) rides in
+            // the id_token when a client requests the "roles" scope. The
+            // dashboard/mobile read it to gate the admin UI; the orchestrator
+            // reads the same claim from the access token (via the orchestrator
+            // ApiResource's UserClaims below).
+            new IdentityResource("roles", "User roles", new[] { "role" }),
         };
 
     public static IEnumerable<ApiScope> ApiScopes =>
@@ -82,6 +88,28 @@ public static class Config
             new ApiResource("orchestrator", "Agent Orchestrator")
             {
                 Scopes = { "orchestrator:spawn", "orchestrator:read", "orchestrator:write" },
+                // "role" rides in the orchestrator-audience access token so the
+                // orchestrator can authorize admin-only operations (template
+                // management) on it. The value comes from the user's "role"
+                // claim (TestUsers); a non-admin user simply has no such claim.
+                //
+                // SECURITY INVARIANT: "role" must NEVER be a client-asserted
+                // claim. It is sourced ONLY from the authenticated user's claims
+                // (Duende DefaultClaimsService), never from a client's
+                // AlwaysSendClientClaims assertion, and no IProfileService may
+                // re-emit it on token-exchange or any other grant. Concretely:
+                //   - the dashboard/mobile clients do NOT set
+                //     AlwaysSendClientClaims, so a browser/app request can't
+                //     inject a role;
+                //   - the machine clients that DO set AlwaysSendClientClaims
+                //     (weather-monitor, chain-worker, travel-*) cannot request
+                //     the "roles" scope nor "orchestrator:write";
+                //   - token-exchange (TokenExchangeGrantValidator) carries over
+                //     only "sub", never "role".
+                // If you add an IProfileService or grant a role claim to any
+                // client, re-audit this: a client-asserted role would be
+                // forgeable and would defeat the admin gate.
+                UserClaims = { "role" },
             },
         };
 
@@ -119,7 +147,7 @@ public static class Config
                 // presents to the orchestrator (aud=orchestrator, sub=userId).
                 // NOT orchestrator:spawn — human spawn uses orchestrator:write;
                 // spawn stays agent-only.
-                AllowedScopes = { "openid", "profile", "orchestrator:read", "orchestrator:write" },
+                AllowedScopes = { "openid", "profile", "roles", "orchestrator:read", "orchestrator:write" },
             },
             // Interactive human login for the native MOBILE app (iOS/Android).
             // Unlike the dashboard (a confidential backend relying party), a
@@ -150,7 +178,7 @@ public static class Config
                 // (Keychain/Keystore). One-time-use rotation limits replay.
                 AllowOfflineAccess = true,
                 RefreshTokenUsage = TokenUsage.OneTimeOnly,
-                AllowedScopes = { "openid", "profile", "offline_access", "orchestrator:read", "orchestrator:write" },
+                AllowedScopes = { "openid", "profile", "offline_access", "roles", "orchestrator:read", "orchestrator:write" },
             },
             // Control-plane clients (CONTROL_PLANE_AUTH=oidc). Unlike the agent
             // clients above — authenticated via SPIFFE JWT-SVID with a

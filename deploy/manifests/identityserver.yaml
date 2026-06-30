@@ -54,6 +54,24 @@ spec:
                   name: dashboard-user
                   key: password
                   optional: true
+            # Optional NON-ADMIN (viewer) login, from the same `dashboard-user`
+            # Secret. Absent keys ⇒ env unset ⇒ NO viewer user (fail closed),
+            # exactly like DASHBOARD_USER/PASSWORD above. Local kind sets
+            # viewer/viewer (scripts/bootstrap.sh); the public AWS deploy leaves
+            # it unset so it ships no guessable non-admin login. The viewer
+            # carries no `role` claim, so it exercises authz-deny paths.
+            - name: DASHBOARD_VIEWER_USER
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-user
+                  key: viewerUsername
+                  optional: true
+            - name: DASHBOARD_VIEWER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dashboard-user
+                  key: viewerPassword
+                  optional: true
             # Control-plane auth the IdP's CIBA driver presents to the registry's
             # consent endpoints; must match the registry's setting. Both values
             # come from the optional `control-plane-auth` Secret that bootstrap.sh

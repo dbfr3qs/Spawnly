@@ -186,15 +186,19 @@ kubectl create secret generic control-plane-auth \
   --from-literal=token="${CP_TOKEN}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# Interactive dashboard login (local demo): alice/alice. The IdP reads these from
-# the `dashboard-user` Secret (optional secretKeyRefs); without it, login is
-# disabled (fail closed). The public AWS deploy generates a strong password
-# instead (deploy/aws/deploy.sh) so the internet-facing dashboard has no
-# guessable login.
-echo "==> Ensuring dashboard login secret (local demo: alice/alice)..."
+# Interactive dashboard login (local demo): alice/alice (the ADMIN user, who
+# can manage agent types), plus an optional non-admin viewer/viewer for
+# exercising authz-deny paths and e2e. The IdP reads these from the
+# `dashboard-user` Secret (optional secretKeyRefs); without the admin password,
+# login is disabled (fail closed). The public AWS deploy generates a strong
+# password and sets NO viewer (deploy/aws/deploy.sh) so the internet-facing
+# dashboard has no guessable login of either kind.
+echo "==> Ensuring dashboard login secret (local demo: alice/alice admin + viewer/viewer non-admin)..."
 kubectl create secret generic dashboard-user \
   --from-literal=username="alice" \
   --from-literal=password="alice" \
+  --from-literal=viewerUsername="viewer" \
+  --from-literal=viewerPassword="viewer" \
   --dry-run=client -o yaml | kubectl apply -f -
 
 # travel-tools MCP server upstream keys (Duffel/LiteAPI), from mcp/travel-tools/.env

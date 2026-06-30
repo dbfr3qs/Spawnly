@@ -782,6 +782,14 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		json.NewEncoder(w).Encode(map[string]string{"schema": text, "version": version, "source": source})
 	})
 
+	// SECURITY NOTE: this single-template fetch is PUBLIC (no control-plane
+	// gate), so a direct caller to the registry can read a DISABLED template's
+	// full body — an inconsistency with the admin-only `?detail=full` list. The
+	// browser path is closed (no orchestrator/BFF route exposes single-template
+	// GET; the orchestrator uses the typed regClient.GetTemplate at spawn time,\t// which sends no control-plane bearer). Gating this route behind `cp` would
+	// break spawn unless regClient.GetTemplate is threaded to carry the
+	// control-plane bearer — tracked as a fast-follow in
+	// plans/dashboard-agent-types/plan.md (Risks), not Phase 2 scope.
 	mux.HandleFunc("GET /v1/templates/", func(w http.ResponseWriter, r *http.Request) {
 		agentType := strings.TrimPrefix(r.URL.Path, "/v1/templates/")
 		t, ok, err := s.GetTemplate(r.Context(), agentType)
@@ -1517,6 +1525,26 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	})
 
 	mux.HandleFunc("GET /v1/templates", func(w http.ResponseWriter, r *http.Request) {
+		// ?detail=full returns the FULL template records (incl. disabled) for
+		// the admin Agent Types view — a control-plane operation, so it is gated
+		// by the same control-plane authenticator as template create/disable/
+		// delete. The orchestrator's admin-only GET /v1/admin/templates forwards
+		// here carrying the control-plane bearer. Without ?detail=full the route
+		// stays public and returns the active type-name list (the spawn dropdown).
+		if strings.EqualFold(r.URL.Query().Get("detail"), "full") {
+			if _, err := cpAuth.Authenticate(r.Context(), r); err != nil {
+				log.Printf("control-plane auth failed (detail=full): %v", err)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			tpls, err := s.ListTemplates(r.Context(), true)
+			if storeErr(w, err) {
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(tpls)
+			return
+		}
 		types, err := s.ListTemplateTypes(r.Context())
 		if storeErr(w, err) {
 			return

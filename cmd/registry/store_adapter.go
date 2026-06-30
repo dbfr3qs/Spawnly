@@ -45,6 +45,26 @@ func (s *store) ListTemplateTypes(_ context.Context) ([]string, error) {
 	return out, nil
 }
 
+// ListTemplates returns the full template records. When includeDisabled is
+// false it returns only active templates; when true it returns active AND
+// disabled (the admin Agent Types view, behind the control-plane/admin gate).
+// It value-copies each template header so the caller can't reassign a slot in
+// the store's map; nested slices/maps (EnvDefaults, OAuthScopes, etc.) are
+// shared headers, so callers must treat the result as read-only. The sole
+// consumer today (json.Encode) only reads.
+func (s *store) ListTemplates(_ context.Context, includeDisabled bool) ([]registry.AgentTemplate, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]registry.AgentTemplate, 0, len(s.templates))
+	for _, t := range s.templates {
+		if !includeDisabled && t.Status == registry.TemplateStatusDisabled {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out, nil
+}
+
 func (s *store) UpdateTemplateStatus(_ context.Context, agentType, status string) (registry.AgentTemplate, bool, error) {
 	t, ok := s.updateTemplateStatus(agentType, status)
 	return t, ok, nil

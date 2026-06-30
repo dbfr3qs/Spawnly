@@ -204,6 +204,98 @@ func TestDisabledTemplateHiddenFromList(t *testing.T) {
 	}
 }
 
+// TestTemplateDetailFullRequiresControlPlaneAuth asserts the ?detail=full
+// (admin, incl. disabled) view is gated by the control-plane authenticator:
+// without the bearer it returns 401 and does NOT leak disabled templates.
+// With the bearer it returns the FULL template records including disabled ones.
+// The default (no detail) list stays public and returns only active names.
+func TestTemplateDetailFullRequiresControlPlaneAuth(t *testing.T) {
+	s := newStore()
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{}
+	// Use a real (shared-secret) authenticator so the auth gate is exercised,
+	// not AllowAll. Without the bearer, detail=full must 401.
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.NewSharedSecret("sekrit"))
+
+	// Seed templates directly through the store (not the cp-gated POST route)
+	// so this test is about the GET /v1/templates?detail=full path, not the
+	// create path. Seed an active worker and a disabled twin so the
+	// incl.-disabled path is distinct from the active-only path.
+	active := workerTemplate()
+	active.AgentType = "worker"
+	active.Status = registry.TemplateStatusActive
+	if err := s.PutTemplate(context.Background(), active); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+	disabled := workerTemplate()
+	disabled.AgentType = "worker-disabled"
+	disabled.Status = registry.TemplateStatusDisabled
+	if err := s.PutTemplate(context.Background(), disabled); err != nil {
+		t.Fatalf("seed disabled: %v", err)
+	}
+
+	// detail=full WITHOUT the control-plane bearer → 401 (no leak of disabled).
+	recFull := httptest.NewRecorder()
+	mux.ServeHTTP(recFull, httptest.NewRequest("GET", "/v1/templates?detail=full", nil))
+	if recFull.Code != http.StatusUnauthorized {
+		t.Fatalf("detail=full without bearer: got %d, want 401", recFull.Code)
+	}
+
+	// detail=full WITH the control-plane bearer → 200, returns BOTH templates
+	// (active + disabled) with full bodies.
+	recAuth := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/v1/templates?detail=full", nil)
+	req.Header.Set("Authorization", "Bearer sekrit")
+	mux.ServeHTTP(recAuth, req)
+	if recAuth.Code != http.StatusOK {
+		t.Fatalf("detail=full with bearer: got %d, want 200", recAuth.Code)
+	}
+	var got []registry.AgentTemplate
+	if err := json.NewDecoder(recAuth.Body).Decode(&got); err != nil {
+		t.Fatalf("decode full list: %v", err)
+	}
+	names := make(map[string]bool, len(got))
+	for _, tpl := range got {
+		names[tpl.AgentType] = true
+		// Full body present (not just the name) — spot-check a populated field.
+		if tpl.Runtime.Image == "" {
+			t.Errorf("template %q in detail=full has empty image (not a full body)", tpl.AgentType)
+		}
+	}
+	if !names["worker"] || !names["worker-disabled"] {
+		t.Errorf("detail=full missing templates; got %v, want both worker + worker-disabled", names)
+	}
+
+	// The default list (no detail) stays public and returns only the active
+	// type-name — the spawn dropdown is unchanged, and the disabled one is NOT
+	// leaked to an unauthenticated caller.
+	activeNames := listTemplateTypes(t, mux)
+	if slices.Contains(activeNames, "worker-disabled") {
+		t.Errorf("default list leaked disabled template; got %v", activeNames)
+	}
+	if !slices.Contains(activeNames, "worker") {
+		t.Errorf("default list missing active worker; got %v", activeNames)
+	}
+
+	// Mixed-case detail (Full/FULL) honors the gated path too (EqualFold), so a
+	// capitalized value can't silently fall through to the public list. Without
+	// the bearer it must 401 (fail-to-public would leak disabled templates).
+	for _, casing := range []string{"Full", "FULL", "fUlL"} {
+		recC := httptest.NewRecorder()
+		mux.ServeHTTP(recC, httptest.NewRequest("GET", "/v1/templates?detail="+casing, nil))
+		if recC.Code != http.StatusUnauthorized {
+			t.Errorf("detail=%s without bearer: status = %d, want 401 (must be gated, not fall through to public)", casing, recC.Code)
+		}
+		recAuth2 := httptest.NewRecorder()
+		reqC := httptest.NewRequest("GET", "/v1/templates?detail="+casing, nil)
+		reqC.Header.Set("Authorization", "Bearer sekrit")
+		mux.ServeHTTP(recAuth2, reqC)
+		if recAuth2.Code != http.StatusOK {
+			t.Errorf("detail=%s with bearer: status = %d, want 200 (must honor the gated full path)", casing, recAuth2.Code)
+		}
+	}
+}
+
 func TestDeleteTemplateGuarded(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()
