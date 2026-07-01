@@ -1545,6 +1545,27 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			json.NewEncoder(w).Encode(tpls)
 			return
 		}
+		// ?detail=spawn returns the active set with just enough for the spawn UI
+		// to decide tenant-ness: {agentType, requiresTenant}. Unlike detail=full
+		// it stays PUBLIC (no control-plane auth) — a non-admin user spawning an
+		// agent needs the flag, and it exposes nothing sensitive (active type
+		// names + a boolean, no authz config, no disabled types).
+		if strings.EqualFold(r.URL.Query().Get("detail"), "spawn") {
+			tpls, err := s.ListTemplates(r.Context(), false)
+			if storeErr(w, err) {
+				return
+			}
+			out := make([]map[string]any, 0, len(tpls))
+			for _, t := range tpls {
+				out = append(out, map[string]any{
+					"agentType":      t.AgentType,
+					"requiresTenant": t.RequiresTenant,
+				})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(out)
+			return
+		}
 		types, err := s.ListTemplateTypes(r.Context())
 		if storeErr(w, err) {
 			return

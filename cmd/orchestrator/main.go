@@ -808,6 +808,15 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	mux.HandleFunc("GET /v1/templates", requireToken(validator, audience, readScope, forwardToRegistry("GET", func(*http.Request) string {
 		return "/v1/templates"
 	})))
+	// Non-admin spawn list: active types plus their requiresTenant flag, for the
+	// spawn modal to decide whether to show the Tenant field. Same read scope as
+	// the thin GET /v1/templates above (NOT admin) — the registry's detail=spawn
+	// route is public, so forwarding the control-plane bearer here is harmless.
+	// The downstream query is HARDCODED to detail=spawn so no client can coax this
+	// read-scope route into the admin-only detail=full path.
+	mux.HandleFunc("GET /v1/templates/spawn", requireToken(validator, audience, readScope, forwardToRegistry("GET", func(*http.Request) string {
+		return "/v1/templates?detail=spawn"
+	})))
 	// Admin full-detail template list (incl. disabled) for the dashboard's Agent
 	// Types admin view. Admin-gated (role=admin on top of read scope) at the
 	// orchestrator; the BFF gates its /api/admin/templates twin with

@@ -1195,10 +1195,13 @@
     <div class="form-group">
       <label>Agent Type</label>
       <select id="f-type">
-        <!-- options are populated dynamically from GET /api/templates -->
+        <!-- options are populated dynamically from GET /api/templates/spawn -->
       </select>
     </div>
-    <div class="form-group">
+    <!-- Shown only for agent types whose template has requiresTenant=true; for
+         all other types the field is hidden and the agent spawns global (no
+         tenantId sent). Visibility is driven by updateTenantFieldVisibility(). -->
+    <div class="form-group" id="f-tenant-group" hidden>
       <label>Tenant ID</label>
       <input id="f-tenant" type="text" value="tenant-1" placeholder="tenant-1" />
     </div>
@@ -1400,9 +1403,39 @@
     return r.json().catch(() => ({}));
   }
 
-  async function fetchTemplates() {
-    try { const r = await fetch('/api/templates'); return r.ok ? r.json() : []; }
-    catch { return []; }
+  // Spawn list: [{agentType, requiresTenant}] for active templates (non-admin
+  // endpoint). The spawn modal uses requiresTenant to decide whether to show the
+  // Tenant field. Returns [] on any failure so the modal degrades gracefully.
+  async function fetchSpawnTemplates() {
+    try {
+      const r = await fetch('/api/templates/spawn');
+      if (!r.ok) return [];
+      const list = await r.json();
+      return Array.isArray(list) ? list : [];
+    } catch { return []; }
+  }
+
+  // agentType → requiresTenant (bool), populated on load from the spawn list.
+  // A type missing from the map is treated as NOT requiring a tenant (hide the
+  // field, spawn global) — the orchestrator stays the authority and rejects a
+  // genuinely tenant-required type spawned without one.
+  const typeRequiresTenant = new Map();
+
+  // Show the Tenant field only when the selected agent type requires a tenant.
+  function selectedRequiresTenant() {
+    const sel = document.getElementById('f-type');
+    return !!(sel && typeRequiresTenant.get(sel.value));
+  }
+
+  function updateTenantFieldVisibility() {
+    const group = document.getElementById('f-tenant-group');
+    const input = document.getElementById('f-tenant');
+    if (!group) return;
+    const show = selectedRequiresTenant();
+    group.hidden = !show;
+    // Pre-fill the default only when the field is shown and currently empty, so
+    // a hidden field never carries a stale tenant into a global spawn.
+    if (show && input && !input.value.trim()) input.value = 'tenant-1';
   }
 
   // ── Admin: Agent Types management ──────────────────────────────────────
@@ -2521,6 +2554,7 @@
 
   document.getElementById('open-modal-btn').addEventListener('click', () => {
     document.getElementById('spawn-modal').classList.add('open');
+    updateTenantFieldVisibility();
     document.getElementById('f-task').focus();
   });
 
@@ -2545,15 +2579,24 @@
 
   document.getElementById('spawn-btn').addEventListener('click', async () => {
     const agentType = document.getElementById('f-type').value.trim();
-    const tenantId  = document.getElementById('f-tenant').value.trim() || 'tenant-1';
     const task      = document.getElementById('f-task').value.trim();
+
+    // Tenant is only relevant for types whose template requires it. When the
+    // field is shown it must be non-empty; when hidden we omit tenantId so the
+    // agent spawns global (presence-based tenancy — absent tenant => global).
+    const needsTenant = selectedRequiresTenant();
+    const tenantId    = document.getElementById('f-tenant').value.trim();
+    if (needsTenant && !tenantId) {
+      showToast('Tenant ID is required for this agent type', true);
+      return;
+    }
 
     // userId is injected server-side from the logged-in session (the browser
     // cannot set it), so it is intentionally not sent here.
     const btn = document.getElementById('spawn-btn');
     btn.disabled = true; btn.textContent = 'Spawning…';
     try {
-      const result = await spawnAgent({ agentType, tenantId, ...(task && { task }) });
+      const result = await spawnAgent({ agentType, ...(needsTenant && { tenantId }), ...(task && { task }) });
       showToast(`Spawned: ${result.workloadName || 'agent'}`);
       closeModal();
       document.getElementById('f-task').value = '';
@@ -2684,15 +2727,25 @@
 
   poll();
   setInterval(poll, POLL_MS);
-  fetchTemplates().then(types => {
-    if (!Array.isArray(types) || types.length === 0) return;
+  fetchSpawnTemplates().then(list => {
+    typeRequiresTenant.clear();
+    for (const t of list) {
+      if (t && typeof t.agentType === 'string') typeRequiresTenant.set(t.agentType, !!t.requiresTenant);
+    }
     const sel = document.getElementById('f-type');
     if (!sel || sel.tagName !== 'SELECT') return;
-    const sorted = [...types].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
-    sel.innerHTML = sorted.map(t =>
-      `<option value="${escHtml(t)}">${escHtml(t)}</option>`
-    ).join('');
+    if (list.length) {
+      const sorted = [...list].sort((a, b) =>
+        a.agentType.localeCompare(b.agentType, undefined, { sensitivity: 'base' }));
+      sel.innerHTML = sorted.map(t =>
+        `<option value="${escHtml(t.agentType)}">${escHtml(t.agentType)}</option>`
+      ).join('');
+    }
+    // Reflect the initially-selected type's tenant-ness right away.
+    updateTenantFieldVisibility();
   });
+  // Re-evaluate when the user switches agent type in the spawn modal.
+  document.getElementById('f-type').addEventListener('change', updateTenantFieldVisibility);
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
     closeModal();

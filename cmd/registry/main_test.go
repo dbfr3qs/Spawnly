@@ -296,6 +296,83 @@ func TestTemplateDetailFullRequiresControlPlaneAuth(t *testing.T) {
 	}
 }
 
+// TestTemplateDetailSpawn asserts the ?detail=spawn list is PUBLIC (no
+// control-plane auth), returns {agentType, requiresTenant} for ACTIVE templates
+// only (disabled excluded), and surfaces the requiresTenant flag faithfully —
+// this is what the non-admin spawn modal reads to decide whether to show the
+// Tenant field. The bare list (no detail) must stay a []string of names.
+func TestTemplateDetailSpawn(t *testing.T) {
+	s := newStore()
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{}
+	// Real shared-secret authenticator: detail=spawn must succeed WITHOUT any
+	// bearer (unlike detail=full), so this proves the route is genuinely public.
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.NewSharedSecret("sekrit"))
+
+	// A tenanted (requiresTenant=true) active template, a global (false) active
+	// template, and a disabled one that must NOT appear in the spawn list.
+	tenanted := workerTemplate()
+	tenanted.AgentType = "tenanted-worker"
+	tenanted.RequiresTenant = true
+	if err := s.PutTemplate(context.Background(), tenanted); err != nil {
+		t.Fatalf("seed tenanted: %v", err)
+	}
+	global := workerTemplate()
+	global.AgentType = "global-worker"
+	global.RequiresTenant = false
+	if err := s.PutTemplate(context.Background(), global); err != nil {
+		t.Fatalf("seed global: %v", err)
+	}
+	disabled := workerTemplate()
+	disabled.AgentType = "disabled-worker"
+	disabled.Status = registry.TemplateStatusDisabled
+	if err := s.PutTemplate(context.Background(), disabled); err != nil {
+		t.Fatalf("seed disabled: %v", err)
+	}
+
+	// PUBLIC: no Authorization header, must be 200.
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/templates?detail=spawn", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail=spawn without bearer: got %d, want 200 (must be public)", rec.Code)
+	}
+	var got []struct {
+		AgentType      string `json:"agentType"`
+		RequiresTenant bool   `json:"requiresTenant"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode spawn list: %v", err)
+	}
+	flags := make(map[string]bool, len(got))
+	for _, e := range got {
+		flags[e.AgentType] = e.RequiresTenant
+	}
+	if _, ok := flags["disabled-worker"]; ok {
+		t.Errorf("detail=spawn leaked disabled template; got %v", flags)
+	}
+	if v, ok := flags["tenanted-worker"]; !ok || !v {
+		t.Errorf("tenanted-worker requiresTenant: got (%v,%v), want (true,present)", v, ok)
+	}
+	if v, ok := flags["global-worker"]; !ok || v {
+		t.Errorf("global-worker requiresTenant: got (%v,%v), want (false,present)", v, ok)
+	}
+
+	// The bare list (no detail) is unchanged: a []string of active names that
+	// must NOT decode into the object shape — guards the terraform contract.
+	recBare := httptest.NewRecorder()
+	mux.ServeHTTP(recBare, httptest.NewRequest("GET", "/v1/templates", nil))
+	if recBare.Code != http.StatusOK {
+		t.Fatalf("bare list: got %d, want 200", recBare.Code)
+	}
+	var names []string
+	if err := json.NewDecoder(recBare.Body).Decode(&names); err != nil {
+		t.Fatalf("bare list must stay a []string of names: %v", err)
+	}
+	if !slices.Contains(names, "tenanted-worker") || !slices.Contains(names, "global-worker") {
+		t.Errorf("bare list missing active names; got %v", names)
+	}
+}
+
 func TestDeleteTemplateGuarded(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()
