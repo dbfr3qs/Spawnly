@@ -37,33 +37,53 @@ func New(baseURL string) *HTTPClient {
 	return NewWithToken(baseURL, "")
 }
 
-// NewWithToken is New plus a control-plane bearer token. When token != "", every
-// outbound request carries "Authorization: Bearer <token>" — wired via a custom
-// RoundTripper so each method stays header-free. When token == "", it behaves
-// like New (no Authorization header, default transport).
+// NewWithToken is New plus a STATIC control-plane bearer token. When token != "",
+// every outbound request carries "Authorization: Bearer <token>". When token == "",
+// it behaves like New (no Authorization header, default transport). For a bearer
+// that changes over time (e.g. a refreshing oidc client-credentials token) use
+// NewWithTokenSource instead.
+func NewWithToken(baseURL, token string) *HTTPClient {
+	if token == "" {
+		return NewWithTokenSource(baseURL, nil)
+	}
+	return NewWithTokenSource(baseURL, func() string { return token })
+}
+
+// NewWithTokenSource is New plus a DYNAMIC control-plane bearer: token is called
+// per request, so a refreshing source (oidc client-credentials) is picked up on
+// every call. A nil token, or one that returns "", sends no Authorization header
+// (the local "none" demo tier, where the registry enforces nothing) — and, for a
+// refreshing source, fails closed (no header → the registry 401s) rather than
+// sending a stale/empty bearer.
 //
 // The client carries a 30s Timeout: every call is a short JSON round-trip
 // (registry GET/POST/PATCH); none stream, so a client-wide timeout is safe and
 // prevents a hung registry socket from blocking a caller forever.
-func NewWithToken(baseURL, token string) *HTTPClient {
+func NewWithTokenSource(baseURL string, token func() string) *HTTPClient {
 	hc := &http.Client{Timeout: 30 * time.Second}
-	if token != "" {
+	if token != nil {
 		hc.Transport = &bearerTransport{token: token, base: http.DefaultTransport}
 	}
 	return &HTTPClient{base: baseURL, http: hc}
 }
 
-// bearerTransport sets a static Authorization header on every request before
-// delegating to the wrapped RoundTripper. It clones the request so it never
-// mutates a caller-owned *http.Request (RoundTripper contract).
+// bearerTransport sets an Authorization header on every request from its token
+// source before delegating to the wrapped RoundTripper. It clones the request so
+// it never mutates a caller-owned *http.Request (RoundTripper contract). An empty
+// token yields no header (fail-closed: the registry rejects rather than the
+// client sending a blank bearer).
 type bearerTransport struct {
-	token string
+	token func() string
 	base  http.RoundTripper
 }
 
 func (t *bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	tok := t.token()
+	if tok == "" {
+		return t.base.RoundTrip(req)
+	}
 	r := req.Clone(req.Context())
-	r.Header.Set("Authorization", "Bearer "+t.token)
+	r.Header.Set("Authorization", "Bearer "+tok)
 	return t.base.RoundTrip(r)
 }
 

@@ -71,6 +71,52 @@ func TestHTTPClientGetTemplate(t *testing.T) {
 	}
 }
 
+// TestHTTPClientTokenSource asserts NewWithTokenSource attaches the CURRENT
+// bearer from the source on every request (so a refreshing oidc token is picked
+// up), and that an empty token sends NO Authorization header (fail-closed / the
+// "none" demo tier) rather than a blank bearer.
+func TestHTTPClientTokenSource(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		if r.URL.Path == "/v1/templates/worker" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(registry.AgentTemplate{AgentType: "worker"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	// Dynamic source: the token changes between calls and each request must
+	// carry the value current at call time.
+	token := "first"
+	client := registry.NewWithTokenSource(srv.URL, func() string { return token })
+	if _, err := client.GetTemplate(context.Background(), "worker"); err != nil {
+		t.Fatalf("GetTemplate (first): %v", err)
+	}
+	if gotAuth != "Bearer first" {
+		t.Errorf("first call Authorization = %q, want Bearer first", gotAuth)
+	}
+	token = "rotated"
+	if _, err := client.GetTemplate(context.Background(), "worker"); err != nil {
+		t.Fatalf("GetTemplate (rotated): %v", err)
+	}
+	if gotAuth != "Bearer rotated" {
+		t.Errorf("rotated call Authorization = %q, want Bearer rotated (source must be read per request)", gotAuth)
+	}
+
+	// Empty token → no Authorization header at all.
+	gotAuth = "sentinel"
+	empty := registry.NewWithTokenSource(srv.URL, func() string { return "" })
+	if _, err := empty.GetTemplate(context.Background(), "worker"); err != nil {
+		t.Fatalf("GetTemplate (empty): %v", err)
+	}
+	if gotAuth != "" {
+		t.Errorf("empty-token call Authorization = %q, want no header", gotAuth)
+	}
+}
+
 func TestHTTPClientGetTemplateNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)

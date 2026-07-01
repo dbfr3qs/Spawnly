@@ -254,7 +254,15 @@ func hasRole(ctx context.Context, want string) bool {
 func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Client, registryURL string, validator tokenvalidator.TokenValidator, audience, spawnScope, readScope, writeScope string) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	regClient := registry.New(registryURL)
+	// controlPlaneBearer yields the bearer the orchestrator (a trusted
+	// control-plane caller) presents to the registry. Its shape follows
+	// CONTROL_PLANE_AUTH and is empty in the local demo (the registry then
+	// enforces nothing). Built once; the oidc source auto-refreshes. It is used
+	// both by the typed regClient (so control-plane-gated reads like the
+	// single-template GET authorize) and by the forwardToRegistry passthroughs.
+	controlPlaneBearer := controlPlaneBearerSource()
+
+	regClient := registry.NewWithTokenSource(registryURL, controlPlaneBearer)
 	evtClient := events.New(registryURL)
 
 	mux.HandleFunc("POST /spawn", func(w http.ResponseWriter, r *http.Request) {
@@ -752,12 +760,6 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		defer resp.Body.Close()
 		w.WriteHeader(resp.StatusCode)
 	})))
-
-	// controlPlaneBearer yields the bearer the orchestrator (a trusted
-	// control-plane caller) presents on every forwarded consent request. Its
-	// shape follows CONTROL_PLANE_AUTH and is empty in the local demo (the
-	// registry then enforces nothing). Built once; the oidc source auto-refreshes.
-	controlPlaneBearer := controlPlaneBearerSource()
 
 	// forwardToRegistry relays a request to the registry (which owns agent
 	// lineage, templates, and consents) and copies back the registry's status,
