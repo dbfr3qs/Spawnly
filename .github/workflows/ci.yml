@@ -9,19 +9,14 @@ name: ci
 #
 # Not duplicated here (already covered elsewhere):
 #   - terraform-provider-spawnly  -> .github/workflows/terraform-provider.yml
-#   - website/ + docs/            -> .github/workflows/deploy.yml
 
 on:
   pull_request:
     paths-ignore:
-      - 'website/**'
-      - 'docs/**'
       - '**/*.md'
   push:
     branches: [main]
     paths-ignore:
-      - 'website/**'
-      - 'docs/**'
       - '**/*.md'
 
 permissions:

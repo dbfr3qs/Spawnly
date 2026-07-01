@@ -12,7 +12,7 @@ namespace IdentityServer;
 /// The credential is injected from the environment (DASHBOARD_USER /
 /// DASHBOARD_PASSWORD), sourced from the optional <c>dashboard-user</c> Secret —
 /// <c>alice</c>/<c>alice</c> for the local kind demo (scripts/bootstrap.sh), a
-/// strong generated password for the public AWS deploy (deploy/aws/deploy.sh).
+/// strong generated password for the public AWS deploy.
 ///
 /// Fail closed: with no password configured there is NO interactive user, so the
 /// dashboard cannot be logged into. That is deliberately safer than shipping a

@@ -12,8 +12,8 @@ Each agent pod gets a unique SPIFFE identity (JWT-SVID) issued by SPIRE at start
 
 - **Per-pod workload identity** — every agent gets a unique SPIFFE JWT-SVID from SPIRE at startup; no shared secrets or static API keys.
 - **Identity → scoped OAuth tokens** — a sidecar exchanges the SVID (RFC 7523 `client_assertion`) for scoped access tokens, so agent code carries zero identity plumbing.
-- **Human-in-the-loop spawn consent** — sub-agent spawning can be gated on user approval via OpenID **CIBA**, with stored consent and auto-approval on repeats ([how it works](docs/internals/spawn-consent.md)).
-- **Delegated, attenuated authority** — parent → child agent chains with per-template delegation policy ([defining policy](docs/authoring/05-defining-policy.md)).
+- **Human-in-the-loop spawn consent** — sub-agent spawning can be gated on user approval via OpenID **CIBA**, with stored consent and auto-approval on repeats ([how it works](https://docs.spawnly.run/internals/spawn-consent/)).
+- **Delegated, attenuated authority** — parent → child agent chains with per-template delegation policy ([defining policy](https://docs.spawnly.run/authoring/05-defining-policy/)).
 - **Real-time cascading revocation** — revoke an agent and its entire descendant subtree loses authorisation within seconds; pods stay up, their next protected call returns 403. Reversible with resume.
 - **Relationship-based authorisation** — SpiceDB relations written at registration, checked by protected APIs; tenanted and global (tenant-less) agents on the same code path.
 - **Full lifecycle observability** — every component emits structured events into an append-only per-agent timeline, live in the dashboard.
@@ -59,7 +59,7 @@ For the directory-level breakdown (paths, languages, internal packages), see [Re
 
 The diagram shows the full flow for a single agent — spawn request → CRD → pod, the sidecar-owned identity/token exchange, agent work, and the chat path.
 
-![Spawnly architecture](docs/architecture.svg)
+![Spawnly architecture](assets/architecture.svg)
 
 **The key thing the sidecar does:** the agent container never performs the SVID/registration/token dance itself. The `agent-sidecar` fetches the JWT-SVID from SPIRE, **self-registers the agent** with the agent registry (SVID as Bearer), exchanges the SVID at IdentityServer for a scoped access token, and exposes a local `/token` endpoint (`:8089`). The agent asks the sidecar for tokens via the SDK's `TokenClient`. This keeps agent code framework- and language-agnostic.
 
@@ -103,7 +103,7 @@ Every directory, by language and purpose:
 | `cmd/agent-sidecar/` | Go | Per-pod native sidecar (`:8089`). Fetches the JWT-SVID, exchanges it for scoped OAuth tokens, and serves `/token` to the agent |
 | `cmd/sample-api/` | Go | Protected HTTP API (`GET /work`, `POST /task`). Validates OAuth 2.0 Bearer tokens and a SpiceDB `work_on` check. Deployed as `sample-api-a` and `sample-api-b` (tenant-checking; a `REQUIRE_TENANT=false` instance serves tenant-agnostic agents) |
 | `cmd/dashboard/` | Go + HTML | Web UI. Polls agents and events, chats with long-lived agents, kills/revokes/resumes agents (revoke cascades to the descendant subtree), renders parent→child chains as a nested tree, filters events per-agent; proxies all requests to the orchestrator |
-| `cmd/mobile-gateway/` | Go | User-facing edge for the mobile app. Proxies CIBA consent actions to the orchestrator (user-scoped), owns a device registry + push fan-out (FCM/APNs, with a credential-free SSE dev transport), and serves a per-user event stream ([how it works](docs/internals/mobile-ciba.md)) |
+| `cmd/mobile-gateway/` | Go | User-facing edge for the mobile app. Proxies CIBA consent actions to the orchestrator (user-scoped), owns a device registry + push fan-out (FCM/APNs, with a credential-free SSE dev transport), and serves a per-user event stream ([how it works](https://docs.spawnly.run/internals/mobile-ciba/)) |
 | `mobile/` | TypeScript (Expo/RN) | iOS + Android app to answer CIBA spawn-consent prompts on a phone: PKCE login, push/SSE prompt, biometric-gated approve/deny with optional scope narrowing, and consent management |
 | `agents/` | TypeScript | Agent workloads on the `@spawnly/sdk`: `weather-monitor` (Flue chat + tool calls), `chain-worker` (deterministic, no-LLM self-spawning looping worker that demonstrates cascading revocation), and the consent-gated travel demo — `travel-planner` (fan-out orchestrator) plus the `travel-specialist`-image specialists `flight-search` / `hotel-search` / `fx-converter` (least-privilege MCP clients, each scoped to one travel-tools tool) |
 | `mcp/travel-tools/` | TypeScript | Scope-enforcing MCP server exposing `search_flights` / `search_hotels` / `convert_currency` to the travel specialists, backed by real upstream providers (Duffel / LiteAPI / Frankfurter) |
@@ -122,9 +122,7 @@ Every directory, by language and purpose:
 | `deploy/secrets/` | YAML | `ai-provider` Secret (`provider`, `api-key`, `model`) consumed by Flue agents |
 | `deploy/spire/` | YAML | SPIRE Helm values and `ClusterSPIFFEID` for automatic agent identity assignment |
 | `deploy/kind/` | YAML | Kind cluster config (single control-plane + worker node) |
-| `scripts/` | Bash | `bootstrap.sh` (one-shot cluster setup), `seed.sh` (template seeding), `demo.sh` (interactive demo), `acc-testbed.sh` (ephemeral registry for provider acceptance tests) |
-| `website/` | Astro / Starlight | The authoring docs site (renders `docs/`) |
-| `terraform-provider-spawnly/` | Go | Terraform provider for managing agent templates as config-as-code, talking directly to the registry control-plane API ([README](terraform-provider-spawnly/README.md)) |
+| `scripts/` | Bash | `bootstrap.sh` (one-shot cluster setup), `seed.sh` (template seeding), `demo.sh` (interactive demo), `acc-testbed.sh` (ephemeral registry for provider acceptance tests) || `terraform-provider-spawnly/` | Go | Terraform provider for managing agent templates as config-as-code, talking directly to the registry control-plane API ([README](terraform-provider-spawnly/README.md)) |
 
 ---
 
@@ -233,7 +231,7 @@ Agents may be **tenanted** or **global (tenant-less)**, decided by presence of a
 - A global agent (no `tenantId`) gets a SPIFFE id without the tenant segment and an empty SpiceDB relation set; `tenantHeader()` in the SDK omits the `X-Tenant-ID` header.
 - The sample API's `REQUIRE_TENANT` env var (default `true`) controls whether it enforces a tenant header. Run an instance with `REQUIRE_TENANT=false` to serve tenant-agnostic (global) agents.
 
-See [Defining a Template](docs/authoring/04-defining-a-template.md) for the full schema.
+See [Defining a Template](https://docs.spawnly.run/authoring/04-defining-a-template/) for the full schema.
 
 ---
 
@@ -245,7 +243,7 @@ Sub-agent spawning can require **human approval**, using OpenID Client-Initiated
 - The dashboard shows the pending request to the logged-in user — **approve** and the child's token is minted with the user bound as `sub`; **deny** (or let it expire) and the child is marked `failed`, with a `consent_denied` event on both child and parent.
 - Consent is **recorded per (user, parent type, child type, scopes)**, so an identical spawn next time auto-approves without re-prompting. Scope escalation, expiry, or the user revoking consent from the dashboard all force a re-prompt — and because token renewal re-runs the grant, **revoking consent starves a running child of tokens within ~2 minutes**.
 
-Full design and flow diagrams: [docs/internals/spawn-consent.md](docs/internals/spawn-consent.md).
+Full design and flow diagrams: [Spawn consent internals](https://docs.spawnly.run/internals/spawn-consent/).
 
 ---
 
@@ -284,18 +282,16 @@ See [terraform-provider-spawnly/README.md](terraform-provider-spawnly/README.md)
 
 ## Authoring agents
 
-Guides for building a new agent from scratch live in [`docs/authoring/`](docs/authoring/).
-These render as a searchable documentation website (Starlight) under
-[`website/`](website/) — run `cd website && npm install && npm run dev`, or see
-[website/README.md](website/README.md). Start with the shared contract, then
-follow the scenario that matches your agent:
+Guides for building a new agent from scratch are published at
+**[docs.spawnly.run](https://docs.spawnly.run/)**. Start with the shared
+contract, then follow the scenario that matches your agent:
 
-- [Anatomy of an Agent](docs/authoring/00-anatomy.md) — the platform contract, injected env, the SDK, and the build/register/spawn path.
-- [Scenario 1 — Job-and-exit](docs/authoring/01-job-and-exit.md) (Price Reporter): spin up, do one job, exit.
-- [Scenario 2 — Loop-until-stopped](docs/authoring/02-loop-until-stopped.md) (Queue Worker): long-lived, runs until deleted.
-- [Scenario 3 — Parent → child](docs/authoring/03-parent-and-child.md) (Trip Planner & Currency Converter): orchestration over A2A with delegated, attenuated authority.
-- [Defining a Template](docs/authoring/04-defining-a-template.md) — the full `AgentTemplate` schema field by field, who consumes each field, and the build/register lifecycle.
-- [Defining Policy](docs/authoring/05-defining-policy.md) — an agent's own authority (`authzTemplate` + scopes) and parent→child delegation (`delegation` block), with a set-vs-consume component map.
+- [Anatomy of an Agent](https://docs.spawnly.run/authoring/00-anatomy/) — the platform contract, injected env, the SDK, and the build/register/spawn path.
+- [Scenario 1 — Job-and-exit](https://docs.spawnly.run/authoring/01-job-and-exit/) (Price Reporter): spin up, do one job, exit.
+- [Scenario 2 — Loop-until-stopped](https://docs.spawnly.run/authoring/02-loop-until-stopped/) (Queue Worker): long-lived, runs until deleted.
+- [Scenario 3 — Parent → child](https://docs.spawnly.run/authoring/03-parent-and-child/) (Trip Planner & Currency Converter): orchestration over A2A with delegated, attenuated authority.
+- [Defining a Template](https://docs.spawnly.run/authoring/04-defining-a-template/) — the full `AgentTemplate` schema field by field, who consumes each field, and the build/register lifecycle.
+- [Defining Policy](https://docs.spawnly.run/authoring/05-defining-policy/) — an agent's own authority (`authzTemplate` + scopes) and parent→child delegation (`delegation` block), with a set-vs-consume component map.
 
 ---
 

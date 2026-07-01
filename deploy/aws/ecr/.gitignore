@@ -1,9 +1,0 @@
-# Terraform state holds real account IDs/ARNs — never commit.
-*.tfstate
-*.tfstate.*
-.terraform/
-*.tfvars
-override.tf
-override.tf.json
-crash.log
-crash.*.log
