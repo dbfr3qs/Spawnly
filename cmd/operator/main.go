@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 
@@ -15,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	agentv1alpha1 "github.com/spawnly/platform/api/v1alpha1"
+	"github.com/spawnly/platform/internal/controlplane"
 	"github.com/spawnly/platform/internal/events"
 	"github.com/spawnly/platform/internal/operator"
 	"github.com/spawnly/platform/internal/registry"
@@ -89,10 +91,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Control-plane bearer for the operator's registry calls (template reads,
+	// PATCH status). Uses the shared source so all three tiers — none,
+	// shared-secret, and oidc — behave identically to the orchestrator and match
+	// the registry's server-side authenticator.
+	controlPlaneBearer, err := controlplane.BearerSource(context.Background())
+	if err != nil {
+		setupLog.Error(err, "unable to build control-plane bearer source")
+		os.Exit(1)
+	}
+
 	if err = (&operator.AgentWorkloadReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
-		Registry:         registry.NewWithToken(registryURL, controlPlaneToken()),
+		Registry:         registry.NewWithTokenSource(registryURL, controlPlaneBearer),
 		RegistryURL:      registryURL,
 		ISTokenURL:       isTokenURL,
 		SampleAPIURL:     sampleAPIURL,
@@ -129,16 +141,4 @@ func getenv(key, fallback string) string {
 		return v
 	}
 	return fallback
-}
-
-// controlPlaneToken returns the bearer the operator presents to the registry's
-// control-plane endpoints (PATCH status), matching the registry's CONTROL_PLANE_AUTH.
-// Only the shared-secret tier is wired here; none/unset -> "" (open demo tier).
-// The oidc tier would need a client-credentials token source (like the
-// orchestrator's controlPlaneBearerSource) and is a follow-up.
-func controlPlaneToken() string {
-	if os.Getenv("CONTROL_PLANE_AUTH") == "shared-secret" {
-		return os.Getenv("CONTROL_PLANE_TOKEN")
-	}
-	return ""
 }

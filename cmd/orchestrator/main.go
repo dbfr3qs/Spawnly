@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/oauth2/clientcredentials"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentv1alpha1 "github.com/spawnly/platform/api/v1alpha1"
+	"github.com/spawnly/platform/internal/controlplane"
 	"github.com/spawnly/platform/internal/events"
 	"github.com/spawnly/platform/internal/registry"
 	"github.com/spawnly/platform/internal/spicedb"
@@ -254,7 +254,15 @@ func hasRole(ctx context.Context, want string) bool {
 func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Client, registryURL string, validator tokenvalidator.TokenValidator, audience, spawnScope, readScope, writeScope string) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	regClient := registry.New(registryURL)
+	// controlPlaneBearer yields the bearer the orchestrator (a trusted
+	// control-plane caller) presents to the registry. Its shape follows
+	// CONTROL_PLANE_AUTH and is empty in the local demo (the registry then
+	// enforces nothing). Built once; the oidc source auto-refreshes. It is used
+	// both by the typed regClient (so control-plane-gated reads like the
+	// single-template GET authorize) and by the forwardToRegistry passthroughs.
+	controlPlaneBearer := controlPlaneBearerSource()
+
+	regClient := registry.NewWithTokenSource(registryURL, controlPlaneBearer)
 	evtClient := events.New(registryURL)
 
 	mux.HandleFunc("POST /spawn", func(w http.ResponseWriter, r *http.Request) {
@@ -753,12 +761,6 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		w.WriteHeader(resp.StatusCode)
 	})))
 
-	// controlPlaneBearer yields the bearer the orchestrator (a trusted
-	// control-plane caller) presents on every forwarded consent request. Its
-	// shape follows CONTROL_PLANE_AUTH and is empty in the local demo (the
-	// registry then enforces nothing). Built once; the oidc source auto-refreshes.
-	controlPlaneBearer := controlPlaneBearerSource()
-
 	// forwardToRegistry relays a request to the registry (which owns agent
 	// lineage, templates, and consents) and copies back the registry's status,
 	// Content-Type, and body. It streams the inbound body through (empty for the
@@ -807,6 +809,15 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	mux.HandleFunc("GET /v1/templates", requireToken(validator, audience, readScope, forwardToRegistry("GET", func(*http.Request) string {
 		return "/v1/templates"
+	})))
+	// Non-admin spawn list: active types plus their requiresTenant flag, for the
+	// spawn modal to decide whether to show the Tenant field. Same read scope as
+	// the thin GET /v1/templates above (NOT admin) — the registry's detail=spawn
+	// route is public, so forwarding the control-plane bearer here is harmless.
+	// The downstream query is HARDCODED to detail=spawn so no client can coax this
+	// read-scope route into the admin-only detail=full path.
+	mux.HandleFunc("GET /v1/templates/spawn", requireToken(validator, audience, readScope, forwardToRegistry("GET", func(*http.Request) string {
+		return "/v1/templates?detail=spawn"
 	})))
 	// Admin full-detail template list (incl. disabled) for the dashboard's Agent
 	// Types admin view. Admin-gated (role=admin on top of read scope) at the
@@ -917,51 +928,18 @@ func init() {
 	utilruntime.Must(agentv1alpha1.AddToScheme(scheme))
 }
 
-// controlPlaneBearerSource returns a function yielding the current bearer the
-// orchestrator presents to the registry's consent endpoints, selected by
-// CONTROL_PLANE_AUTH (must match the registry's setting):
-//
-//	none/unset    -> "" (no header; the registry runs consent open)
-//	shared-secret -> the static CONTROL_PLANE_TOKEN
-//	oidc          -> a client-credentials access token, fetched and refreshed
-//	                 automatically by the oauth2 TokenSource
+// controlPlaneBearerSource returns the bearer source the orchestrator presents to
+// the registry (consent endpoints and control-plane-gated reads), built from the
+// shared controlplane.BearerSource so it stays in lock-step with the operator and
+// the registry's server-side authenticator. A misconfiguration is fatal at
+// startup (the orchestrator cannot function without a valid control-plane
+// credential when one is required).
 func controlPlaneBearerSource() func() string {
-	switch v := os.Getenv("CONTROL_PLANE_AUTH"); v {
-	case "", "none":
-		return func() string { return "" }
-	case "shared-secret":
-		token := os.Getenv("CONTROL_PLANE_TOKEN")
-		if token == "" {
-			log.Fatalf("CONTROL_PLANE_TOKEN required when CONTROL_PLANE_AUTH=shared-secret")
-		}
-		return func() string { return token }
-	case "oidc":
-		scope := os.Getenv("CONTROL_PLANE_SCOPE")
-		if scope == "" {
-			scope = "registry.consent"
-		}
-		cfg := clientcredentials.Config{
-			ClientID:     os.Getenv("CONTROL_PLANE_CLIENT_ID"),
-			ClientSecret: os.Getenv("CONTROL_PLANE_CLIENT_SECRET"),
-			TokenURL:     os.Getenv("CONTROL_PLANE_TOKEN_URL"),
-			Scopes:       strings.Fields(scope),
-		}
-		if cfg.ClientID == "" || cfg.TokenURL == "" {
-			log.Fatalf("CONTROL_PLANE_CLIENT_ID and CONTROL_PLANE_TOKEN_URL required when CONTROL_PLANE_AUTH=oidc")
-		}
-		ts := cfg.TokenSource(context.Background())
-		return func() string {
-			tok, err := ts.Token()
-			if err != nil {
-				log.Printf("control-plane token fetch failed: %v", err)
-				return ""
-			}
-			return tok.AccessToken
-		}
-	default:
-		log.Fatalf("unknown CONTROL_PLANE_AUTH %q", v)
-		return nil // unreachable
+	src, err := controlplane.BearerSource(context.Background())
+	if err != nil {
+		log.Fatalf("control-plane bearer: %v", err)
 	}
+	return src
 }
 
 // getEnv returns the value of the environment variable named by key, or def if

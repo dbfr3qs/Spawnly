@@ -1710,6 +1710,8 @@ func TestAdminTemplatesListRequiresAdmin(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/templates" && r.URL.Query().Get("detail") == "full":
 			w.Write([]byte(`[{"agentType":"worker","status":"active"},{"agentType":"worker-disabled","status":"disabled"}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/templates" && r.URL.Query().Get("detail") == "spawn":
+			w.Write([]byte(`[{"agentType":"worker","requiresTenant":true}]`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/templates":
 			w.Write([]byte(`["worker"]`))
 		default:
@@ -1782,5 +1784,24 @@ func TestAdminTemplatesListRequiresAdmin(t *testing.T) {
 	}
 	if gotAuth != "Bearer cp-sekrit" {
 		t.Errorf("non-admin GET /v1/templates forwarded Authorization = %q, want Bearer cp-sekrit", gotAuth)
+	}
+
+	// GET /v1/templates/spawn (the non-admin spawn list carrying requiresTenant)
+	// is on readScope too: the non-admin is allowed and it forwards to the
+	// HARDCODED /v1/templates?detail=spawn — proving a read-scope caller cannot
+	// reach the admin-only detail=full path through this route.
+	forwarded, gotAuth = "", ""
+	req = httptest.NewRequest(http.MethodGet, "/v1/templates/spawn", nil)
+	req.Header.Set("Authorization", "Bearer viewer-token")
+	rec = httptest.NewRecorder()
+	nonAdminMux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("non-admin GET /v1/templates/spawn: status = %d, want 200", rec.Code)
+	}
+	if forwarded != "GET /v1/templates?detail=spawn" {
+		t.Errorf("GET /v1/templates/spawn forwarded = %q, want GET /v1/templates?detail=spawn", forwarded)
+	}
+	if !strings.Contains(rec.Body.String(), "requiresTenant") {
+		t.Errorf("spawn list body did not relay requiresTenant; got %s", rec.Body.String())
 	}
 }

@@ -176,6 +176,11 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 		proxy("POST", agentOpTarget(orchestratorURL, r.PathValue("id"), "/resume"))(w, r)
 	})))
 	mux.Handle("GET /api/templates", auth.require(proxy("GET", orchestratorURL+"/v1/templates")))
+	// Non-admin spawn list ({agentType, requiresTenant}) for the spawn modal to
+	// decide whether to show the Tenant field. Same non-admin gate as
+	// GET /api/templates; the target is a fixed orchestrator path so no client
+	// query can redirect it at the admin-only full-detail list.
+	mux.Handle("GET /api/templates/spawn", auth.require(proxy("GET", orchestratorURL+"/v1/templates/spawn")))
 	// Admin full-detail template list (incl. disabled) for the Agent Types
 	// admin view. Admin-gated at the BFF (defense in depth with the
 	// orchestrator's GET /v1/admin/templates); a non-admin session gets 403 here

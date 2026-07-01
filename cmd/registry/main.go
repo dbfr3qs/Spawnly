@@ -782,15 +782,16 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		json.NewEncoder(w).Encode(map[string]string{"schema": text, "version": version, "source": source})
 	})
 
-	// SECURITY NOTE: this single-template fetch is PUBLIC (no control-plane
-	// gate), so a direct caller to the registry can read a DISABLED template's
-	// full body — an inconsistency with the admin-only `?detail=full` list. The
-	// browser path is closed (no orchestrator/BFF route exposes single-template
-	// GET; the orchestrator uses the typed regClient.GetTemplate at spawn time,\t// which sends no control-plane bearer). Gating this route behind `cp` would
-	// break spawn unless regClient.GetTemplate is threaded to carry the
-	// control-plane bearer — tracked as a fast-follow in
-	// plans/dashboard-agent-types/plan.md (Risks), not Phase 2 scope.
-	mux.HandleFunc("GET /v1/templates/", func(w http.ResponseWriter, r *http.Request) {
+	// Single-template fetch returns the FULL template record (runtimeSpec,
+	// authzTemplate, delegation policy, oauthScopes), so it is control-plane
+	// gated like its PATCH/DELETE siblings — a public caller must not read a
+	// template's authz relations, grantable scopes, or a disabled template's
+	// body. The legitimate callers all carry the control-plane bearer: the
+	// orchestrator (regClient built with the control-plane token source), the
+	// operator, and the terraform provider. Non-sensitive discovery stays open
+	// via the bare `GET /v1/templates` (active names) and `?detail=spawn`
+	// ({agentType, requiresTenant}) list routes.
+	mux.HandleFunc("GET /v1/templates/", cp(func(w http.ResponseWriter, r *http.Request) {
 		agentType := strings.TrimPrefix(r.URL.Path, "/v1/templates/")
 		t, ok, err := s.GetTemplate(r.Context(), agentType)
 		if storeErr(w, err) {
@@ -802,7 +803,7 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(t)
-	})
+	}))
 
 	// Internal pre-registration endpoint — no SVID required.
 	// Called by the orchestrator at spawn time so the agent appears in the UI
@@ -1543,6 +1544,27 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(tpls)
+			return
+		}
+		// ?detail=spawn returns the active set with just enough for the spawn UI
+		// to decide tenant-ness: {agentType, requiresTenant}. Unlike detail=full
+		// it stays PUBLIC (no control-plane auth) — a non-admin user spawning an
+		// agent needs the flag, and it exposes nothing sensitive (active type
+		// names + a boolean, no authz config, no disabled types).
+		if strings.EqualFold(r.URL.Query().Get("detail"), "spawn") {
+			tpls, err := s.ListTemplates(r.Context(), false)
+			if storeErr(w, err) {
+				return
+			}
+			out := make([]map[string]any, 0, len(tpls))
+			for _, t := range tpls {
+				out = append(out, map[string]any{
+					"agentType":      t.AgentType,
+					"requiresTenant": t.RequiresTenant,
+				})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(out)
 			return
 		}
 		types, err := s.ListTemplateTypes(r.Context())

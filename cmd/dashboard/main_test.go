@@ -353,6 +353,33 @@ func TestTemplateRoutesRequireAdminAtBFF(t *testing.T) {
 	if upstreamHits != 1 {
 		t.Errorf("non-admin GET /api/templates: orchestrator hit %d times, want 1", upstreamHits)
 	}
+
+	// GET /api/templates/spawn (the spawn modal's requiresTenant source) is also
+	// on auth.require, NOT requireAdmin: a non-admin must be allowed and forwarded
+	// (the spawn UI needs it). A non-admin getting 403 here would break spawning.
+	upstreamHits = 0
+	req = httptest.NewRequest(http.MethodGet, "/api/templates/spawn", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "viewer-sid"})
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("non-admin GET /api/templates/spawn: status = %d, want 200 (non-admin spawn list)", rec.Code)
+	}
+	if upstreamHits != 1 {
+		t.Errorf("non-admin GET /api/templates/spawn: orchestrator hit %d times, want 1", upstreamHits)
+	}
+
+	// Unauthenticated: spawn list is API-only → 401, orchestrator never reached.
+	upstreamHits = 0
+	req = httptest.NewRequest(http.MethodGet, "/api/templates/spawn", nil)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("unauth GET /api/templates/spawn: status = %d, want 401", rec.Code)
+	}
+	if upstreamHits != 0 {
+		t.Errorf("unauth GET /api/templates/spawn: orchestrator hit %d times, want 0", upstreamHits)
+	}
 }
 
 // TestHandleMeReportsIsAdmin asserts /api/me returns isAdmin=true for an admin
