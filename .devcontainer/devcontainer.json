@@ -7,10 +7,11 @@
   "containerEnv": {
     "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
   },
-  "forwardPorts": [8090, 8080],
+  "forwardPorts": [8090, 8080, 4321],
   "portsAttributes": {
     "8090": { "label": "dashboard", "onAutoForward": "silent" },
-    "8080": { "label": "orchestrator", "onAutoForward": "silent" }
+    "8080": { "label": "orchestrator", "onAutoForward": "silent" },
+    "4321": { "label": "docs (astro)", "onAutoForward": "silent" }
   },
   "features": {
     "ghcr.io/devcontainers/features/node:2": {
@@ -35,5 +36,6 @@
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
   "postCreateCommand": "mkdir -p ~/.local/bin && curl -sSLo ~/.local/bin/kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64 && chmod +x ~/.local/bin/kind && echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.bashrc && echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.zshrc && echo 'kind installed: '$(~/.local/bin/kind version) && npm i -g @earendil-works/pi-coding-agent@0.80.2 && echo 'pi installed: '$(pi --version) && pi install npm:pi-web-access && pi install npm:pi-subagents && echo 'pi packages: '$(pi list | grep npm: | tr -d ' ' | paste -sd,)",
+  "postStartCommand": "bash .devcontainer/clone-siblings.sh",
   "remoteUser": "vscode"
 }
