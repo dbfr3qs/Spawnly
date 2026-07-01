@@ -19,8 +19,6 @@ on:
   push:
     branches: [main]
     paths-ignore:
-      - 'website/**'
-      - 'docs/**'
       - '**/*.md'
   pull_request:
     types: [opened, reopened, synchronize, labeled]

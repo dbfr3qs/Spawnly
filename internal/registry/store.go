@@ -11,8 +11,8 @@ import (
 // Store is the registry's persistence boundary: the HTTP layer depends only on
 // this interface, never on a concrete storage type, so a durable backend can be
 // slotted in without touching the handlers. The in-memory implementation (the
-// default + test double) lives in package main; a DynamoDB implementation for
-// AWS production is specified in docs/saas/phase-4-persistence-store-interface.md.
+// default + test double) lives in package main; a durable implementation (e.g.
+// DynamoDB for AWS production) can slot in behind this interface.
 //
 // Every method takes a context.Context and returns an error even though the
 // in-memory impl ignores the context and never fails — durable backends need

@@ -2,8 +2,8 @@
 //
 // Adapter making the in-memory *store satisfy the registry.Store interface
 // (Phase 4). The interface is the persistence seam the HTTP layer is built on,
-// so a DynamoDB implementation (see docs/saas/phase-4-persistence-store-interface.md)
-// can replace the in-memory store without changing the registry's logic. These
+// so a DynamoDB implementation can replace the in-memory store without changing
+// the registry's logic. These
 // exported methods add the ctx/error contract a durable backend needs and
 // delegate to the existing in-memory primitives; the in-memory impl ignores ctx
 // and never errors.

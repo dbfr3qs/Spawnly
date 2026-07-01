@@ -191,7 +191,7 @@ kubectl create secret generic control-plane-auth \
 # exercising authz-deny paths and e2e. The IdP reads these from the
 # `dashboard-user` Secret (optional secretKeyRefs); without the admin password,
 # login is disabled (fail closed). The public AWS deploy generates a strong
-# password and sets NO viewer (deploy/aws/deploy.sh) so the internet-facing
+# password and sets NO viewer so the internet-facing
 # dashboard has no guessable login of either kind.
 echo "==> Ensuring dashboard login secret (local demo: alice/alice admin + viewer/viewer non-admin)..."
 kubectl create secret generic dashboard-user \

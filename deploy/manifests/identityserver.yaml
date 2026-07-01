@@ -39,7 +39,7 @@ spec:
               value: "dashboard-secret"
             # Interactive login credential, from the optional `dashboard-user`
             # Secret. Local kind: alice/alice (scripts/bootstrap.sh). Public AWS:
-            # a strong generated password (deploy/aws/deploy.sh). Absent Secret →
+            # a strong generated password. Absent Secret →
             # env unset → NO interactive user (login disabled), so a public deploy
             # never ships a guessable default.
             - name: DASHBOARD_USER

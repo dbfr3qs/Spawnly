@@ -22,7 +22,7 @@ map. Do this:
    - a tight **mental model** (a few sentences),
    - then **trace it through the code**, citing `file:line` for each step
      (use clickable links),
-   - reference the matching doc in `docs/internals/` if one exists.
+   - reference the matching doc at https://docs.spawnly.run/internals/ if one exists.
 
 4. **Offer to show it live.** Propose the concrete demonstration from the skill
    (e.g. decode a running agent's JWT-SVID `sub`, `kubectl get clusterspiffeid`,
