@@ -41,7 +41,7 @@ if ! kubectl get deploy mobile-gateway >/dev/null 2>&1; then
   echo "==> mobile-gateway not deployed — building its image and applying manifests (first run)..."
   docker build --target mobile-gateway -t agent-mobile-gateway:latest .
   kind load docker-image agent-mobile-gateway:latest --name "$KIND_CLUSTER"
-  kubectl apply -f deploy/manifests/
+  kubectl apply -k deploy/manifests/
 fi
 kubectl rollout status deploy/mobile-gateway --timeout=120s
 
