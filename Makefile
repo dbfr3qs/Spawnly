@@ -81,8 +81,8 @@ spire:
 	kubectl apply -f deploy/spire/clusterspiffeid.yaml
 
 deploy: spire
-	kubectl apply -f deploy/crds/
-	kubectl apply -f deploy/manifests/
+	kubectl apply -k deploy/crds/
+	kubectl apply -k deploy/manifests/
 
 redeploy-%:
 	docker build --target $* -t agent-$*:$(IMAGE_TAG) .

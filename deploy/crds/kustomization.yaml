@@ -1,0 +1,13 @@
+# Base kustomization for the platform CRDs.
+#
+# Exists so out-of-repo overlays (e.g. the private AWS deploy in spawnly-infra)
+# can consume this directory as a pinned remote kustomize base:
+#   resources:
+#     - github.com/dbfr3qs/Spawnly/deploy/crds?ref=main
+# Resources are listed by relative path (no parent-escaping) so the remote base
+# builds without needing LoadRestrictionsNone.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - agentworkload.yaml
