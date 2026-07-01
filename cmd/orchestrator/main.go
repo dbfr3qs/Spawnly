@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/oauth2/clientcredentials"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentv1alpha1 "github.com/spawnly/platform/api/v1alpha1"
+	"github.com/spawnly/platform/internal/controlplane"
 	"github.com/spawnly/platform/internal/events"
 	"github.com/spawnly/platform/internal/registry"
 	"github.com/spawnly/platform/internal/spicedb"
@@ -928,51 +928,18 @@ func init() {
 	utilruntime.Must(agentv1alpha1.AddToScheme(scheme))
 }
 
-// controlPlaneBearerSource returns a function yielding the current bearer the
-// orchestrator presents to the registry's consent endpoints, selected by
-// CONTROL_PLANE_AUTH (must match the registry's setting):
-//
-//	none/unset    -> "" (no header; the registry runs consent open)
-//	shared-secret -> the static CONTROL_PLANE_TOKEN
-//	oidc          -> a client-credentials access token, fetched and refreshed
-//	                 automatically by the oauth2 TokenSource
+// controlPlaneBearerSource returns the bearer source the orchestrator presents to
+// the registry (consent endpoints and control-plane-gated reads), built from the
+// shared controlplane.BearerSource so it stays in lock-step with the operator and
+// the registry's server-side authenticator. A misconfiguration is fatal at
+// startup (the orchestrator cannot function without a valid control-plane
+// credential when one is required).
 func controlPlaneBearerSource() func() string {
-	switch v := os.Getenv("CONTROL_PLANE_AUTH"); v {
-	case "", "none":
-		return func() string { return "" }
-	case "shared-secret":
-		token := os.Getenv("CONTROL_PLANE_TOKEN")
-		if token == "" {
-			log.Fatalf("CONTROL_PLANE_TOKEN required when CONTROL_PLANE_AUTH=shared-secret")
-		}
-		return func() string { return token }
-	case "oidc":
-		scope := os.Getenv("CONTROL_PLANE_SCOPE")
-		if scope == "" {
-			scope = "registry.consent"
-		}
-		cfg := clientcredentials.Config{
-			ClientID:     os.Getenv("CONTROL_PLANE_CLIENT_ID"),
-			ClientSecret: os.Getenv("CONTROL_PLANE_CLIENT_SECRET"),
-			TokenURL:     os.Getenv("CONTROL_PLANE_TOKEN_URL"),
-			Scopes:       strings.Fields(scope),
-		}
-		if cfg.ClientID == "" || cfg.TokenURL == "" {
-			log.Fatalf("CONTROL_PLANE_CLIENT_ID and CONTROL_PLANE_TOKEN_URL required when CONTROL_PLANE_AUTH=oidc")
-		}
-		ts := cfg.TokenSource(context.Background())
-		return func() string {
-			tok, err := ts.Token()
-			if err != nil {
-				log.Printf("control-plane token fetch failed: %v", err)
-				return ""
-			}
-			return tok.AccessToken
-		}
-	default:
-		log.Fatalf("unknown CONTROL_PLANE_AUTH %q", v)
-		return nil // unreachable
+	src, err := controlplane.BearerSource(context.Background())
+	if err != nil {
+		log.Fatalf("control-plane bearer: %v", err)
 	}
+	return src
 }
 
 // getEnv returns the value of the environment variable named by key, or def if
