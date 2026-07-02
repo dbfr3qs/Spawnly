@@ -243,4 +243,253 @@ echo "  HTTP ${REV_CODE}, error=${REV_ERR}"
 echo "  PASS: revoked agent rejected invalid_client (liveness gate)."
 
 echo ""
+echo "==> [Phase 3] RFC 8693 token-exchange delegation probe..."
+# Proves the custom SpawnlyTokenExchangeProvider end-to-end against Keycloak:
+#   a PARENT (travel-planner) mints an audience=delegation token; a CHILD
+#   (flight-search) exchanges it with its OWN SVID as actor_token, and Keycloak
+#   returns a token whose `act` WRAPS the child around the parent. Then each
+#   rejection is exercised live: scope not in the subject token (invalid_scope),
+#   a scope over the registry ceiling (invalid_grant), a disallowed edge
+#   (invalid_grant), and a revoked chain member (invalid_grant).
+#
+# Delegation policy needs a grantable edge whose scope the PARENT client can
+# actually mint into the subject_token. chain-worker self-delegates
+# (allowedChildTypes:[chain-worker]) and holds sample-api-a:read, so it is the
+# natural edge: parent and child are both chain-worker clients (distinct agent
+# ids). The example chain-worker template ships grantableScopes:[] (nothing
+# carryable), so we TEMPORARILY upsert it with grantableScopes:["sample-api-a:read"]
+# (maxDepth 2) and RESTORE the original in cleanup. This mutates only the
+# in-memory registry template, not any running agent.
+
+CP_TOKEN=$(kubectl get secret control-plane-auth -o jsonpath='{.data.token}' 2>/dev/null | base64 -d 2>/dev/null || true)
+CP_HDR=()
+[ -n "$CP_TOKEN" ] && CP_HDR=(-H "Authorization: Bearer ${CP_TOKEN}")
+
+PARENT_TYPE="chain-worker"
+CHILD_TYPE="chain-worker"
+DELEG_SCOPE="sample-api-a:read"
+# A scope the parent CAN mint (chain-worker holds orchestrator:spawn) but that is
+# OVER the delegation ceiling — used for the invalid_grant ceiling check.
+OVER_SCOPE="orchestrator:spawn"
+# A scope the parent CANNOT put in the subject at all is not needed; the
+# scope-subset check is exercised by requesting a scope absent from the subject.
+TP_ORIG=$(mktemp)
+TP_RESTORE_NEEDED=
+
+restore_template() {
+  if [ -n "$TP_RESTORE_NEEDED" ] && [ -s "$TP_ORIG" ]; then
+    curl -s --max-time 20 -X POST "${REGISTRY_URL}/v1/templates" \
+      -H 'Content-Type: application/json' "${CP_HDR[@]}" \
+      --data-binary @"$TP_ORIG" >/dev/null 2>&1 || true
+  fi
+}
+# Chain template restore onto the existing cleanup trap.
+trap 'restore_template; cleanup' EXIT
+
+echo "==> Saving the ${PARENT_TYPE} template and upserting a grantable edge..."
+curl -s --max-time 20 "${CP_HDR[@]}" "${REGISTRY_URL}/v1/templates/${PARENT_TYPE}" -o "$TP_ORIG"
+if ! jq -e .agentType "$TP_ORIG" >/dev/null 2>&1; then
+  echo "FAIL: could not read ${PARENT_TYPE} template" >&2; cat "$TP_ORIG" >&2; exit 1
+fi
+TP_PATCHED=$(mktemp)
+jq --arg s "$DELEG_SCOPE" '.delegation.grantableScopes = [$s] | .delegation.maxDepth = 2' \
+  "$TP_ORIG" >"$TP_PATCHED"
+UP_CODE=$(curl -s --max-time 20 -o /dev/null -w '%{http_code}' -X POST "${REGISTRY_URL}/v1/templates" \
+  -H 'Content-Type: application/json' "${CP_HDR[@]}" --data-binary @"$TP_PATCHED")
+[ "$UP_CODE" = "201" ] || { echo "FAIL: template upsert returned ${UP_CODE}" >&2; exit 1; }
+TP_RESTORE_NEEDED=1
+echo "  ${PARENT_TYPE} now delegates ${DELEG_SCOPE} to ${CHILD_TYPE} (maxDepth 2)."
+
+# launch_probe_pod <pod-name> <agent-type> <agent-id> — SPIRE-attested probe pod.
+launch_probe_pod() {
+  local pod="$1" atype="$2" aid="$3"
+  kubectl apply -n "$NS" -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${pod}
+  labels:
+    agent-platform.io/managed: "true"
+    agent-platform.io/scope: "tenant"
+    tenant-id: "${TENANT}"
+    user-id: "${USER}"
+    agent-type: "${atype}"
+    agent-id: "${aid}"
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: ${SPIRE_IMAGE}
+      command: ["/opt/spire/bin/spire-agent", "api", "watch", "-socketPath", "/spiffe-workload-api/spire-agent.sock"]
+      volumeMounts:
+        - name: spiffe-workload-api
+          mountPath: /spiffe-workload-api
+          readOnly: true
+  volumes:
+    - name: spiffe-workload-api
+      csi:
+        driver: csi.spiffe.io
+        readOnly: true
+YAML
+  kubectl wait --for=condition=Ready "pod/${pod}" -n "$NS" --timeout=120s >/dev/null
+}
+
+# fetch_svid_from <pod> <audience> — like fetch_svid but for an arbitrary pod.
+fetch_svid_from() {
+  local pod="$1" aud="$2" raw svid
+  for _ in $(seq 1 15); do
+    raw=$(kubectl exec -n "$NS" "$pod" -- \
+      /opt/spire/bin/spire-agent api fetch jwt -audience "$aud" \
+      -socketPath /spiffe-workload-api/spire-agent.sock 2>/dev/null || true)
+    svid=$(printf '%s\n' "$raw" | grep -oE '[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+' | head -n1 || true)
+    [ -n "$svid" ] && { printf '%s' "$svid"; return 0; }
+    sleep 2
+  done
+  return 1
+}
+
+# register_agent <agent-type> <svid> — self-register; echoes nothing, exits on fail.
+register_agent() {
+  local atype="$1" svid="$2" body code
+  body=$(mktemp)
+  code=$($CURL -o "$body" -w '%{http_code}' -X POST "${REGISTRY_URL}/v1/agents" \
+    -H "Authorization: Bearer ${svid}" -H "Content-Type: application/json" \
+    -d "{\"agentType\":\"${atype}\",\"tenantId\":\"${TENANT}\",\"userId\":\"${USER}\"}")
+  if [ "$code" != "201" ] && [ "$code" != "409" ]; then
+    echo "FAIL: register ${atype} returned ${code}" >&2; cat "$body" >&2; exit 1
+  fi
+}
+
+PARENT_ID="pd-parent-$(date +%s)"
+CHILD_ID="pd-child-$(date +%s)"
+PARENT_POD="keycloak-probe-${PARENT_ID}"
+CHILD_POD="keycloak-probe-${CHILD_ID}"
+# Extend cleanup to also delete these two pods.
+cleanup_deleg() {
+  kubectl delete pod "$PARENT_POD" "$CHILD_POD" -n "$NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+trap 'cleanup_deleg; restore_template; cleanup' EXIT
+
+echo "==> Launching parent (${PARENT_TYPE}) + child (${CHILD_TYPE}) probe pods..."
+launch_probe_pod "$PARENT_POD" "$PARENT_TYPE" "$PARENT_ID"
+launch_probe_pod "$CHILD_POD" "$CHILD_TYPE" "$CHILD_ID"
+
+PARENT_REG_SVID=$(fetch_svid_from "$PARENT_POD" registry) || { echo "FAIL: no parent registry SVID" >&2; exit 1; }
+CHILD_REG_SVID=$(fetch_svid_from "$CHILD_POD" registry) || { echo "FAIL: no child registry SVID" >&2; exit 1; }
+register_agent "$PARENT_TYPE" "$PARENT_REG_SVID"
+register_agent "$CHILD_TYPE" "$CHILD_REG_SVID"
+echo "  registered parent=${PARENT_ID} (${PARENT_TYPE}) child=${CHILD_ID} (${CHILD_TYPE})."
+
+PARENT_SVID=$(fetch_svid_from "$PARENT_POD" keys) || { echo "FAIL: no parent keys SVID" >&2; exit 1; }
+CHILD_SVID=$(fetch_svid_from "$CHILD_POD" keys) || { echo "FAIL: no child keys SVID" >&2; exit 1; }
+CHILD_SPIFFE=$(decode_payload "$CHILD_SVID" | jq -r '.sub')
+PARENT_SPIFFE=$(decode_payload "$PARENT_SVID" | jq -r '.sub')
+echo "  parent spiffe=${PARENT_SPIFFE}"
+echo "  child  spiffe=${CHILD_SPIFFE}"
+
+EX_GRANT="urn:ietf:params:oauth:grant-type:token-exchange"
+ACCESS_TT="urn:ietf:params:oauth:token-type:access_token"
+JWT_TT="urn:ietf:params:oauth:token-type:jwt"
+
+# mint_delegation_token <client_id> <svid> <scope> — echoes an audience=delegation
+# token (the subject_token a parent hands down), exits on failure.
+mint_delegation_token() {
+  local cid="$1" svid="$2" scope="$3" body code
+  body=$(mktemp)
+  code=$($CURL -o "$body" -w '%{http_code}' -X POST "$TOKEN_URL" \
+    -d "grant_type=client_credentials" -d "client_id=${cid}" \
+    -d "scope=${scope}" -d "audience=delegation" \
+    -d "client_assertion_type=${JWT_BEARER}" --data-urlencode "client_assertion=${svid}")
+  [ "$code" = "200" ] || { echo "FAIL: parent delegation mint ${code}" >&2; cat "$body" >&2; exit 1; }
+  jq -r '.access_token' <"$body"
+}
+
+# exchange <subject_token> <scope> <audience> — child runs the exchange with its
+# own SVID as actor_token; echoes "HTTPCODE<TAB>BODYFILE".
+exchange() {
+  local subject="$1" scope="$2" aud="$3" body code
+  body=$(mktemp)
+  local args=(-o "$body" -w '%{http_code}' -X POST "$TOKEN_URL"
+    -d "grant_type=${EX_GRANT}"
+    --data-urlencode "subject_token=${subject}" -d "subject_token_type=${ACCESS_TT}"
+    --data-urlencode "actor_token=${CHILD_SVID}" -d "actor_token_type=${JWT_TT}"
+    -d "client_id=${CHILD_TYPE}"
+    -d "client_assertion_type=${JWT_BEARER}" --data-urlencode "client_assertion=${CHILD_SVID}"
+    -d "scope=${scope}")
+  [ -n "$aud" ] && args+=(-d "audience=${aud}")
+  code=$($CURL "${args[@]}")
+  # Trailing newline so `read` returns 0 (no-newline EOF makes read exit 1, which
+  # would abort the caller under `set -e`).
+  printf '%s\t%s\n' "$code" "$body"
+}
+
+echo ""
+echo "==> [6/9] Parent mints a delegation token; child exchanges it (wrapped act)..."
+SUBJECT=$(mint_delegation_token "$PARENT_TYPE" "$PARENT_SVID" "$DELEG_SCOPE")
+# The subject_token's act.sub is the PARENT spiffe (Phase 2 mapper). That is the
+# delegation parent the exchange resolves.
+SUBJ_ACT=$(decode_payload "$SUBJECT" | jq -r '.act.sub')
+echo "  subject_token act.sub=${SUBJ_ACT}"
+[ "$SUBJ_ACT" = "$PARENT_SPIFFE" ] || { echo "FAIL: subject act.sub != parent spiffe" >&2; exit 1; }
+
+IFS=$'\t' read -r EX_CODE EX_BODY < <(exchange "$SUBJECT" "$DELEG_SCOPE" "")
+if [ "$EX_CODE" != "200" ]; then
+  echo "FAIL: exchange returned ${EX_CODE}" >&2; cat "$EX_BODY" >&2; echo >&2; exit 1
+fi
+EX_TOKEN=$(jq -r '.access_token' <"$EX_BODY")
+EX_PAYLOAD=$(decode_payload "$EX_TOKEN")
+EX_SUB=$(printf '%s' "$EX_PAYLOAD" | jq -r '.sub')
+EX_ACT_SUB=$(printf '%s' "$EX_PAYLOAD" | jq -r '.act.sub')
+EX_ACT_INNER=$(printf '%s' "$EX_PAYLOAD" | jq -r '.act.act.sub')
+EX_SCOPE=$(printf '%s' "$EX_PAYLOAD" | jq -r '.scope')
+EX_AUD=$(printf '%s' "$EX_PAYLOAD" | jq -rc '.aud')
+echo "  sub=${EX_SUB}"
+echo "  act.sub=${EX_ACT_SUB}  act.act.sub=${EX_ACT_INNER}"
+echo "  scope=\"${EX_SCOPE}\"  aud=${EX_AUD}"
+[ "$EX_SUB" = "user:${USER}" ] || { echo "FAIL: exchanged sub != user:${USER}" >&2; exit 1; }
+[ "$EX_ACT_SUB" = "$CHILD_SPIFFE" ] || { echo "FAIL: outer act.sub != child (not wrapped)" >&2; exit 1; }
+[ "$EX_ACT_INNER" = "$PARENT_SPIFFE" ] || { echo "FAIL: inner act.act.sub != parent (chain lost)" >&2; exit 1; }
+printf '%s' "$EX_SCOPE" | grep -q "${DELEG_SCOPE}" || { echo "FAIL: exchanged scope missing ${DELEG_SCOPE}" >&2; exit 1; }
+printf '%s' "$EX_AUD" | grep -q "sample-api-a" || { echo "FAIL: exchanged aud missing sample-api-a" >&2; exit 1; }
+echo "  PASS: act wraps child around parent; scope + aud correct; sub carried over."
+
+echo ""
+echo "==> [7/9] Requesting a scope NOT in the subject_token ⇒ invalid_scope..."
+# subject only carries ${DELEG_SCOPE}; also request a scope it does not carry.
+IFS=$'\t' read -r S_CODE S_BODY < <(exchange "$SUBJECT" "${DELEG_SCOPE} ${OVER_SCOPE}" "")
+S_ERR=$(jq -r '.error' <"$S_BODY" 2>/dev/null || echo "?")
+echo "  HTTP ${S_CODE}, error=${S_ERR}"
+[ "$S_CODE" != "200" ] && [ "$S_ERR" = "invalid_scope" ] \
+  || { echo "FAIL: scope-not-in-subject not rejected invalid_scope" >&2; cat "$S_BODY" >&2; exit 1; }
+echo "  PASS: scope-subset enforced (invalid_scope)."
+
+echo ""
+echo "==> [8/9] Requesting a scope OVER the delegation ceiling ⇒ invalid_grant..."
+# Mint a subject carrying ${OVER_SCOPE} (in the parent's optional scopes), then
+# request it: it's in the subject but NOT in grantableScopes:[${DELEG_SCOPE}].
+SUBJECT2=$(mint_delegation_token "$PARENT_TYPE" "$PARENT_SVID" "$OVER_SCOPE")
+IFS=$'\t' read -r C_CODE C_BODY < <(exchange "$SUBJECT2" "$OVER_SCOPE" "")
+C_ERR=$(jq -r '.error' <"$C_BODY" 2>/dev/null || echo "?")
+echo "  HTTP ${C_CODE}, error=${C_ERR}"
+[ "$C_CODE" != "200" ] && [ "$C_ERR" = "invalid_grant" ] \
+  || { echo "FAIL: over-ceiling scope not rejected invalid_grant" >&2; cat "$C_BODY" >&2; exit 1; }
+echo "  PASS: delegation ceiling enforced (invalid_grant)."
+
+echo ""
+echo "==> [9/9] Revoke an ANCESTOR (the parent), then the exchange ⇒ invalid_grant..."
+# Revoke the PARENT, not the child: the child still authenticates (client-auth
+# passes the liveness gate), so the exchange runs and its OWN chain-revocation
+# walk finds the parent (an ancestor in the act chain) revoked ⇒ invalid_grant.
+# This is the frozen "revocation covers ALL ancestors, not just the immediate
+# actor" semantic. (Revoking the CHILD instead is also blocked, but earlier — at
+# client-auth, as invalid_client — which the Phase-2 [5/5] check already covers.)
+$CURL -o /dev/null -X POST "${REGISTRY_URL}/v1/agents/${PARENT_ID}/revoke?userId=${USER}"
+IFS=$'\t' read -r R_CODE R_BODY < <(exchange "$SUBJECT" "$DELEG_SCOPE" "")
+R_ERR=$(jq -r '.error' <"$R_BODY" 2>/dev/null || echo "?")
+echo "  HTTP ${R_CODE}, error=${R_ERR}"
+[ "$R_CODE" != "200" ] && [ "$R_ERR" = "invalid_grant" ] \
+  || { echo "FAIL: revoked ancestor did not block the exchange" >&2; cat "$R_BODY" >&2; exit 1; }
+echo "  PASS: chain-revocation covers ancestors (invalid_grant)."
+
+echo ""
 echo "==> keycloak-probe: ALL CHECKS PASSED"

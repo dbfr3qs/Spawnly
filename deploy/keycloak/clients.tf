@@ -277,6 +277,17 @@ resource "keycloak_openid_client" "machine" {
 
   access_token_lifespan = each.value.lifespan
 
+  # Phase 3: enable Keycloak's STANDARD token-exchange grant on every machine
+  # client so an agent (the actor/child) can run RFC 8693 delegation against the
+  # realm token endpoint. The custom SpawnlyTokenExchangeProvider (registered
+  # with a higher order() than the built-in Standard provider) owns the Spawnly
+  # delegation exchange by priority and enforces the frozen delegation policy;
+  # this flag is what admits the token-exchange grant type for the client at all.
+  # It does NOT widen scope — full_scope_allowed stays false and the provider
+  # itself enforces scope-subset + the registry ceiling. The C# IdP allowed any
+  # machine client to exchange, so enabling it on all six preserves parity.
+  standard_token_exchange_enabled = true
+
   full_scope_allowed = false
 }
 
