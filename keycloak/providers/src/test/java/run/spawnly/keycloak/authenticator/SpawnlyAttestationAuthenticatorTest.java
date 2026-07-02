@@ -16,6 +16,9 @@ import org.keycloak.sessions.AuthenticationSessionModel;
 
 import run.spawnly.keycloak.attestor.AgentCredentialVerifier;
 import run.spawnly.keycloak.attestor.AgentIdentity;
+import run.spawnly.keycloak.identity.VerifiedAgent;
+import run.spawnly.keycloak.registry.AgentRecord;
+import run.spawnly.keycloak.registry.AgentRegistryClient;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -41,6 +44,8 @@ class SpawnlyAttestationAuthenticatorTest {
     private ClientAuthenticationFlowContext ctx;
     private AuthenticationSessionModel authSession;
     private RealmModel realm;
+    private KeycloakSession session;
+    private AgentRegistryClient registry;
     private MultivaluedMap<String, String> form;
 
     private static final String SPIFFE = "spiffe://cluster.local/agent/t/u/weather-monitor/agent-abc";
@@ -50,10 +55,11 @@ class SpawnlyAttestationAuthenticatorTest {
         ctx = mock(ClientAuthenticationFlowContext.class);
         HttpRequest req = mock(HttpRequest.class);
         realm = mock(RealmModel.class);
-        KeycloakSession session = mock(KeycloakSession.class);
+        session = mock(KeycloakSession.class);
         KeycloakContext kcCtx = mock(KeycloakContext.class);
         authSession = mock(AuthenticationSessionModel.class);
         EventBuilder event = mock(EventBuilder.class);
+        registry = mock(AgentRegistryClient.class);
 
         form = new MultivaluedHashMap<>();
         when(ctx.getHttpRequest()).thenReturn(req);
@@ -67,13 +73,19 @@ class SpawnlyAttestationAuthenticatorTest {
     }
 
     private SpawnlyAttestationAuthenticator authWithVerifier(AgentCredentialVerifier v) {
-        return new SpawnlyAttestationAuthenticator(v);
+        return new SpawnlyAttestationAuthenticator(v, registry);
     }
 
     private AgentCredentialVerifier alwaysOk() {
         AgentCredentialVerifier v = mock(AgentCredentialVerifier.class);
         when(v.verify(any())).thenReturn(new AgentIdentity("agent-abc", SPIFFE, "spiffe-svid"));
         return v;
+    }
+
+    /** Registry returns an ACTIVE agent whose agentType matches the client_id. */
+    private void registryReturnsActive(String clientId) {
+        when(registry.getAgent("agent-abc"))
+                .thenReturn(new AgentRecord("agent-abc", "active", "alice", clientId, null));
     }
 
     @Test
@@ -83,11 +95,17 @@ class SpawnlyAttestationAuthenticatorTest {
         form.putSingle("client_id", "weather-monitor");
         ClientModel client = mock(ClientModel.class);
         when(realm.getClientByClientId("weather-monitor")).thenReturn(client);
+        registryReturnsActive("weather-monitor");
 
         authWithVerifier(alwaysOk()).authenticateClient(ctx);
 
         verify(ctx).setClient(client);
         verify(ctx).success();
+        // The reliable channel to the Phase 2 mappers: the verified, registry-
+        // confirmed identity in the request-scoped session attribute bag.
+        verify(session).setAttribute(VerifiedAgent.SESSION_ATTR,
+                new VerifiedAgent("alice", SPIFFE, "agent-abc"));
+        // Client notes still set (harmless where they don't propagate; used by CIBA).
         verify(authSession).setClientNote(SpawnlyAttestationAuthenticator.NOTE_AGENT_SUBJECT, SPIFFE);
         verify(authSession).setClientNote(SpawnlyAttestationAuthenticator.NOTE_AGENT_ID, "agent-abc");
         verify(authSession).setClientNote(SpawnlyAttestationAuthenticator.NOTE_AGENT_ISSUER, "spiffe-svid");
@@ -99,10 +117,92 @@ class SpawnlyAttestationAuthenticatorTest {
         form.putSingle("client_assertion", "presigned-sts-url");
         form.putSingle("client_id", "weather-monitor");
         when(realm.getClientByClientId("weather-monitor")).thenReturn(mock(ClientModel.class));
+        registryReturnsActive("weather-monitor");
 
         authWithVerifier(alwaysOk()).authenticateClient(ctx);
 
         verify(ctx).success();
+    }
+
+    // ── Registry liveness gate matrix (Phase 2) ────────────────────────────────
+
+    @Test
+    void livenessGate_missingAgent_isInvalidClient_noAttribute() {
+        form.putSingle("client_assertion_type", SpawnlyAttestationAuthenticator.JWT_BEARER_ASSERTION_TYPE);
+        form.putSingle("client_assertion", "the-svid");
+        form.putSingle("client_id", "weather-monitor");
+        when(realm.getClientByClientId("weather-monitor")).thenReturn(mock(ClientModel.class));
+        when(registry.getAgent("agent-abc")).thenReturn(null); // not registered / registry down
+
+        authWithVerifier(alwaysOk()).authenticateClient(ctx);
+
+        verify(ctx).failure(eq(AuthenticationFlowError.INVALID_CLIENT_CREDENTIALS), any());
+        verify(ctx, never()).success();
+        verify(session, never()).setAttribute(eq(VerifiedAgent.SESSION_ATTR), any());
+    }
+
+    @Test
+    void livenessGate_revokedAgent_isInvalidClient() {
+        form.putSingle("client_assertion_type", SpawnlyAttestationAuthenticator.JWT_BEARER_ASSERTION_TYPE);
+        form.putSingle("client_assertion", "the-svid");
+        form.putSingle("client_id", "weather-monitor");
+        when(realm.getClientByClientId("weather-monitor")).thenReturn(mock(ClientModel.class));
+        when(registry.getAgent("agent-abc"))
+                .thenReturn(new AgentRecord("agent-abc", "revoked", "alice", "weather-monitor", null));
+
+        authWithVerifier(alwaysOk()).authenticateClient(ctx);
+
+        verify(ctx).failure(eq(AuthenticationFlowError.INVALID_CLIENT_CREDENTIALS), any());
+        verify(ctx, never()).success();
+    }
+
+    @Test
+    void livenessGate_pendingStatus_rejectedOnClientCredentials() {
+        // Phase 4 will allow pending on the CIBA path, but the client_credentials
+        // gate requires strictly `active` (AgentRegistryValidator.cs).
+        form.putSingle("client_assertion_type", SpawnlyAttestationAuthenticator.JWT_BEARER_ASSERTION_TYPE);
+        form.putSingle("client_assertion", "the-svid");
+        form.putSingle("client_id", "weather-monitor");
+        when(realm.getClientByClientId("weather-monitor")).thenReturn(mock(ClientModel.class));
+        when(registry.getAgent("agent-abc"))
+                .thenReturn(new AgentRecord("agent-abc", "pending", "alice", "weather-monitor", null));
+
+        authWithVerifier(alwaysOk()).authenticateClient(ctx);
+
+        verify(ctx).failure(eq(AuthenticationFlowError.INVALID_CLIENT_CREDENTIALS), any());
+    }
+
+    @Test
+    void livenessGate_noUserId_isInvalidClient() {
+        form.putSingle("client_assertion_type", SpawnlyAttestationAuthenticator.JWT_BEARER_ASSERTION_TYPE);
+        form.putSingle("client_assertion", "the-svid");
+        form.putSingle("client_id", "weather-monitor");
+        when(realm.getClientByClientId("weather-monitor")).thenReturn(mock(ClientModel.class));
+        when(registry.getAgent("agent-abc"))
+                .thenReturn(new AgentRecord("agent-abc", "active", null, "weather-monitor", null));
+
+        authWithVerifier(alwaysOk()).authenticateClient(ctx);
+
+        verify(ctx).failure(eq(AuthenticationFlowError.INVALID_CLIENT_CREDENTIALS), any());
+    }
+
+    @Test
+    void livenessGate_agentTypeMismatch_isInvalidClient() {
+        // Phase-1 follow-up (b): an SVID for type weather-monitor must not be
+        // usable to authenticate as a DIFFERENT client (chain-worker) and inherit
+        // its scopes. The registry agentType must equal the presented client_id.
+        form.putSingle("client_assertion_type", SpawnlyAttestationAuthenticator.JWT_BEARER_ASSERTION_TYPE);
+        form.putSingle("client_assertion", "the-svid");
+        form.putSingle("client_id", "chain-worker");
+        when(realm.getClientByClientId("chain-worker")).thenReturn(mock(ClientModel.class));
+        when(registry.getAgent("agent-abc"))
+                .thenReturn(new AgentRecord("agent-abc", "active", "alice", "weather-monitor", null));
+
+        authWithVerifier(alwaysOk()).authenticateClient(ctx);
+
+        verify(ctx).failure(eq(AuthenticationFlowError.INVALID_CLIENT_CREDENTIALS), any());
+        verify(ctx, never()).success();
+        verify(session, never()).setAttribute(eq(VerifiedAgent.SESSION_ATTR), any());
     }
 
     @Test

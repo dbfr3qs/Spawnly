@@ -88,6 +88,43 @@ spec:
               value: "spiffe"
             - name: SPIRE_JWKS_URL
               value: "https://spire-spiffe-oidc-discovery-provider.spire-system/keys"
+            # ── Registry-driven identity (Phase 2) ─────────────────────────
+            # The attestation authenticator's liveness gate + the identity
+            # mapper look agents up in the registry (status active, userId,
+            # agentType==client_id) via AgentRegistryClient. Same value +
+            # control-plane auth the identity-server manifest uses, so the two
+            # IdPs behave identically against the registry.
+            - name: REGISTRY_URL
+              value: "http://registry:8080"
+            # Control-plane auth the IdP presents to the registry (must match
+            # the registry's setting). Both values come from the optional
+            # `control-plane-auth` Secret bootstrap.sh generates (shared with
+            # the registry, so tokens match by construction). Absent Secret →
+            # env unset → "none" (no credential; the registry runs open on
+            # kind). For "oidc": drop the secretKeyRefs, set
+            # CONTROL_PLANE_AUTH=oidc, and uncomment the client-credentials
+            # block below (the "idp-consent" client).
+            - name: CONTROL_PLANE_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-auth
+                  key: auth
+                  optional: true
+            - name: CONTROL_PLANE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-auth
+                  key: token
+                  optional: true
+            # --- oidc tier (mirror identity-server) ---
+            # - name: CONTROL_PLANE_TOKEN_URL
+            #   value: "http://keycloak:8080/realms/spawnly/protocol/openid-connect/token"
+            # - name: CONTROL_PLANE_CLIENT_ID
+            #   value: "idp-consent"
+            # - name: CONTROL_PLANE_CLIENT_SECRET
+            #   value: "idp-consent-secret"
+            # - name: CONTROL_PLANE_SCOPE
+            #   value: "registry.consent"
             # DEBUG-level logging for the Spawnly SPI providers so attestation
             # verification failures (bad signature, JWKS fetch, expiry) surface
             # in the pod log. Root stays INFO. Harmless to keep on kind.

@@ -17,6 +17,9 @@ import org.keycloak.sessions.AuthenticationSessionModel;
 import run.spawnly.keycloak.attestor.AgentCredentialVerifier;
 import run.spawnly.keycloak.attestor.AgentIdentity;
 import run.spawnly.keycloak.attestor.AttestorFactory;
+import run.spawnly.keycloak.identity.VerifiedAgent;
+import run.spawnly.keycloak.registry.AgentRecord;
+import run.spawnly.keycloak.registry.AgentRegistryClient;
 
 import java.util.Collections;
 import java.util.List;
@@ -30,10 +33,14 @@ import java.util.Set;
  * {@code client_assertion}; this authenticator accepts the two Spawnly
  * assertion types and verifies the credential through the configured
  * {@link AgentCredentialVerifier} (SPIFFE JWT-SVID by default, AWS STS in
- * Phase 5). On success it resolves the client by {@code client_id} and stores
- * the verified {@code {subject, agentId}} in the auth session's CLIENT NOTES,
- * which propagate to the authenticated client session and are read by the
- * Phase 2 protocol mappers (sub override + act chain).
+ * Phase 5). On success it resolves the client by {@code client_id}, runs the
+ * Phase 2 registry LIVENESS GATE (agent must be registered, {@code active}, have
+ * a userId, and its registry {@code agentType} must equal the presented
+ * {@code client_id}), and threads the registry-confirmed
+ * {@code {userId, subject, agentId}} to the Phase 2 protocol mappers via the
+ * per-request {@link org.keycloak.models.KeycloakSession} attribute bag (see
+ * {@link run.spawnly.keycloak.identity.VerifiedAgent} for why a session
+ * attribute, not a client note, is the reliable channel on client_credentials).
  *
  * <p>NON-ATTESTATION requests are not this authenticator's business: a request
  * without a Spawnly {@code client_assertion_type} is {@code attempted()} so the
@@ -73,6 +80,11 @@ public class SpawnlyAttestationAuthenticator extends AbstractClientAuthenticator
     // init() throw — a HARD FAIL at server startup, matching Program.cs.
     private volatile AgentCredentialVerifier verifier;
 
+    // The registry client is built once at factory init and shared (its HTTP
+    // client + bearer supplier are thread-safe). Used by the Phase 2 liveness
+    // gate. Injected in tests via the package-private ctor.
+    private volatile AgentRegistryClient registry;
+
     /** Keycloak instantiates providers via a public no-arg constructor. */
     public SpawnlyAttestationAuthenticator() {
     }
@@ -82,11 +94,18 @@ public class SpawnlyAttestationAuthenticator extends AbstractClientAuthenticator
         this.verifier = verifier;
     }
 
+    /** Test seam: inject both the verifier and the registry client. */
+    SpawnlyAttestationAuthenticator(AgentCredentialVerifier verifier, AgentRegistryClient registry) {
+        this.verifier = verifier;
+        this.registry = registry;
+    }
+
     @Override
     public void init(org.keycloak.Config.Scope config) {
         // Select the attestor once. Unknown value ⇒ IllegalStateException ⇒
         // startup fails loudly (no silent insecure fallback).
         this.verifier = AttestorFactory.build(config);
+        this.registry = new AgentRegistryClient();
     }
 
     /** True for a client_assertion type one of this platform's attestors uses. */
@@ -138,9 +157,53 @@ public class SpawnlyAttestationAuthenticator extends AbstractClientAuthenticator
             return;
         }
 
-        // Store the verified identity for the Phase 2 mappers. Client notes on
-        // the auth session propagate to the authenticated client session, which
-        // is what protocol mappers read.
+        // ── Registry liveness gate (Phase 2) ──────────────────────────────────
+        // Port of AgentRegistryValidator.cs: look the agent up by its derived
+        // agentId, require it to be registered + `active`, and require a userId
+        // (the human it acts for). A missing agent, wrong status, or missing
+        // userId is invalid_client — the same error surface as the C# validator.
+        //
+        // NOTE (Phase 4 seam): the CIBA token-poll path will allow
+        // active|pending|awaiting-consent (AgentRegistryValidator.cs:45). That
+        // path does not run this client authenticator's client_credentials gate,
+        // so it is left untouched here — this method only gates the machine
+        // client_credentials mint. Do not add CIBA statuses to this gate.
+        AgentRecord agent = registry.getAgent(identity.agentId());
+        if (agent == null || !"active".equals(agent.status())) {
+            fail(context, "agent " + identity.agentId() + " is not active");
+            return;
+        }
+        if (agent.userId() == null || agent.userId().isEmpty()) {
+            fail(context, "agent " + identity.agentId() + " has no userId");
+            return;
+        }
+
+        // ── Phase-1 follow-up (b): bind the SVID to the client ────────────────
+        // The platform models an agent's TYPE as its Keycloak client_id (a
+        // machine client is named `weather-monitor`, `chain-worker`, ...). The
+        // registry independently records the agent's agentType from its own
+        // SVID-based registration. Require the two to match, so an SVID for
+        // agent-type X cannot authenticate as a different client Y and inherit
+        // Y's scopes. The registry record is authoritative for agentType (the
+        // SVID path position varies between tenanted and global agents), so we
+        // compare agent.agentType() to the presented client_id.
+        if (!clientId.equals(agent.agentType())) {
+            fail(context, "agent " + identity.agentId() + " type " + agent.agentType()
+                    + " does not match client_id " + clientId);
+            return;
+        }
+
+        // Thread the registry-confirmed identity to the Phase 2 mappers via the
+        // per-request KeycloakSession attribute bag — the RELIABLE channel on the
+        // client_credentials grant (see VerifiedAgent for why client notes don't
+        // survive that grant). sub=user:<userId> + act.sub=<spiffe> are derived
+        // from THIS object, so they can never be client-supplied.
+        VerifiedAgent verified = new VerifiedAgent(agent.userId(), identity.subject(), identity.agentId());
+        context.getSession().setAttribute(VerifiedAgent.SESSION_ATTR, verified);
+
+        // Also keep the client notes for callers/paths that DO reuse the auth
+        // session (e.g. the Phase 4 CIBA channel), and for audit. Harmless where
+        // they don't propagate.
         AuthenticationSessionModel authSession = context.getSession().getContext().getAuthenticationSession();
         if (authSession != null) {
             authSession.setClientNote(NOTE_AGENT_SUBJECT, identity.subject());

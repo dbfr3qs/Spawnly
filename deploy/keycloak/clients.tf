@@ -355,3 +355,36 @@ resource "keycloak_openid_client_default_scopes" "machine" {
   client_id      = keycloak_openid_client.machine[each.key].id
   default_scopes = local.default_scopes_service_account
 }
+
+# ===========================================================================
+# Phase 2 identity mapper — sub=user:<userId>, nested act, token_use.
+#
+# The custom "spawnly-identity-mapper" (SpawnlyIdentityMapper) reshapes a
+# machine client_credentials token to the platform's delegated-identity shape,
+# reading the registry-confirmed identity the attestation authenticator stashed
+# in the request-scoped session. Attached to the SIX MACHINE CLIENTS ONLY —
+# NEVER to dashboard/mobile (human) or orchestrator/idp-consent (control-plane).
+#
+# SECURITY: the mapper is a no-op unless the request is attestation-
+# authenticated (a VerifiedAgent session attribute is present), so even if it
+# were mistakenly attached elsewhere it could not override a human's sub. We
+# still scope it to machine clients only, matching the C# validator that runs
+# the sub/act injection exclusively on the agent client_credentials path.
+# It emits NO `role` claim — role stays user-sourced (scopes.tf).
+resource "keycloak_generic_protocol_mapper" "machine_identity" {
+  for_each = local.machine_clients
+
+  realm_id        = keycloak_realm.spawnly.id
+  client_id       = keycloak_openid_client.machine[each.key].id
+  name            = "spawnly-agent-identity"
+  protocol        = "openid-connect"
+  protocol_mapper = "spawnly-identity-mapper"
+
+  # The mapper reads everything from the session attribute; no per-instance
+  # config is required. Include it in both tokens (the access token is the
+  # security-relevant one; the id_token is shaped identically for consistency).
+  config = {
+    "access.token.claim" = "true"
+    "id.token.claim"     = "true"
+  }
+}

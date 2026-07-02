@@ -51,8 +51,10 @@ spec:
     - Ingress
   ingress:
     # orchestrator (templates/agents/subtree/consent), operator (Complete/Fail
-    # PATCH), identity-server (CIBA/spawn-policy/consent lookups during token
-    # minting), and agent sidecars (selfRegister, updateStatus, events).
+    # PATCH), identity-server AND keycloak (liveness/spawn-policy/consent lookups
+    # during token minting — Keycloak is the Phase 1+ IdP replacing
+    # identity-server, so it needs the same registry access), and agent sidecars
+    # (selfRegister, updateStatus, events).
     - from:
         - podSelector:
             matchLabels:
@@ -63,6 +65,9 @@ spec:
         - podSelector:
             matchLabels:
               app: identity-server
+        - podSelector:
+            matchLabels:
+              app: keycloak
         - podSelector:
             matchLabels:
               agent-platform.io/managed: "true"

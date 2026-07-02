@@ -202,7 +202,23 @@ func main() {
 		log.Fatalf("spicedb connect: %v", err)
 	}
 
-	validator, err := tokenvalidator.New(ctx, isIssuer, isJWKSURL)
+	// MIGRATION-TEMPORARY (Keycloak cutover, removed in Phase 6): accept BOTH
+	// issuers — IdentityServer (agent tokens, still minted there for the fleet)
+	// AND the Keycloak realm (agent tokens minted via the attestation SPI, e.g.
+	// the keycloak-probe). Phase 0 shimmed only the human-token consumers
+	// (orchestrator + mobile-gateway); Phase 2 extends the shim here so a
+	// Keycloak-minted agent token is accepted end-to-end. KC_ISSUER is OPT-IN
+	// (default empty): only when set does the Keycloak pair join, so pre-Keycloak
+	// deploys are unaffected. Phase 6 flips IS_ISSUER/IS_JWKS_URL to the realm
+	// and drops NewMulti.
+	pairs := []tokenvalidator.IssuerJWKS{{Issuer: isIssuer, JWKSURL: isJWKSURL}}
+	if kcIssuer := os.Getenv("KC_ISSUER"); kcIssuer != "" {
+		pairs = append(pairs, tokenvalidator.IssuerJWKS{
+			Issuer:  kcIssuer,
+			JWKSURL: getenv("KC_JWKS_URL", "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs"),
+		})
+	}
+	validator, err := tokenvalidator.NewMulti(ctx, pairs...)
 	if err != nil {
 		log.Fatalf("token validator init: %v", err)
 	}
