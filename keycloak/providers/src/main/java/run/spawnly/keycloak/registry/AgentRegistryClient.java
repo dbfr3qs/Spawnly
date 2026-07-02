@@ -10,7 +10,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
 
 /**
@@ -121,7 +123,124 @@ public class AgentRegistryClient {
         }
     }
 
+    // ── Consent requests (Phase 4 CIBA) ─────────────────────────────────────────
+
+    /**
+     * Creates (or fetches the existing open) pending consent request for a spawn
+     * edge (Phase 4). Returns the {@link ConsentRequest} as-is — its status may
+     * already be {@code approved} if the registry short-circuited on a covering
+     * stored consent. Null only when the registry is unreachable or errors,
+     * mirroring the C# {@code CreateConsentRequest}.
+     *
+     * <p>The registry keys the reuse on (userId, parentType, childType), so a
+     * duplicate backchannel request for the same edge returns the same open
+     * request rather than a new one.
+     */
+    public ConsentRequest createConsentRequest(String userId, String parentType, String childType,
+                                               List<String> scopes, String bindingMessage,
+                                               String externalRef, String agentId) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("userId", userId);
+        body.put("parentType", parentType);
+        body.put("childType", childType);
+        body.put("agentId", agentId);
+        body.put("scopes", scopes);
+        body.put("bindingMessage", bindingMessage);
+        body.put("externalRef", externalRef);
+        return postForConsentRequest("/v1/consent-requests", body);
+    }
+
+    /**
+     * Fetches a single consent request by id (used by the completion poller to
+     * learn the registry's decision). Null when not found or unreachable.
+     * Mirrors the C# {@code GetConsentRequest}.
+     */
+    public ConsentRequest getConsentRequest(String id) {
+        String responseBody = get("/v1/consent-requests/" + enc(id));
+        if (responseBody == null) {
+            return null;
+        }
+        try {
+            return JsonSerialization.readValue(responseBody, ConsentRequest.class);
+        } catch (Exception e) {
+            log.debugf(e, "malformed consent request %s", id);
+            return null;
+        }
+    }
+
+    /**
+     * Approves a pending consent request, recording the durable ConsentRecord in
+     * the registry and sweeping any other open requests for the same edge. Null
+     * only when the registry is unreachable or errors. Mirrors the C#
+     * {@code ApproveConsentRequest}.
+     */
+    public ConsentRequest approveConsentRequest(String id, List<String> scopes) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("scopes", scopes);
+        return postForConsentRequest("/v1/consent-requests/" + enc(id) + "/approve", body);
+    }
+
+    /**
+     * Denies a pending consent request. Null only when the registry is
+     * unreachable or errors. Mirrors the C# {@code DenyConsentRequest}.
+     */
+    public ConsentRequest denyConsentRequest(String id) {
+        return postForConsentRequest("/v1/consent-requests/" + enc(id) + "/deny", null);
+    }
+
+    /**
+     * POSTs {@code body} as JSON and parses the response as a {@link ConsentRequest}.
+     * Null on any failure (fail closed). Never throws.
+     */
+    private ConsentRequest postForConsentRequest(String path, Map<String, Object> body) {
+        String responseBody = post(path, body);
+        if (responseBody == null) {
+            return null;
+        }
+        try {
+            return JsonSerialization.readValue(responseBody, ConsentRequest.class);
+        } catch (Exception e) {
+            log.debugf(e, "malformed consent request response from %s", path);
+            return null;
+        }
+    }
+
     // ── HTTP plumbing ─────────────────────────────────────────────────────────
+
+    /**
+     * Executes a POST with an optional JSON body, returning the response body on
+     * 2xx or {@code null} on any failure (non-2xx, timeout, connection error).
+     * Never throws — a registry outage fails closed. Carries the control-plane
+     * bearer the same way {@link #get}.
+     */
+    private String post(String path, Map<String, Object> body) {
+        try {
+            HttpRequest.BodyPublisher pub;
+            if (body == null) {
+                pub = HttpRequest.BodyPublishers.noBody();
+            } else {
+                pub = HttpRequest.BodyPublishers.ofByteArray(JsonSerialization.writeValueAsBytes(body));
+            }
+            HttpRequest.Builder b = HttpRequest.newBuilder(URI.create(baseUrl + path))
+                    .timeout(REQUEST_TIMEOUT)
+                    .header("Content-Type", "application/json")
+                    .POST(pub);
+            String token = bearer.get();
+            if (token != null && !token.isEmpty()) {
+                b.header("Authorization", "Bearer " + token);
+            }
+            HttpResponse<String> resp = http.send(b.build(), HttpResponse.BodyHandlers.ofString());
+            int code = resp.statusCode();
+            if (code < 200 || code >= 300) {
+                log.debugf("registry POST %s returned %d", path, code);
+                return null;
+            }
+            return resp.body();
+        } catch (Exception e) {
+            log.debugf(e, "registry POST %s failed", path);
+            return null;
+        }
+    }
 
     /**
      * Executes a GET, returning the response body on 2xx or {@code null} on any

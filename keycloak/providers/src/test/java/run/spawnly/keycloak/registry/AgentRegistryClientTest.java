@@ -13,6 +13,9 @@ import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.equalTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
+import static com.github.tomakehurst.wiremock.client.WireMock.matchingJsonPath;
+import static com.github.tomakehurst.wiremock.client.WireMock.post;
+import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlPathEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.absent;
@@ -169,5 +172,110 @@ class AgentRegistryClientTest {
     void checkConsent_error_failsClosedNull() {
         wm.stubFor(get(urlPathEqualTo("/v1/consents/check")).willReturn(aResponse().withStatus(500)));
         assertNull(client(() -> "").checkConsent("u", "p", "c", List.of("s")));
+    }
+
+    // ── Consent requests (Phase 4 CIBA) ─────────────────────────────────────────
+
+    @Test
+    void createConsentRequest_postsBodyAndParsesPending() {
+        wm.stubFor(post(urlEqualTo("/v1/consent-requests")).willReturn(aResponse()
+                .withHeader("Content-Type", "application/json")
+                .withBody("{\"id\":\"cr-1\",\"userId\":\"alice\",\"parentType\":\"travel-planner\","
+                        + "\"childType\":\"flight-search\",\"agentId\":\"agent-x\",\"scopes\":[\"flights:read\"],"
+                        + "\"bindingMessage\":\"flight-search requests flights:read\",\"status\":\"pending\","
+                        + "\"externalRef\":\"authres-1\",\"future\":1}")));
+
+        ConsentRequest cr = client(() -> "").createConsentRequest(
+                "alice", "travel-planner", "flight-search", List.of("flights:read"),
+                "flight-search requests flights:read", "authres-1", "agent-x");
+
+        assertNotNull(cr);
+        assertEquals("cr-1", cr.id());
+        assertEquals("alice", cr.userId());
+        assertEquals("travel-planner", cr.parentType());
+        assertEquals("flight-search", cr.childType());
+        assertTrue(cr.isPending());
+        assertFalse(cr.isApproved());
+
+        // Body carries the edge fields (bound from the SVID, not client hints).
+        wm.verify(postRequestedFor(urlEqualTo("/v1/consent-requests"))
+                .withRequestBody(matchingJsonPath("$.userId", equalTo("alice")))
+                .withRequestBody(matchingJsonPath("$.parentType", equalTo("travel-planner")))
+                .withRequestBody(matchingJsonPath("$.childType", equalTo("flight-search")))
+                .withRequestBody(matchingJsonPath("$.agentId", equalTo("agent-x")))
+                .withRequestBody(matchingJsonPath("$.externalRef", equalTo("authres-1"))));
+    }
+
+    @Test
+    void createConsentRequest_returnsApprovedWhenRegistryShortCircuits() {
+        wm.stubFor(post(urlEqualTo("/v1/consent-requests")).willReturn(aResponse()
+                .withBody("{\"id\":\"cr-2\",\"userId\":\"alice\",\"parentType\":\"p\",\"childType\":\"c\","
+                        + "\"status\":\"approved\"}")));
+
+        ConsentRequest cr = client(() -> "").createConsentRequest(
+                "alice", "p", "c", List.of("s"), null, "ref", "agent-y");
+
+        assertNotNull(cr);
+        assertTrue(cr.isApproved());
+    }
+
+    @Test
+    void createConsentRequest_error_failsClosedNull() {
+        wm.stubFor(post(urlEqualTo("/v1/consent-requests")).willReturn(aResponse().withStatus(503)));
+        assertNull(client(() -> "").createConsentRequest("u", "p", "c", List.of("s"), null, "r", "a"));
+    }
+
+    @Test
+    void getConsentRequest_parsesStatus() {
+        wm.stubFor(get(urlEqualTo("/v1/consent-requests/cr-1")).willReturn(aResponse()
+                .withBody("{\"id\":\"cr-1\",\"userId\":\"alice\",\"parentType\":\"p\",\"childType\":\"c\","
+                        + "\"status\":\"denied\"}")));
+        ConsentRequest cr = client(() -> "").getConsentRequest("cr-1");
+        assertNotNull(cr);
+        assertTrue(cr.isDenied());
+    }
+
+    @Test
+    void getConsentRequest_error_failsClosedNull() {
+        wm.stubFor(get(urlEqualTo("/v1/consent-requests/cr-1")).willReturn(aResponse().withStatus(500)));
+        assertNull(client(() -> "").getConsentRequest("cr-1"));
+    }
+
+    @Test
+    void approveConsentRequest_postsScopesAndCarriesBearer() {
+        wm.stubFor(post(urlEqualTo("/v1/consent-requests/cr-1/approve")).willReturn(aResponse()
+                .withBody("{\"id\":\"cr-1\",\"userId\":\"alice\",\"parentType\":\"p\",\"childType\":\"c\","
+                        + "\"status\":\"approved\"}")));
+
+        ConsentRequest cr = client(() -> "cp-token").approveConsentRequest("cr-1", List.of("flights:read"));
+
+        assertNotNull(cr);
+        assertTrue(cr.isApproved());
+        wm.verify(postRequestedFor(urlEqualTo("/v1/consent-requests/cr-1/approve"))
+                .withHeader("Authorization", equalTo("Bearer cp-token"))
+                .withRequestBody(matchingJsonPath("$.scopes[0]", equalTo("flights:read"))));
+    }
+
+    @Test
+    void approveConsentRequest_error_failsClosedNull() {
+        wm.stubFor(post(urlEqualTo("/v1/consent-requests/cr-1/approve")).willReturn(aResponse().withStatus(500)));
+        assertNull(client(() -> "").approveConsentRequest("cr-1", List.of("s")));
+    }
+
+    @Test
+    void denyConsentRequest_postsNoBody() {
+        wm.stubFor(post(urlEqualTo("/v1/consent-requests/cr-1/deny")).willReturn(aResponse()
+                .withBody("{\"id\":\"cr-1\",\"userId\":\"alice\",\"parentType\":\"p\",\"childType\":\"c\","
+                        + "\"status\":\"denied\"}")));
+        ConsentRequest cr = client(() -> "").denyConsentRequest("cr-1");
+        assertNotNull(cr);
+        assertTrue(cr.isDenied());
+        wm.verify(postRequestedFor(urlEqualTo("/v1/consent-requests/cr-1/deny")));
+    }
+
+    @Test
+    void denyConsentRequest_error_failsClosedNull() {
+        wm.stubFor(post(urlEqualTo("/v1/consent-requests/cr-1/deny")).willReturn(aResponse().withStatus(500)));
+        assertNull(client(() -> "").denyConsentRequest("cr-1"));
     }
 }

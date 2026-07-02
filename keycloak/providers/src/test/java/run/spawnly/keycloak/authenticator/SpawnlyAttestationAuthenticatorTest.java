@@ -283,6 +283,95 @@ class SpawnlyAttestationAuthenticatorTest {
         verify(ctx).failure(eq(AuthenticationFlowError.INVALID_CLIENT_CREDENTIALS), any());
     }
 
+    // ── Grant-aware liveness matrix (Phase 4) ──────────────────────────────────
+    // On the CIBA paths (grant_type=urn:openid:params:grant-type:ciba, or the
+    // …/ext/ciba/auth backchannel endpoint) the sidecar runs CIBA before the
+    // agent is fully active, so active|pending|awaiting-consent are accepted; a
+    // revoked agent is rejected on EVERY path (so it can never redeem an approved
+    // auth_req_id — real-time revocation starves it).
+
+    private void cibaGrantForm(String clientId) {
+        form.putSingle("client_assertion_type", SpawnlyAttestationAuthenticator.JWT_BEARER_ASSERTION_TYPE);
+        form.putSingle("client_assertion", "the-svid");
+        form.putSingle("client_id", clientId);
+        form.putSingle("grant_type", SpawnlyAttestationAuthenticator.CIBA_GRANT_TYPE);
+        when(realm.getClientByClientId(clientId)).thenReturn(mock(ClientModel.class));
+    }
+
+    @Test
+    void cibaPath_pendingStatus_allowed() {
+        cibaGrantForm("chain-worker");
+        when(registry.getAgent("agent-abc"))
+                .thenReturn(new AgentRecord("agent-abc", "pending", "alice", "chain-worker", "parent-1"));
+
+        authWithVerifier(alwaysOk()).authenticateClient(ctx);
+
+        verify(ctx).success();
+        verify(session).setAttribute(VerifiedAgent.SESSION_ATTR,
+                new VerifiedAgent("alice", SPIFFE, "agent-abc"));
+    }
+
+    @Test
+    void cibaPath_awaitingConsentStatus_allowed() {
+        cibaGrantForm("chain-worker");
+        when(registry.getAgent("agent-abc"))
+                .thenReturn(new AgentRecord("agent-abc", "awaiting-consent", "alice", "chain-worker", "parent-1"));
+
+        authWithVerifier(alwaysOk()).authenticateClient(ctx);
+
+        verify(ctx).success();
+    }
+
+    @Test
+    void cibaPath_activeStatus_allowed() {
+        cibaGrantForm("chain-worker");
+        when(registry.getAgent("agent-abc"))
+                .thenReturn(new AgentRecord("agent-abc", "active", "alice", "chain-worker", "parent-1"));
+
+        authWithVerifier(alwaysOk()).authenticateClient(ctx);
+
+        verify(ctx).success();
+    }
+
+    @Test
+    void cibaPath_revokedStatus_rejected_cannotRedeem() {
+        // The security core of revocation-starves-CIBA: a revoked agent cannot
+        // redeem an approved auth_req_id because it can't even authenticate.
+        cibaGrantForm("chain-worker");
+        when(registry.getAgent("agent-abc"))
+                .thenReturn(new AgentRecord("agent-abc", "revoked", "alice", "chain-worker", "parent-1"));
+
+        authWithVerifier(alwaysOk()).authenticateClient(ctx);
+
+        verify(ctx).failure(eq(AuthenticationFlowError.INVALID_CLIENT_CREDENTIALS), any());
+        verify(ctx, never()).success();
+        verify(session, never()).setAttribute(eq(VerifiedAgent.SESSION_ATTR), any());
+    }
+
+    @Test
+    void statusAllowed_matrix() {
+        // client_credentials: only active
+        org.junit.jupiter.api.Assertions.assertTrue(
+                SpawnlyAttestationAuthenticator.statusAllowed("active", false));
+        org.junit.jupiter.api.Assertions.assertFalse(
+                SpawnlyAttestationAuthenticator.statusAllowed("pending", false));
+        org.junit.jupiter.api.Assertions.assertFalse(
+                SpawnlyAttestationAuthenticator.statusAllowed("awaiting-consent", false));
+        org.junit.jupiter.api.Assertions.assertFalse(
+                SpawnlyAttestationAuthenticator.statusAllowed("revoked", false));
+        // ciba: active|pending|awaiting-consent, NOT revoked
+        org.junit.jupiter.api.Assertions.assertTrue(
+                SpawnlyAttestationAuthenticator.statusAllowed("active", true));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                SpawnlyAttestationAuthenticator.statusAllowed("pending", true));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                SpawnlyAttestationAuthenticator.statusAllowed("awaiting-consent", true));
+        org.junit.jupiter.api.Assertions.assertFalse(
+                SpawnlyAttestationAuthenticator.statusAllowed("revoked", true));
+        org.junit.jupiter.api.Assertions.assertFalse(
+                SpawnlyAttestationAuthenticator.statusAllowed(null, true));
+    }
+
     @Test
     void assertionTypeDetection() {
         org.junit.jupiter.api.Assertions.assertTrue(

@@ -157,20 +157,25 @@ public class SpawnlyAttestationAuthenticator extends AbstractClientAuthenticator
             return;
         }
 
-        // ── Registry liveness gate (Phase 2) ──────────────────────────────────
+        // ── Registry liveness gate (Phase 2 + Phase 4 grant-aware) ─────────────
         // Port of AgentRegistryValidator.cs: look the agent up by its derived
-        // agentId, require it to be registered + `active`, and require a userId
-        // (the human it acts for). A missing agent, wrong status, or missing
-        // userId is invalid_client — the same error surface as the C# validator.
+        // agentId, require it to be registered with an allowed status, and
+        // require a userId (the human it acts for). A missing agent, wrong
+        // status, or missing userId is invalid_client — the same error surface as
+        // the C# validator.
         //
-        // NOTE (Phase 4 seam): the CIBA token-poll path will allow
-        // active|pending|awaiting-consent (AgentRegistryValidator.cs:45). That
-        // path does not run this client authenticator's client_credentials gate,
-        // so it is left untouched here — this method only gates the machine
-        // client_credentials mint. Do not add CIBA statuses to this gate.
+        // GRANT-AWARENESS (Phase 4, AgentRegistryValidator.cs:45): the CIBA paths
+        // — the backchannel auth request and the CIBA token poll — run BEFORE the
+        // agent is fully active (the sidecar drives consent at spawn), so they
+        // accept active|pending|awaiting-consent. The client_credentials mint
+        // keeps requiring `active`. So a REVOKED agent can never redeem an
+        // approved auth_req_id (revoked ∉ the allowed set on any path) — real-time
+        // revocation still starves an approved-but-unredeemed request.
+        boolean cibaPath = isCibaPath(context, params);
         AgentRecord agent = registry.getAgent(identity.agentId());
-        if (agent == null || !"active".equals(agent.status())) {
-            fail(context, "agent " + identity.agentId() + " is not active");
+        if (agent == null || !statusAllowed(agent.status(), cibaPath)) {
+            fail(context, "agent " + identity.agentId() + " status not allowed"
+                    + (cibaPath ? " (ciba)" : " (client_credentials)"));
             return;
         }
         if (agent.userId() == null || agent.userId().isEmpty()) {
@@ -212,6 +217,46 @@ public class SpawnlyAttestationAuthenticator extends AbstractClientAuthenticator
         }
 
         context.success();
+    }
+
+    // ── Grant-aware liveness (Phase 4) ──────────────────────────────────────────
+
+    // The CIBA token-poll grant type (OAuth2Constants.CIBA_GRANT_TYPE on this KC).
+    static final String CIBA_GRANT_TYPE = "urn:openid:params:grant-type:ciba";
+    // The backchannel authentication endpoint path suffix (no grant_type param).
+    static final String CIBA_AUTH_PATH_SUFFIX = "/ext/ciba/auth";
+
+    /** Statuses acceptable to open/redeem a CIBA request; the sidecar runs CIBA
+     * before the agent is fully active. Revoked/terminal is NOT here. */
+    private static final Set<String> CIBA_ALLOWED_STATUSES =
+            Set.of("active", "pending", "awaiting-consent");
+
+    /**
+     * True when this client-auth is for a CIBA path: either the CIBA token-poll
+     * grant (grant_type=urn:openid:params:grant-type:ciba) or the backchannel
+     * auth request endpoint (…/ext/ciba/auth, which carries no grant_type). On
+     * both, the wider status set applies; every other path requires `active`.
+     */
+    static boolean isCibaPath(ClientAuthenticationFlowContext context, MultivaluedMap<String, String> params) {
+        String grantType = params.getFirst(OAuth2Constants.GRANT_TYPE);
+        if (CIBA_GRANT_TYPE.equals(grantType)) {
+            return true;
+        }
+        try {
+            String path = context.getHttpRequest().getUri().getPath();
+            return path != null && path.endsWith(CIBA_AUTH_PATH_SUFFIX);
+        } catch (RuntimeException e) {
+            // No URI context ⇒ treat as a non-CIBA path (fail closed to `active`).
+            return false;
+        }
+    }
+
+    /** Whether {@code status} is acceptable on this path (client_credentials → active only). */
+    static boolean statusAllowed(String status, boolean cibaPath) {
+        if (cibaPath) {
+            return status != null && CIBA_ALLOWED_STATUSES.contains(status);
+        }
+        return "active".equals(status);
     }
 
     private void fail(ClientAuthenticationFlowContext context, String detail) {

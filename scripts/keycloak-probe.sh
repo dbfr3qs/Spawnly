@@ -492,4 +492,215 @@ echo "  HTTP ${R_CODE}, error=${R_ERR}"
 echo "  PASS: chain-revocation covers ancestors (invalid_grant)."
 
 echo ""
+echo "==> [Phase 4] CIBA spawn-consent probe..."
+# Proves the custom SpawnlyAuthenticationChannelProvider + completion poller
+# end-to-end against Keycloak's CIBA backchannel + token-poll:
+#   [10] a consent-gated child opens a backchannel request → PENDING (no stored
+#        consent); the token poll returns authorization_pending;
+#   [11] a dashboard/registry APPROVE releases the token (sub=user:<id>, act.sub
+#        = the child SVID) — real user-bound token, minted by the CIBA poll;
+#   [12] a SECOND run for the SAME edge AUTO-APPROVES from the now-stored consent
+#        (no human step) — resolves on the first poll;
+#   [13] a fresh edge that is DENIED fails the poll with access_denied;
+#   [14] a REVOKED agent cannot redeem an approved auth_req_id (client-auth on the
+#        CIBA poll rejects the revoked agent — revocation starves it).
+#
+# The edge is parentType->childType = travel-planner -> chain-worker. chain-worker
+# is CIBA-enabled (oidc.ciba.grant.enabled) and holds sample-api-a:read; the child
+# is registered WITH a parentId (a real travel-planner agent) so the channel
+# provider resolves parentType from the registry — the edge is bound from the
+# VERIFIED SVID + registry, never from the request's login_hint/params.
+
+CIBA_URL="http://localhost:${KC_LOCAL_PORT}/realms/spawnly/protocol/openid-connect/ext/ciba/auth"
+CIBA_GRANT="urn:openid:params:grant-type:ciba"
+CONSENT_SCOPE="openid sample-api-a:read"
+CIBA_PARENT_TYPE="travel-planner"
+CIBA_CHILD_TYPE="chain-worker"
+
+# Fresh agents so the edge starts with NO stored consent.
+CB_PARENT_ID="cb-parent-$(date +%s)"
+CB_CHILD_ID="cb-child-$(date +%s)"
+CB_PARENT_POD="keycloak-probe-${CB_PARENT_ID}"
+CB_CHILD_POD="keycloak-probe-${CB_CHILD_ID}"
+cleanup_ciba() {
+  kubectl delete pod "$CB_PARENT_POD" "$CB_CHILD_POD" -n "$NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+}
+trap 'cleanup_ciba; cleanup_deleg; restore_template; cleanup' EXIT
+
+echo "==> Launching CIBA parent (${CIBA_PARENT_TYPE}) + child (${CIBA_CHILD_TYPE}) pods..."
+launch_probe_pod "$CB_PARENT_POD" "$CIBA_PARENT_TYPE" "$CB_PARENT_ID"
+launch_probe_pod "$CB_CHILD_POD" "$CIBA_CHILD_TYPE" "$CB_CHILD_ID"
+
+CB_PARENT_REG_SVID=$(fetch_svid_from "$CB_PARENT_POD" registry) || { echo "FAIL: no CIBA parent registry SVID" >&2; exit 1; }
+CB_CHILD_REG_SVID=$(fetch_svid_from "$CB_CHILD_POD" registry) || { echo "FAIL: no CIBA child registry SVID" >&2; exit 1; }
+
+# register_agent_with_parent <type> <svid> <parentId> — self-register with a parent
+# so the registry records the child's parentId (the spawn edge).
+register_agent_with_parent() {
+  local atype="$1" svid="$2" parent="$3" body code
+  body=$(mktemp)
+  code=$($CURL -o "$body" -w '%{http_code}' -X POST "${REGISTRY_URL}/v1/agents" \
+    -H "Authorization: Bearer ${svid}" -H "Content-Type: application/json" \
+    -d "{\"agentType\":\"${atype}\",\"tenantId\":\"${TENANT}\",\"userId\":\"${USER}\",\"parentId\":\"${parent}\"}")
+  if [ "$code" != "201" ] && [ "$code" != "409" ]; then
+    echo "FAIL: register ${atype} (parent=${parent}) returned ${code}" >&2; cat "$body" >&2; exit 1
+  fi
+}
+
+# The parent registers as a root travel-planner; the child registers under it.
+register_agent "$CIBA_PARENT_TYPE" "$CB_PARENT_REG_SVID"
+register_agent_with_parent "$CIBA_CHILD_TYPE" "$CB_CHILD_REG_SVID" "$CB_PARENT_ID"
+echo "  registered parent=${CB_PARENT_ID} (${CIBA_PARENT_TYPE}) child=${CB_CHILD_ID} (${CIBA_CHILD_TYPE}) under parent."
+
+CB_CHILD_SVID=$(fetch_svid_from "$CB_CHILD_POD" keys) || { echo "FAIL: no CIBA child keys SVID" >&2; exit 1; }
+CB_CHILD_SPIFFE=$(decode_payload "$CB_CHILD_SVID" | jq -r '.sub')
+echo "  child spiffe=${CB_CHILD_SPIFFE}"
+
+# ciba_initiate — open a backchannel request; echoes the auth_req_id (exits on fail).
+ciba_initiate() {
+  local body code
+  body=$(mktemp)
+  code=$($CURL -o "$body" -w '%{http_code}' -X POST "$CIBA_URL" \
+    -d "client_id=${CIBA_CHILD_TYPE}" \
+    -d "client_assertion_type=${JWT_BEARER}" --data-urlencode "client_assertion=${CB_CHILD_SVID}" \
+    --data-urlencode "scope=${CONSENT_SCOPE}" \
+    -d "login_hint=user:${USER}" \
+    -d "binding_message=spawnly-consent")
+  if [ "$code" != "200" ]; then
+    echo "FAIL: CIBA backchannel request returned ${code}" >&2; cat "$body" >&2; exit 1
+  fi
+  jq -r '.auth_req_id' <"$body"
+}
+
+# ciba_poll <auth_req_id> — poll the token endpoint once; echoes "HTTPCODE<TAB>BODYFILE".
+ciba_poll() {
+  local arid="$1" body code
+  body=$(mktemp)
+  code=$($CURL -o "$body" -w '%{http_code}' -X POST "$TOKEN_URL" \
+    -d "grant_type=${CIBA_GRANT}" -d "auth_req_id=${arid}" \
+    -d "client_id=${CIBA_CHILD_TYPE}" \
+    -d "client_assertion_type=${JWT_BEARER}" --data-urlencode "client_assertion=${CB_CHILD_SVID}")
+  printf '%s\t%s\n' "$code" "$body"
+}
+
+# registry_consent_request_id_for <externalRef> — the auth_req_id Keycloak returns
+# is a JWE; the registry request is correlated by externalRef = the CIBA
+# authResultId (a DIFFERENT id, internal to Keycloak). So we instead find the
+# PENDING request for this user+edge via the registry list API.
+pending_request_id() {
+  local body
+  body=$(mktemp)
+  $CURL -o "$body" "${REGISTRY_URL}/v1/consent-requests?userId=${USER}&status=pending" "${CP_HDR[@]}"
+  jq -r --arg p "$CIBA_PARENT_TYPE" --arg c "$CIBA_CHILD_TYPE" \
+    'map(select(.parentType==$p and .childType==$c)) | last | .id // empty' <"$body"
+}
+
+echo ""
+echo "==> [10/14] Backchannel request goes PENDING (no stored consent)..."
+ARID=$(ciba_initiate)
+[ -n "$ARID" ] || { echo "FAIL: empty auth_req_id" >&2; exit 1; }
+echo "  auth_req_id acquired."
+IFS=$'\t' read -r P_CODE P_BODY < <(ciba_poll "$ARID")
+P_ERR=$(jq -r '.error' <"$P_BODY" 2>/dev/null || echo "?")
+echo "  first poll: HTTP ${P_CODE}, error=${P_ERR}"
+[ "$P_ERR" = "authorization_pending" ] \
+  || { echo "FAIL: expected authorization_pending, got ${P_ERR}" >&2; cat "$P_BODY" >&2; exit 1; }
+echo "  PASS: consent-gated request is pending."
+
+echo ""
+echo "==> [11/14] Dashboard APPROVE releases the token..."
+CR_ID=""
+for _ in $(seq 1 10); do CR_ID=$(pending_request_id); [ -n "$CR_ID" ] && break; sleep 1; done
+[ -n "$CR_ID" ] || { echo "FAIL: no pending registry consent request found" >&2; exit 1; }
+echo "  registry consent request: ${CR_ID}"
+AP_CODE=$($CURL -o /dev/null -w '%{http_code}' -X POST \
+  "${REGISTRY_URL}/v1/consent-requests/${CR_ID}/approve?userId=${USER}" "${CP_HDR[@]}")
+[ "$AP_CODE" = "200" ] || { echo "FAIL: approve returned ${AP_CODE}" >&2; exit 1; }
+# Poll until the completion poller flips the device code (poller runs every ~2s).
+CB_TOKEN=""
+for _ in $(seq 1 15); do
+  IFS=$'\t' read -r T_CODE T_BODY < <(ciba_poll "$ARID")
+  if [ "$T_CODE" = "200" ]; then CB_TOKEN=$(jq -r '.access_token' <"$T_BODY"); break; fi
+  sleep 2
+done
+[ -n "$CB_TOKEN" ] || { echo "FAIL: token not released after approval" >&2; exit 1; }
+CB_PAYLOAD=$(decode_payload "$CB_TOKEN")
+CB_SUB=$(printf '%s' "$CB_PAYLOAD" | jq -r '.sub')
+CB_ACT_SUB=$(printf '%s' "$CB_PAYLOAD" | jq -r '.act.sub')
+echo "  sub=${CB_SUB}  act.sub=${CB_ACT_SUB}"
+[ "$CB_SUB" = "user:${USER}" ] || { echo "FAIL: CIBA token sub != user:${USER}" >&2; exit 1; }
+[ "$CB_ACT_SUB" = "$CB_CHILD_SPIFFE" ] || { echo "FAIL: CIBA token act.sub != child SVID" >&2; exit 1; }
+echo "  PASS: approval released a user-bound token with the child in act."
+
+echo ""
+echo "==> [12/14] SECOND run for the same edge AUTO-APPROVES from stored consent..."
+ARID2=$(ciba_initiate)
+CB_TOKEN2=""
+for _ in $(seq 1 15); do
+  IFS=$'\t' read -r T2_CODE T2_BODY < <(ciba_poll "$ARID2")
+  if [ "$T2_CODE" = "200" ]; then CB_TOKEN2=$(jq -r '.access_token' <"$T2_BODY"); break; fi
+  # Must NOT require a human approval this time.
+  sleep 2
+done
+[ -n "$CB_TOKEN2" ] || { echo "FAIL: stored consent did not auto-approve the second run" >&2; exit 1; }
+echo "  PASS: stored consent auto-approved the second run (no human step)."
+
+echo ""
+echo "==> [13/14] A DENIED request fails the poll with access_denied..."
+# Revoke the stored consent so the next request goes pending again, then deny it.
+# (Find the consent record id and revoke it.)
+CONSENTS_BODY=$(mktemp)
+$CURL -o "$CONSENTS_BODY" "${REGISTRY_URL}/v1/consents?userId=${USER}" "${CP_HDR[@]}"
+CONSENT_ID=$(jq -r --arg p "$CIBA_PARENT_TYPE" --arg c "$CIBA_CHILD_TYPE" \
+  'map(select(.parentType==$p and .childType==$c)) | last | .id // empty' <"$CONSENTS_BODY" 2>/dev/null || true)
+if [ -n "$CONSENT_ID" ]; then
+  $CURL -o /dev/null -X POST "${REGISTRY_URL}/v1/consents/${CONSENT_ID}/revoke" "${CP_HDR[@]}" || true
+fi
+ARID3=$(ciba_initiate)
+# First poll should be pending again (stored consent revoked).
+IFS=$'\t' read -r D0_CODE D0_BODY < <(ciba_poll "$ARID3")
+D0_ERR=$(jq -r '.error' <"$D0_BODY" 2>/dev/null || echo "?")
+[ "$D0_ERR" = "authorization_pending" ] \
+  || { echo "FAIL: expected pending after consent revoke, got ${D0_ERR}" >&2; cat "$D0_BODY" >&2; exit 1; }
+CR_ID3=""
+for _ in $(seq 1 10); do CR_ID3=$(pending_request_id); [ -n "$CR_ID3" ] && break; sleep 1; done
+[ -n "$CR_ID3" ] || { echo "FAIL: no pending request to deny" >&2; exit 1; }
+$CURL -o /dev/null -X POST "${REGISTRY_URL}/v1/consent-requests/${CR_ID3}/deny?userId=${USER}" "${CP_HDR[@]}"
+DENIED=""
+for _ in $(seq 1 15); do
+  IFS=$'\t' read -r DN_CODE DN_BODY < <(ciba_poll "$ARID3")
+  DN_ERR=$(jq -r '.error' <"$DN_BODY" 2>/dev/null || echo "?")
+  if [ "$DN_ERR" = "access_denied" ]; then DENIED=1; break; fi
+  sleep 2
+done
+[ -n "$DENIED" ] || { echo "FAIL: denial did not surface access_denied" >&2; exit 1; }
+echo "  PASS: denial failed the poll with access_denied."
+
+echo ""
+echo "==> [14/14] A REVOKED agent cannot redeem an approved auth_req_id..."
+# Open a fresh request + approve it, but DON'T redeem yet; then revoke the child.
+# The child can no longer authenticate on the CIBA token poll (grant-aware
+# liveness rejects revoked), so it can never redeem the approved auth_req_id.
+ARID4=$(ciba_initiate)
+CR_ID4=""
+for _ in $(seq 1 10); do CR_ID4=$(pending_request_id); [ -n "$CR_ID4" ] && break; sleep 1; done
+[ -n "$CR_ID4" ] || { echo "FAIL: no pending request to approve" >&2; exit 1; }
+$CURL -o /dev/null -X POST "${REGISTRY_URL}/v1/consent-requests/${CR_ID4}/approve?userId=${USER}" "${CP_HDR[@]}"
+# Now revoke the child agent BEFORE it redeems.
+$CURL -o /dev/null -X POST "${REGISTRY_URL}/v1/agents/${CB_CHILD_ID}/revoke?userId=${USER}"
+STARVED=""
+for _ in $(seq 1 8); do
+  IFS=$'\t' read -r RV_CODE RV_BODY < <(ciba_poll "$ARID4")
+  RV_ERR=$(jq -r '.error' <"$RV_BODY" 2>/dev/null || echo "?")
+  # A revoked agent's client-auth fails ⇒ invalid_client (never a 200 token).
+  if [ "$RV_CODE" != "200" ] && [ "$RV_ERR" = "invalid_client" ]; then STARVED=1; break; fi
+  # If the poller approved the device code first, a redeem would be a 200 — that
+  # would be a FAILURE. Keep trying briefly; a revoked agent must never get 200.
+  [ "$RV_CODE" = "200" ] && { echo "FAIL: revoked agent redeemed an approved auth_req_id!" >&2; exit 1; }
+  sleep 2
+done
+[ -n "$STARVED" ] || { echo "FAIL: revoked agent poll did not surface invalid_client" >&2; cat "$RV_BODY" >&2; exit 1; }
+echo "  PASS: revoked agent cannot redeem an approved auth_req_id (starved)."
+
+echo ""
 echo "==> keycloak-probe: ALL CHECKS PASSED"

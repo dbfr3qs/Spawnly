@@ -211,11 +211,19 @@ resource "keycloak_openid_client_optional_scopes" "idp_consent" {
 # ===========================================================================
 
 locals {
-  # clientId -> { lifespan (null = realm default), optional_scopes = [...] }
+  # clientId -> { lifespan (null = realm default), optional_scopes = [...],
+  #               ciba (enable the CIBA spawn-consent grant on this client) }
+  #
+  # CIBA (Phase 4) is enabled on the CONSENT-GATED agent types only —
+  # chain-worker, flight-search, hotel-search, fx-converter — matching the C#
+  # Config.cs clients that ran the backchannel flow. weather-monitor (no consent)
+  # and travel-planner (the fan-out orchestrator, not itself consent-gated) do
+  # NOT get the CIBA grant.
   machine_clients = {
     "weather-monitor" = {
       lifespan        = null
       optional_scopes = [] # openid only (openid is built-in default)
+      ciba            = false
     }
     "chain-worker" = {
       lifespan = "120"
@@ -223,12 +231,14 @@ locals {
         "sample-api-a:read",
         "orchestrator:spawn",
       ]
+      ciba = true
     }
     "travel-planner" = {
       lifespan = null
       optional_scopes = [
         "orchestrator:spawn",
       ]
+      ciba = false
     }
     "flight-search" = {
       lifespan = "120"
@@ -236,6 +246,7 @@ locals {
         "flights:read",
         "orchestrator:spawn",
       ]
+      ciba = true
     }
     "hotel-search" = {
       lifespan = "120"
@@ -243,6 +254,7 @@ locals {
         "hotels:read",
         "orchestrator:spawn",
       ]
+      ciba = true
     }
     "fx-converter" = {
       lifespan = "120"
@@ -250,6 +262,7 @@ locals {
         "fx:read",
         "orchestrator:spawn",
       ]
+      ciba = true
     }
   }
 }
@@ -287,6 +300,16 @@ resource "keycloak_openid_client" "machine" {
   # itself enforces scope-subset + the registry ceiling. The C# IdP allowed any
   # machine client to exchange, so enabling it on all six preserves parity.
   standard_token_exchange_enabled = true
+
+  # Phase 4: enable the CIBA (Client-Initiated Backchannel Authentication) grant
+  # on the consent-gated machine clients only. `oidc.ciba.grant.enabled` is the
+  # Keycloak client attribute the CibaGrantType checks
+  # (CibaConfig.isOIDCCIBAGrantEnabled); the provider passes it through
+  # generically via `extra_config` (there is no first-class field in 5.8.0). The
+  # realm's delivery mode is POLL (realm.tf), so no client_notification_endpoint
+  # is needed. Enabling CIBA does NOT widen scope — the custom channel provider
+  # binds the spawn edge from the verified SVID and the registry decides consent.
+  extra_config = each.value.ciba ? { "oidc.ciba.grant.enabled" = "true" } : {}
 
   full_scope_allowed = false
 }

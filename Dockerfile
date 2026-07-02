@@ -164,7 +164,28 @@ FROM quay.io/keycloak/keycloak:26.4@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281
 # after an optimized build is ignored).
 ENV KC_DB=dev-file
 COPY --from=build-keycloak-providers /src/target/spawnly-keycloak-providers.jar /opt/keycloak/providers/
-RUN /opt/keycloak/bin/kc.sh build --features=token-exchange --health-enabled=true
+# --spi-ciba-auth-channel-provider-default: select the custom Spawnly CIBA
+# authentication-channel provider as the realm's decoupled channel (Phase 4).
+# This is a BUILD-TIME SPI option on an optimized image (a runtime env is
+# rejected with "build time options ... will NOT be used"), so it is baked here
+# — two channel factories now exist (built-in ciba-http-auth-channel + ours) and
+# the default must be pinned. Ours drives consent through the REGISTRY
+# (dashboard/mobile) rather than an HTTP channel or Keycloak's built-in consent
+# screen, matching IdentityServer.
+# --spi-ciba-login-user-resolver-provider-default: select the custom Spawnly
+# CIBA login-user resolver, which accepts login_hint="user:<id>" (the form the
+# sidecar sends) as well as a bare "<id>", matching the C# CibaUserValidator.
+# Also a build-time SPI option on an optimized image.
+# NOTE (Keycloak 26.4 SPI option syntax): the separator between the SPI name and
+# the option is a DOUBLE dash (`--spi-<spi>--<option>`). The single-dash legacy
+# form (`--spi-<spi>-provider-default`) is NOT treated as a build-time option on
+# 26.4 (it logs "using the legacy format … not being treated as build time") and
+# the default selection silently doesn't take effect.
+RUN /opt/keycloak/bin/kc.sh build \
+    --features=token-exchange \
+    --health-enabled=true \
+    --spi-ciba-auth-channel--provider-default=spawnly-ciba-channel \
+    --spi-ciba-login-user-resolver--provider-default=spawnly-ciba-user-resolver
 
 FROM quay.io/keycloak/keycloak:26.4@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007 AS keycloak
 COPY --from=build-keycloak /opt/keycloak/ /opt/keycloak/
