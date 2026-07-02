@@ -33,6 +33,15 @@ spec:
               value: "http://identity-server:8080"
             - name: IS_JWKS_URL
               value: "http://identity-server:8080/.well-known/openid-configuration/jwks"
+            # MIGRATION-TEMPORARY (Keycloak cutover, removed in Phase 6): the
+            # orchestrator's spawn validator accepts BOTH issuers — IdentityServer
+            # (agent tokens, still minted there) AND the Keycloak realm (human
+            # tokens). Blank KC_ISSUER would drop the Keycloak pair. Phase 6 flips
+            # IS_ISSUER/IS_JWKS_URL to the realm and removes these.
+            - name: KC_ISSUER
+              value: "http://keycloak:8080/realms/spawnly"
+            - name: KC_JWKS_URL
+              value: "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs"
             # Control-plane auth the orchestrator presents to the registry's
             # template + consent endpoints; must match the registry's setting.
             # (NOT used for dashboard→orchestrator spawn auth — that now uses

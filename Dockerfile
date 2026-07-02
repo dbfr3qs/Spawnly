@@ -119,6 +119,41 @@ WORKDIR /app
 COPY --from=build-identity-server /app/publish .
 ENTRYPOINT ["dotnet", "IdentityServer.dll"]
 
+# ── Keycloak (IdP, Phase 0) ────────────────────────────────────────────────
+# Custom Keycloak image that runs `kc.sh build` for an optimized server. Brought
+# up NEXT TO identity-server on kind: humans log in via Keycloak, agents stay on
+# IdentityServer until later phases. Base pinned by DIGEST (26.4) so the build is
+# reproducible and can't drift under a moving tag.
+#
+# Features enabled at BUILD time (they can't be turned on at runtime on an
+# optimized image):
+#   - token-exchange — the gated legacy (v1) token-exchange preview, needed by
+#     Phase 3's delegation extension. NOTE (verified on this pinned 26.4): the
+#     STANDARD token-exchange endpoint (formerly "v2") is now DEFAULT-ON and
+#     needs no flag; only the legacy v1 grant is gated behind `token-exchange`.
+#   - CIBA needs NO build flag on 26.4 — it is a SUPPORTED feature configured
+#     per-realm/client (Phase 4 enables it via Terraform), not a preview flag.
+#     (`--features=ciba` is silently ignored by `kc.sh build` here.)
+# No providers yet (Phase 1 bakes the SPI JARs); NO secrets in any layer — admin
+# creds, client secrets and user passwords all arrive at runtime via Secrets /
+# Terraform variables.
+FROM quay.io/keycloak/keycloak:26.4@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007 AS build-keycloak
+# The realm issuer is fixed to the in-cluster URL by the manifest's hostname
+# env at runtime; the build step only freezes the DB vendor, feature set and the
+# build-time server options. `--health-enabled=true` MUST be baked here: on an
+# optimized image build-time options can't be set at runtime (a runtime
+# KC_HEALTH_ENABLED is IGNORED), and the manifest's readiness probe hits
+# /health/ready on the management port.
+ENV KC_DB=dev-file
+RUN /opt/keycloak/bin/kc.sh build --features=token-exchange --health-enabled=true
+
+FROM quay.io/keycloak/keycloak:26.4@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007 AS keycloak
+COPY --from=build-keycloak /opt/keycloak/ /opt/keycloak/
+# Start the pre-built (optimized) server; the manifest supplies KC_HOSTNAME /
+# KC_HTTP_ENABLED / admin bootstrap creds so no secret is baked here.
+ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]
+CMD ["start", "--optimized"]
+
 # travel-tools MCP server — a resource server (validates Spawnly tokens), NOT an
 # agent, so it does not depend on the @spawnly/sdk. Dev deps pruned after build.
 FROM node:22-alpine AS build-travel-tools-node

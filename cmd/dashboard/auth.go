@@ -24,16 +24,17 @@ var errNoSession = errors.New("no dashboard session")
 
 // Authenticator turns the dashboard into a confidential OIDC relying party.
 //
-// Split-horizon note: tokens carry the in-cluster issuer (http://identity-server:8080)
-// so the resource servers validate agent and human tokens identically — we must
-// NOT change that. The RP therefore does discovery / token exchange / JWKS / id_token
-// verification against InternalURL (the issuer). Only the browser-facing pieces use
-// Authority (the dashboard origin): the authorize redirect and end_session go through
-// the dashboard, which reverse-proxies /connect, /.well-known and /Account to
-// identity-server, so the browser never has to reach the cluster-internal name.
+// Split-horizon note: tokens carry the in-cluster issuer (the Keycloak realm,
+// http://keycloak:8080/realms/spawnly) so the resource servers validate agent
+// and human tokens identically — we must NOT change that. The RP therefore does
+// discovery / token exchange / JWKS / id_token verification against InternalURL
+// (the realm issuer). Only the browser-facing pieces use Authority (the
+// dashboard origin): the authorize redirect and end_session go through the
+// dashboard, which reverse-proxies Keycloak's browser-facing paths (/realms,
+// /resources) so the browser never has to reach the cluster-internal name.
 type Authenticator struct {
 	authority    string // browser-facing dashboard origin, e.g. http://localhost:8090
-	internalURL  string // in-cluster identity-server (the token issuer), e.g. http://identity-server:8080
+	internalURL  string // in-cluster Keycloak realm issuer, e.g. http://keycloak:8080/realms/spawnly
 	clientID     string
 	clientSecret string
 
@@ -96,22 +97,28 @@ func (a *Authenticator) ensure(ctx context.Context) error {
 		}
 
 		// Only the browser-facing authorize redirect uses the dashboard origin
-		// (proxied to identity-server). The token endpoint from discovery is the
-		// internal URL, which the dashboard reaches directly.
+		// (proxied to Keycloak). The token endpoint from discovery is the
+		// internal realm URL, which the dashboard reaches directly. Keycloak's
+		// browser-facing authorize path is
+		// <origin>/realms/<realm>/protocol/openid-connect/auth; the realm path
+		// (/realms/<realm>) is taken from the issuer so it isn't duplicated.
 		endpoint := provider.Endpoint()
-		endpoint.AuthURL = a.authority + "/connect/authorize"
+		endpoint.AuthURL = a.authority + a.realmPath() + "/protocol/openid-connect/auth"
 
 		a.oauth = &oauth2.Config{
 			ClientID:     a.clientID,
 			ClientSecret: a.clientSecret,
 			Endpoint:     endpoint,
 			RedirectURL:  a.authority + "/callback",
-			// openid/profile drive the human's id_token; roles carries the user's
-			// `role` claim (admin gating) into the id_token; orchestrator:read/write
-			// are the delegated authority the access token carries to the
-			// orchestrator; offline_access mints the refresh token that keeps it
-			// fresh for the session's lifetime.
-			Scopes: []string{oidc.ScopeOpenID, "profile", "roles", "orchestrator:read", "orchestrator:write", "offline_access"},
+			// openid/profile drive the human's id_token; spawnly-roles carries the
+			// user's flat `role` claim (admin gating) into the id_token;
+			// orchestrator:read/write are the delegated authority the access token
+			// carries to the orchestrator; offline_access mints the refresh token
+			// that keeps it fresh for the session's lifetime. NOTE: the scope is
+			// "spawnly-roles", not "roles" — Keycloak's built-in `roles` scope
+			// emits realm_access.roles; our flat `role` claim lives in a distinct
+			// scope (see deploy/keycloak/scopes.tf).
+			Scopes: []string{oidc.ScopeOpenID, "profile", "spawnly-roles", "orchestrator:read", "orchestrator:write", "offline_access"},
 		}
 
 		a.verifier = provider.Verifier(&oidc.Config{ClientID: a.clientID})
@@ -236,12 +243,28 @@ func (a *Authenticator) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	clearCookie(w, sessionCookie, forwardedHTTPS(r))
 
-	end := a.authority + "/connect/endsession?post_logout_redirect_uri=" +
+	// Keycloak's browser-facing end-session (RP-initiated logout) endpoint,
+	// proxied through the dashboard origin so the browser stays single-origin.
+	end := a.authority + a.realmPath() + "/protocol/openid-connect/logout?post_logout_redirect_uri=" +
 		url.QueryEscape(a.authority+"/")
 	if hint != "" {
 		end += "&id_token_hint=" + url.QueryEscape(hint)
 	}
 	http.Redirect(w, r, end, http.StatusFound)
+}
+
+// realmPath returns the issuer's path portion (e.g. "/realms/spawnly") so the
+// browser-facing authorize/logout URLs can be built on the dashboard origin
+// without hardcoding the realm name. Keycloak's issuer is
+// <url>/realms/<realm>, so the path is exactly the realm segment the proxy
+// (main.go) forwards to Keycloak. Falls back to "" if the issuer can't be
+// parsed (a misconfigured internalURL surfaces later at discovery anyway).
+func (a *Authenticator) realmPath() string {
+	u, err := url.Parse(a.internalURL)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimRight(u.Path, "/")
 }
 
 // handleMe reports the logged-in user and whether they are an admin (the UI

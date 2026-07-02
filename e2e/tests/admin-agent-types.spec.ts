@@ -1,5 +1,6 @@
 import { test, expect, type Browser, type APIRequestContext } from '@playwright/test';
 import { deleteTemplate, setTemplateStatus } from '../helpers/templates';
+import { login } from '../helpers/auth';
 
 // Admin Agent Types UI — the dashboard's management view for agent templates.
 // Exercises the real UI (click → fill → save) against the admin-gated routes the
@@ -118,13 +119,9 @@ test.describe('admin agent-types UI', () => {
     const ctx = await browser.newContext({ storageState: { cookies: [], origins: [] } });
     const page = await ctx.newPage();
     try {
-      // Real OIDC login as the seeded non-admin viewer.
-      await page.goto('/');
-      await expect(page.locator('#Username')).toBeVisible({ timeout: 30_000 });
-      await page.locator('#Username').fill(VIEWER_USER);
-      await page.locator('#Password').fill(VIEWER_PASS);
-      await page.locator('button[type="submit"]').click();
-      await expect(page.locator('#agent-list')).toBeVisible({ timeout: 30_000 });
+      // Real OIDC login as the seeded non-admin viewer (login() drives the
+      // Keycloak login form and waits for the dashboard shell).
+      await login(page, VIEWER_USER, VIEWER_PASS);
 
       // /api/me must report the viewer as a non-admin — this is the signal that
       // drives the nav gating, so assert it directly (the button ships `hidden`

@@ -11,17 +11,19 @@ function base64url(b: Buffer): string {
 
 // mobileAccessToken mints a user access token the way the native app does: the
 // public `mobile` IdP client's authorization-code + PKCE flow. It reuses the
-// browser's existing IdentityServer session (the suite logs in as alice once),
-// so the /connect/authorize call redirects straight to the app's redirect URI
-// with a code — no second login. The dashboard origin proxies /connect/* to the
-// IdP (single-issuer), so everything goes through the dashboard baseURL.
+// browser's existing Keycloak session (the suite logs in as alice once), so the
+// authorize call redirects straight to the app's redirect URI with a code — no
+// second login. The dashboard origin proxies Keycloak's browser-facing
+// /realms/* endpoints (single-origin), so everything goes through the dashboard
+// baseURL. NOTE: scope carries spawnly-roles (not `roles`) so the flat `role`
+// claim rides, matching mobile/src/config.ts.
 export async function mobileAccessToken(page: Page): Promise<string> {
   const verifier = base64url(randomBytes(32));
   const challenge = base64url(createHash('sha256').update(verifier).digest());
   const redirectUri = 'spawnly://auth';
-  const scope = 'openid orchestrator:read orchestrator:write offline_access';
+  const scope = 'openid spawnly-roles orchestrator:read orchestrator:write offline_access';
 
-  const authorize = await page.request.get('/connect/authorize', {
+  const authorize = await page.request.get('/realms/spawnly/protocol/openid-connect/auth', {
     params: {
       client_id: 'mobile',
       response_type: 'code',
@@ -42,7 +44,7 @@ export async function mobileAccessToken(page: Page): Promise<string> {
   const code = new URL(location).searchParams.get('code');
   if (!code) throw new Error(`no authorization code in ${location}`);
 
-  const token = await page.request.post('/connect/token', {
+  const token = await page.request.post('/realms/spawnly/protocol/openid-connect/token', {
     form: {
       grant_type: 'authorization_code',
       code,

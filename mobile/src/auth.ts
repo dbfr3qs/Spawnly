@@ -24,7 +24,7 @@ async function discovery(): Promise<AuthSession.DiscoveryDocument> {
   return AuthSession.fetchDiscoveryAsync(config.issuer);
 }
 
-// login drives the authorization-code + PKCE flow against IdentityServer. On
+// login drives the authorization-code + PKCE flow against the Keycloak realm. On
 // success the tokens are persisted to OS secure storage (Keychain/Keystore).
 // expo-auth-session generates and verifies the PKCE code_verifier/challenge.
 export async function login(): Promise<boolean> {

@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      containers:
+        - name: keycloak
+          # Optimized custom image (root Dockerfile `keycloak` target): the base
+          # is pinned by digest and `kc.sh build` is baked in, so the container
+          # starts with `start --optimized`.
+          image: agent-keycloak:latest
+          imagePullPolicy: Never
+          args: ["start", "--optimized"]
+          env:
+            # Bootstrap admin — created on first start of an empty DB. Comes from
+            # the `keycloak-admin` Secret that bootstrap.sh generates (never a
+            # baked-in default), mirroring how identityserver keeps its secrets
+            # out of the image. On kind the store is the in-memory dev-file DB, so
+            # the admin is re-bootstrapped on every restart from this Secret.
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-admin
+                  key: username
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-admin
+                  key: password
+            # Plain HTTP inside the cluster (TLS is terminated at the edge, like
+            # identity-server's ASPNETCORE_URLS http listener).
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            # DYNAMIC hostname (no fixed KC_HOSTNAME) so Keycloak derives every
+            # URL — issuer, authorize, token, JWKS, and the login-form action —
+            # from the incoming request's Host header. This is the Keycloak
+            # equivalent of identityserver's split-horizon (issuer = internal
+            # name, browser = dashboard origin), which a FIXED KC_HOSTNAME cannot
+            # provide: in 26.x the token issuer is tied to the frontend hostname,
+            # so a fixed http://keycloak:8080 emits an ABSOLUTE login-form action
+            # on that (browser-unreachable) host and breaks login. With dynamic
+            # hostname:
+            #   - backchannel calls (dashboard/resource servers → keycloak:8080,
+            #     Host: keycloak:8080) mint tokens whose issuer is EXACTLY
+            #     http://keycloak:8080/realms/spawnly — the value every resource
+            #     server and the dual-issuer tokenvalidator shim validate against;
+            #   - browser calls arrive via the dashboard proxy carrying
+            #     Host: <dashboard origin> (the proxy preserves the inbound Host —
+            #     see cmd/dashboard/main.go), so the login page's action + asset
+            #     URLs land on the dashboard origin and stay single-origin.
+            # hostname-strict=false is REQUIRED to let the Host header drive URLs.
+            # NOTE (Phase 7, public/ALB deploy only): there KC_HOSTNAME is set to
+            # the public URL so hostname-v2 pins the frontend origin behind the
+            # ALB. Do NOT set KC_HOSTNAME on kind — it would fix ALL frontend URLs
+            # and ignore the request Host, defeating the dashboard proxy's Host
+            # preservation and pointing the login-form action at the unreachable
+            # http://keycloak:8080.
+            - name: KC_HOSTNAME_STRICT
+              value: "false"
+            # Reverse-proxy header trust. Gated exactly like identity-server's
+            # FORWARDED_HEADERS: OFF on kind (the dashboard talks to Keycloak by
+            # its cluster IP, no forwarding), set to "xforwarded" behind the AWS
+            # ALB so Keycloak trusts X-Forwarded-* for scheme/host. Absent Secret
+            # → env unset → Keycloak's default (no proxy header trust).
+            - name: KC_PROXY_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-proxy
+                  key: proxyHeaders
+                  optional: true
+            # NOTE: health is enabled at BUILD time in the Dockerfile
+            # (`kc.sh build --health-enabled=true`) — on an optimized image a
+            # runtime KC_HEALTH_ENABLED would be ignored — so the /health/ready
+            # probe below works with no extra runtime env.
+          ports:
+            - containerPort: 8080
+          # Keycloak's own liveness/readiness endpoints are served on the
+          # management port 9000 (26.x). Gate readiness on /health/ready so the
+          # bootstrap rollout wait doesn't proceed before the realm can be
+          # applied.
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 60
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: default
+spec:
+  selector:
+    app: keycloak
+  ports:
+    - port: 8080
+      targetPort: 8080

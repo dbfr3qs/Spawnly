@@ -17,6 +17,7 @@ resources:
   - spicedb.yaml
   - registry.yaml
   - identityserver.yaml
+  - keycloak.yaml
   - orchestrator.yaml
   - operator.yaml
   - dashboard.yaml

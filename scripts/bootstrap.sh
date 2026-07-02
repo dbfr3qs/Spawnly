@@ -201,6 +201,25 @@ kubectl create secret generic dashboard-user \
   --from-literal=viewerPassword="viewer" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+# Keycloak bootstrap admin (Phase 0). Keycloak runs NEXT TO identity-server; the
+# realm (deploy/keycloak/) is applied by Terraform further below. The admin
+# credential is generated here (never baked into the image) and reused across
+# re-bootstraps so a mid-session `terraform apply` keeps working. On kind the
+# store is the in-memory dev-file DB, so this admin is re-created from the Secret
+# on every Keycloak restart.
+echo "==> Ensuring keycloak-admin secret..."
+KC_ADMIN_PASSWORD=$(kubectl get secret keycloak-admin -o jsonpath='{.data.password}' 2>/dev/null | base64 -d 2>/dev/null || true)
+if [ -z "$KC_ADMIN_PASSWORD" ]; then
+  KC_ADMIN_PASSWORD=$(openssl rand -hex 24)
+  echo "  generated a new keycloak admin password"
+else
+  echo "  reusing existing keycloak admin password"
+fi
+kubectl create secret generic keycloak-admin \
+  --from-literal=username="admin" \
+  --from-literal=password="${KC_ADMIN_PASSWORD}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 # travel-tools MCP server upstream keys (Duffel/LiteAPI), from mcp/travel-tools/.env
 # — owned by that one service, kept out of the global .env. Created here so the
 # travel-tools pod has them on first start; absent keys just disable that tool.
@@ -223,6 +242,7 @@ kubectl apply -f deploy/manifests/rbac.yaml
 kubectl apply -f deploy/manifests/spicedb.yaml
 kubectl apply -f deploy/manifests/registry.yaml
 kubectl apply -f deploy/manifests/identityserver.yaml
+kubectl apply -f deploy/manifests/keycloak.yaml
 kubectl apply -f deploy/manifests/sample-api-a.yaml
 kubectl apply -f deploy/manifests/sample-api-b.yaml
 kubectl apply -f deploy/manifests/travel-tools.yaml
@@ -241,7 +261,7 @@ kubectl apply -f deploy/manifests/networkpolicy.yaml
 # stale pending CIBA requests from earlier sessions).
 echo "==> Restarting platform deployments to pick up freshly loaded images..."
 kubectl rollout restart \
-  deployment/registry deployment/identity-server \
+  deployment/registry deployment/identity-server deployment/keycloak \
   deployment/sample-api-a deployment/sample-api-b \
   deployment/travel-tools deployment/agent-operator \
   deployment/orchestrator deployment/dashboard
@@ -250,12 +270,72 @@ echo "==> Waiting for all services to be ready..."
 kubectl wait --for=condition=ready pod -l app=spicedb --timeout=120s
 kubectl rollout status deployment/registry --timeout=120s
 kubectl rollout status deployment/identity-server --timeout=120s
+# Keycloak's first start builds/imports the realm DB and can be slower than the
+# .NET IdP, so give it a longer window.
+kubectl rollout status deployment/keycloak --timeout=300s
 kubectl rollout status deployment/sample-api-a --timeout=120s
 kubectl rollout status deployment/sample-api-b --timeout=120s
 kubectl rollout status deployment/travel-tools --timeout=120s
 kubectl rollout status deployment/agent-operator --timeout=120s
 kubectl rollout status deployment/orchestrator --timeout=120s
 kubectl rollout status deployment/dashboard --timeout=120s
+
+# ── Keycloak realm (Terraform) ─────────────────────────────────────────────────
+# Declare the `spawnly` realm (clients/scopes/audiences/roles/users) with the
+# keycloak/keycloak Terraform provider. Runs against a throwaway port-forward to
+# Keycloak's admin API; all secrets are passed as TF vars (the generated admin
+# password, the demo client secrets + alice/viewer passwords that match the
+# `dashboard-user`/manifest values used by the resource servers). Nothing is
+# committed. IdentityServer bring-up above is untouched — agents stay on it.
+#
+# NOTE: on kind, Keycloak uses the in-memory dev-file DB (deploy/manifests/
+# keycloak.yaml), so a keycloak pod restart WIPES the realm — re-run bootstrap
+# to re-apply it (Terraform re-creates clients/scopes/users idempotently).
+echo "==> Applying Keycloak realm via Terraform..."
+KC_TF_DIR="$REPO_ROOT/deploy/keycloak"
+# Run the whole port-forward + apply in a SUBSHELL so its EXIT trap tears down
+# the forward on ANY exit path (success, terraform failure, or set -e abort)
+# without touching any trap the rest of bootstrap.sh relies on.
+(
+  # Forward to a LESS-COMMON local port (18099) to avoid colliding with some
+  # other listener on the conventional 8080 — a stale listener would make curl
+  # succeed against the WRONG process and terraform then apply against it.
+  KC_LOCAL_PORT=18099
+  kubectl port-forward svc/keycloak "${KC_LOCAL_PORT}:8080" >/dev/null 2>&1 &
+  KC_PF_PID=$!
+  trap 'kill "$KC_PF_PID" 2>/dev/null || true' EXIT
+
+  # Wait for the admin API to answer through the forward, then FAIL LOUDLY if it
+  # never did rather than letting the loop fall through into a doomed apply.
+  for _ in $(seq 1 60); do
+    if curl -fsS -o /dev/null "http://localhost:${KC_LOCAL_PORT}/realms/master/.well-known/openid-configuration" 2>/dev/null; then
+      break
+    fi
+    sleep 2
+  done
+  curl -fsS -o /dev/null "http://localhost:${KC_LOCAL_PORT}/realms/master/.well-known/openid-configuration" \
+    || { echo "ERROR: Keycloak admin API not reachable on localhost:${KC_LOCAL_PORT} after 120s" >&2; exit 1; }
+
+  # Pass every TF var via TF_VAR_* ENVIRONMENT rather than `-var` argv: CLI args
+  # are visible in ps / /proc/<pid>/cmdline to any local user while terraform
+  # runs, which would briefly expose the generated admin password and the demo
+  # secrets. Environment is not exposed via ps here (and these are subshell-local
+  # exports, so they don't leak into the rest of bootstrap.sh).
+  export TF_VAR_keycloak_url="http://localhost:${KC_LOCAL_PORT}"
+  export TF_VAR_keycloak_admin_username="admin"
+  export TF_VAR_keycloak_admin_password="${KC_ADMIN_PASSWORD}"
+  export TF_VAR_dashboard_origin="http://localhost:8090"
+  export TF_VAR_dashboard_client_secret="dashboard-secret"
+  export TF_VAR_orchestrator_client_secret="orchestrator-secret"
+  export TF_VAR_idp_consent_client_secret="idp-consent-secret"
+  export TF_VAR_machine_client_secret="placeholder"
+  export TF_VAR_alice_password="alice"
+  export TF_VAR_viewer_password="viewer"
+
+  terraform -chdir="$KC_TF_DIR" init -input=false >/dev/null
+  terraform -chdir="$KC_TF_DIR" apply -input=false -auto-approve
+)
+echo "  Keycloak realm applied (spawnly)."
 
 # ── Secrets ──────────────────────────────────────────────────────────────────
 

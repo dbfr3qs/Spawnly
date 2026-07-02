@@ -21,12 +21,14 @@ spec:
             - name: ORCHESTRATOR_URL
               value: "http://orchestrator:8080"
             # OIDC relying-party config. OIDC_AUTHORITY is the browser-facing
-            # origin (== IdentityServer ISSUER_URI); IDENTITY_INTERNAL_URL is the
-            # in-cluster back-channel to identity-server.
+            # origin; IDENTITY_INTERNAL_URL is the in-cluster back-channel to the
+            # Keycloak realm issuer (also the token issuer the resource servers
+            # validate). The dashboard reverse-proxies Keycloak's browser-facing
+            # /realms/ and /resources/ paths so the browser stays single-origin.
             - name: OIDC_AUTHORITY
               value: "http://localhost:8090"
             - name: IDENTITY_INTERNAL_URL
-              value: "http://identity-server:8080"
+              value: "http://keycloak:8080/realms/spawnly"
             - name: OIDC_CLIENT_ID
               value: "dashboard"
             - name: OIDC_CLIENT_SECRET

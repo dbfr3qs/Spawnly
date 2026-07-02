@@ -1,0 +1,70 @@
+# ===========================================================================
+# Users — mirror identityserver/TestUsers.cs (alice = admin, viewer = no role).
+#
+# Passwords come from TF variables; nothing is committed. Fail-closed: each
+# user is created ONLY when its password var is non-empty (count = 0 otherwise),
+# so a production tfvars can omit the viewer entirely — matching today's
+# "absent password => no user" posture.
+# ===========================================================================
+
+# Realm role `admin`; alice is a member, viewer is not.
+resource "keycloak_role" "admin" {
+  realm_id    = keycloak_realm.spawnly.id
+  name        = "admin"
+  description = "Spawnly administrator (gates the admin UI and orchestrator template management)."
+}
+
+# ---- alice: admin user -----------------------------------------------------
+resource "keycloak_user" "alice" {
+  count = var.alice_password != "" ? 1 : 0
+
+  realm_id = keycloak_realm.spawnly.id
+  username = "alice"
+  enabled  = true
+
+  email          = "alice@example.com"
+  email_verified = true
+  first_name     = "Alice"
+  last_name      = "Admin"
+
+  initial_password {
+    value     = var.alice_password
+    temporary = false
+  }
+}
+
+resource "keycloak_user_roles" "alice_admin" {
+  count = var.alice_password != "" ? 1 : 0
+
+  realm_id = keycloak_realm.spawnly.id
+  user_id  = keycloak_user.alice[0].id
+
+  role_ids = [keycloak_role.admin.id]
+
+  # NON-EXHAUSTIVE: only ensure `admin` is present, do not manage the user's
+  # full role set. Exhaustive (the default) would STRIP the built-in
+  # `default-roles-spawnly` composite role that carries `offline_access` /
+  # `uma_authorization`, which would silently kill offline_access tokens for
+  # alice. See finding #4.
+  exhaustive = false
+}
+
+# ---- viewer: non-admin user ------------------------------------------------
+resource "keycloak_user" "viewer" {
+  count = var.viewer_password != "" ? 1 : 0
+
+  realm_id = keycloak_realm.spawnly.id
+  username = "viewer"
+  enabled  = true
+
+  email          = "viewer@example.com"
+  email_verified = true
+  first_name     = "Vic"
+  last_name      = "Viewer"
+
+  initial_password {
+    value     = var.viewer_password
+    temporary = false
+  }
+  # No admin role — the `role` claim is simply absent for this user.
+}

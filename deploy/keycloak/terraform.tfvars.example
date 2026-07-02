@@ -1,0 +1,22 @@
+# Example tfvars — copy to terraform.tfvars (gitignored) and fill in, or pass
+# each as -var / TF_VAR_* at apply. NO real secrets committed here.
+
+# Connection (bootstrap.sh port-forwards Keycloak and supplies the admin creds).
+keycloak_url            = "http://localhost:8080"
+keycloak_admin_username = "admin"
+keycloak_admin_password = ""
+
+# Human login.
+dashboard_origin        = "http://localhost:8090"
+dashboard_client_secret = ""
+
+# Control-plane clients.
+orchestrator_client_secret = ""
+idp_consent_client_secret  = ""
+
+# Machine clients (Phase 0 placeholder secret; attestation arrives in Phase 1).
+machine_client_secret = ""
+
+# Users — leave a password empty to NOT create that user (fail-closed).
+alice_password  = ""
+viewer_password = ""
