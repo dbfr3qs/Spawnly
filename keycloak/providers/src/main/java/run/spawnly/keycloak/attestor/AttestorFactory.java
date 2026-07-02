@@ -39,13 +39,46 @@ public final class AttestorFactory {
             case "":
             case "spiffe":
                 return new SpireCredentialVerifier(new SpireSvidValidator(spireJwksUrl));
-            // Phase 5 extension points — the AWS verifiers plug in here behind
-            // the same seam, no authenticator change:
-            //   case "aws-sts":    return new StsCredentialVerifier(...);
-            //   case "aws-stsweb": return new StsWebCredentialVerifier(...);
+            // AWS attestors plug in behind the same seam — no authenticator
+            // change. Mirrors identityserver/Program.cs's ATTESTOR switch.
+            case "aws-sts":
+                return new StsCredentialVerifier();
+            case "aws-stsweb":
+                return new StsWebCredentialVerifier(stsWebOptions(config));
             default:
                 throw new IllegalStateException("unknown ATTESTOR '" + attestor + "'");
         }
+    }
+
+    /**
+     * Reads the {@code STSWEB_*} options the way identityserver/Program.cs:42
+     * does: audience defaults to "spawnly"; when {@code STSWEB_JWKS_URL} is
+     * empty but {@code STSWEB_ISSUER} is set, the JWKS URL is derived as
+     * {@code issuer + "/.well-known/jwks.json"}. namespace / service-account /
+     * cluster-ARN default to empty (not enforced), matching today's posture.
+     */
+    static StsWebOptions stsWebOptions(Config.Scope config) {
+        String issuer = resolve(config, "stswebIssuer", "STSWEB_ISSUER", "");
+        String jwksUrl = resolve(config, "stswebJwksUrl", "STSWEB_JWKS_URL", "");
+        if (jwksUrl.isEmpty() && !issuer.isEmpty()) {
+            jwksUrl = trimTrailingSlash(issuer) + "/.well-known/jwks.json";
+        }
+        return new StsWebOptions(
+                jwksUrl,
+                issuer,
+                resolve(config, "stswebAudience", "STSWEB_AUDIENCE", "spawnly"),
+                resolve(config, "stswebNamespace", "STSWEB_NAMESPACE", ""),
+                resolve(config, "stswebServiceAccount", "STSWEB_SERVICE_ACCOUNT", ""),
+                resolve(config, "stswebClusterArn", "STSWEB_CLUSTER_ARN", ""),
+                "");
+    }
+
+    private static String trimTrailingSlash(String s) {
+        int end = s.length();
+        while (end > 0 && s.charAt(end - 1) == '/') {
+            end--;
+        }
+        return s.substring(0, end);
     }
 
     /**

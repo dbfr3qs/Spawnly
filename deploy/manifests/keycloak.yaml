@@ -88,6 +88,45 @@ spec:
               value: "spiffe"
             - name: SPIRE_JWKS_URL
               value: "https://spire-spiffe-oidc-discovery-provider.spire-system/keys"
+            # --- AWS attestor tiers (Phase 5; NOT active on kind) -----------
+            # The seam factory (AttestorFactory) selects among all three
+            # verifiers off ATTESTOR, exactly as identity-server's Program.cs
+            # did. kind stays "spiffe" above; the AWS tiers below are wired on
+            # the EKS/public deploy in spawnly-infra (Phase 7), where the
+            # Keycloak pod runs under IRSA / EKS Pod Identity. The registry's
+            # own attestor (internal/attestor) MUST be set to the SAME tier so
+            # both halves derive the SAME agentId.
+            #
+            # aws-sts — presigned STS GetCallerIdentity. The verifier replays
+            # the caller's presigned URL against AWS STS (STS is the attestor);
+            # agentId = the assumed-role RoleSessionName (operator sets it to
+            # the agentId), subject = the returned ARN. No extra env: the STS
+            # host/action/expiry are validated from the presign itself.
+            # - name: ATTESTOR
+            #   value: "aws-sts"
+            #
+            # aws-stsweb — STS web-identity JWT + EKS Pod Identity. Validates
+            # the sts:GetWebIdentityToken JWT against the account STS issuer's
+            # PUBLIC (TLS-valid) JWKS, then derives agentId from the EKS-set,
+            # cluster-attested principal_tags.kubernetes-pod-name (minus the
+            # "-pod" suffix), NOT from caller-supplied request_tags. subject =
+            # "<eks-cluster-arn or 'eks'>/agent/<agentId>" (path.Base-able for
+            # the act-chain, matching SPIRE). Read exactly like Program.cs:42.
+            # - name: ATTESTOR
+            #   value: "aws-stsweb"
+            # - name: STSWEB_ISSUER          # expected iss (empty = not enforced)
+            #   value: "https://<oidc-issuer-id>.tokens.sts.global.api.aws"
+            # - name: STSWEB_JWKS_URL        # optional; defaults to ISSUER + /.well-known/jwks.json
+            #   value: "https://<oidc-issuer-id>.tokens.sts.global.api.aws/.well-known/jwks.json"
+            # - name: STSWEB_AUDIENCE        # expected aud (default "spawnly")
+            #   value: "spawnly"
+            # - name: STSWEB_NAMESPACE       # expected principal_tags.kubernetes-namespace
+            #   value: "default"
+            # - name: STSWEB_SERVICE_ACCOUNT # expected principal_tags.kubernetes-service-account
+            #   value: "spawnly-agent"
+            # - name: STSWEB_CLUSTER_ARN     # expected principal_tags.eks-cluster-arn
+            #                                # (UNSET ⇒ accept any EKS cluster in the account — logs a warning)
+            #   value: "arn:aws:eks:<region>:<account>:cluster/<name>"
             # ── CIBA spawn-consent (Phase 4) ───────────────────────────────
             # The custom "spawnly-ciba-channel" AuthenticationChannel provider is
             # selected as the realm's CIBA auth channel at BUILD time in the
