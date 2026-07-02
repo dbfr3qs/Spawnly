@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { type Page, type APIResponse } from '@playwright/test';
+import { DEMO_USER, DEMO_PASS } from './auth';
 
 // The mobile-gateway's public surface, port-forwarded by scripts/e2e.sh
 // (svc/mobile-gateway 8080 → localhost:8091). Override with GATEWAY_URL.
@@ -10,51 +11,80 @@ function base64url(b: Buffer): string {
 }
 
 // mobileAccessToken mints a user access token the way the native app does: the
-// public `mobile` IdP client's authorization-code + PKCE flow. It reuses the
-// browser's existing Keycloak session (the suite logs in as alice once), so the
-// authorize call redirects straight to the app's redirect URI with a code — no
-// second login. The dashboard origin proxies Keycloak's browser-facing
-// /realms/* endpoints (single-origin), so everything goes through the dashboard
-// baseURL. NOTE: scope carries spawnly-roles (not `roles`) so the flat `role`
-// claim rides, matching mobile/src/config.ts.
+// public `mobile` IdP client's authorization-code + PKCE flow. It performs a
+// real alice login against Keycloak (rather than relying on browser SSO reuse,
+// which is unreliable on kind: Keycloak's SSO cookies are Secure+SameSite=None
+// and neither Playwright's page.request nor a page navigation reliably sends
+// them over plain http://localhost). The whole flow runs over Node fetch — with
+// full control of the auth-flow cookies — through the dashboard origin, which
+// proxies Keycloak's /realms/* endpoints single-origin. NOTE: scope carries
+// spawnly-roles (not `roles`) so the flat `role` claim rides, matching
+// mobile/src/config.ts. The caller navigates to '/' first, so page.url() yields
+// the dashboard origin.
 export async function mobileAccessToken(page: Page): Promise<string> {
   const verifier = base64url(randomBytes(32));
   const challenge = base64url(createHash('sha256').update(verifier).digest());
   const redirectUri = 'spawnly://auth';
   const scope = 'openid spawnly-roles orchestrator:read orchestrator:write offline_access';
 
-  const authorize = await page.request.get('/realms/spawnly/protocol/openid-connect/auth', {
-    params: {
-      client_id: 'mobile',
-      response_type: 'code',
-      redirect_uri: redirectUri,
-      scope,
-      code_challenge: challenge,
-      code_challenge_method: 'S256',
-      state: base64url(randomBytes(8)),
-    },
-    // Capture the redirect to spawnly://auth (an unfollowable custom scheme)
-    // rather than letting the client choke trying to follow it.
-    maxRedirects: 0,
+  const params = new URLSearchParams({
+    client_id: 'mobile',
+    response_type: 'code',
+    redirect_uri: redirectUri,
+    scope,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+    state: base64url(randomBytes(8)),
   });
-  const location = authorize.headers()['location'];
+
+  const origin = new URL(page.url()).origin;
+
+  // 1. GET authorize → Keycloak renders the login page (200) and sets the
+  //    transient auth-flow cookies (AUTH_SESSION_ID etc.). Grab the login form's
+  //    POST action and carry those cookies to the credential POST.
+  const authPage = await fetch(
+    `${origin}/realms/spawnly/protocol/openid-connect/auth?${params.toString()}`,
+    { redirect: 'manual' },
+  );
+  let location = authPage.headers.get('location');
+  if (!(location && location.startsWith(redirectUri))) {
+    // Not already SSO'd → drive the login form.
+    const html = await authPage.text();
+    const action = html.match(/id="kc-form-login"[\s\S]*?action="([^"]+)"/)?.[1]?.replace(/&amp;/g, '&');
+    if (!action) throw new Error('mobile: could not find the Keycloak login form action on the authorize page');
+    const flowCookies = (authPage.headers.getSetCookie?.() ?? [])
+      .map((c) => c.split(';')[0])
+      .join('; ');
+    // 2. POST alice's credentials → 302 to the app's custom-scheme redirect
+    //    (spawnly://auth?code=…). redirect:'manual' captures the Location
+    //    without following the unfollowable scheme.
+    const loginResp = await fetch(action, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: flowCookies },
+      body: new URLSearchParams({ username: DEMO_USER, password: DEMO_PASS }).toString(),
+      redirect: 'manual',
+    });
+    location = loginResp.headers.get('location');
+  }
   if (!location || !location.startsWith(redirectUri)) {
-    throw new Error(`authorize did not redirect to the app (status ${authorize.status()}, location ${location}); is the alice session present and the mobile client configured?`);
+    throw new Error(`mobile login did not redirect to the app (location ${location}); is the mobile client configured?`);
   }
   const code = new URL(location).searchParams.get('code');
   if (!code) throw new Error(`no authorization code in ${location}`);
 
-  const token = await page.request.post('/realms/spawnly/protocol/openid-connect/token', {
-    form: {
+  const tokenResp = await fetch(`${origin}/realms/spawnly/protocol/openid-connect/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
       grant_type: 'authorization_code',
       code,
       redirect_uri: redirectUri,
       client_id: 'mobile',
       code_verifier: verifier,
-    },
+    }).toString(),
   });
-  if (!token.ok()) throw new Error(`token exchange failed: ${token.status()} ${await token.text()}`);
-  const body = await token.json();
+  if (!tokenResp.ok) throw new Error(`token exchange failed: ${tokenResp.status} ${await tokenResp.text()}`);
+  const body = await tokenResp.json();
   if (!body.access_token) throw new Error('token response missing access_token');
   return body.access_token as string;
 }

@@ -41,32 +41,31 @@ spec:
             # identity-server's ASPNETCORE_URLS http listener).
             - name: KC_HTTP_ENABLED
               value: "true"
-            # DYNAMIC hostname (no fixed KC_HOSTNAME) so Keycloak derives every
-            # URL — issuer, authorize, token, JWKS, and the login-form action —
-            # from the incoming request's Host header. This is the Keycloak
-            # equivalent of identityserver's split-horizon (issuer = internal
-            # name, browser = dashboard origin), which a FIXED KC_HOSTNAME cannot
-            # provide: in 26.x the token issuer is tied to the frontend hostname,
-            # so a fixed http://keycloak:8080 emits an ABSOLUTE login-form action
-            # on that (browser-unreachable) host and breaks login. With dynamic
-            # hostname:
-            #   - backchannel calls (dashboard/resource servers → keycloak:8080,
-            #     Host: keycloak:8080) mint tokens whose issuer is EXACTLY
-            #     http://keycloak:8080/realms/spawnly — the value every resource
-            #     server and the dual-issuer tokenvalidator shim validate against;
-            #   - browser calls arrive via the dashboard proxy carrying
-            #     Host: <dashboard origin> (the proxy preserves the inbound Host —
-            #     see cmd/dashboard/main.go), so the login page's action + asset
-            #     URLs land on the dashboard origin and stay single-origin.
-            # hostname-strict=false is REQUIRED to let the Host header drive URLs.
-            # NOTE (Phase 7, public/ALB deploy only): there KC_HOSTNAME is set to
-            # the public URL so hostname-v2 pins the frontend origin behind the
-            # ALB. Do NOT set KC_HOSTNAME on kind — it would fix ALL frontend URLs
-            # and ignore the request Host, defeating the dashboard proxy's Host
-            # preservation and pointing the login-form action at the unreachable
-            # http://keycloak:8080.
-            - name: KC_HOSTNAME_STRICT
-              value: "false"
+            # FIXED frontend hostname + DYNAMIC backchannel — the correct
+            # Keycloak-behind-a-proxy model. In 26.x the token ISSUER is tied to
+            # the FRONTEND hostname and is stamped from the request that created
+            # the auth session — i.e. the BROWSER's request (arriving via the
+            # dashboard proxy), NOT the backchannel token-exchange call. So a
+            # dynamic hostname makes browser-flow tokens carry the dashboard
+            # origin while backchannel (agent) tokens carry keycloak:8080 — a
+            # SPLIT issuer that breaks id_token verification and the resource
+            # servers. Instead we PIN the frontend hostname (⇒ issuer +
+            # login-form action + asset URLs) to the dashboard origin, which the
+            # browser reaches through the single-origin proxy, and let BACKCHANNEL
+            # endpoints (token/JWKS/introspection) resolve dynamically from the
+            # request Host so in-cluster callers still hit keycloak:8080 directly.
+            #   - issuer (ALL tokens, browser + backchannel) =
+            #     http://localhost:8090/realms/spawnly — the single value every
+            #     resource server + the dual-issuer tokenvalidator shim validate;
+            #   - token/JWKS endpoints resolve to keycloak:8080 for in-cluster
+            #     backchannel callers (dashboard, resource servers).
+            # NOTE (Phase 7, public/ALB deploy): KC_HOSTNAME becomes the public
+            # https origin (e.g. https://spawnly.run) with the same backchannel-
+            # dynamic setting; the issuer is then https://spawnly.run/realms/spawnly.
+            - name: KC_HOSTNAME
+              value: "http://localhost:8090"
+            - name: KC_HOSTNAME_BACKCHANNEL_DYNAMIC
+              value: "true"
             # Reverse-proxy header trust. Gated exactly like identity-server's
             # FORWARDED_HEADERS: OFF on kind (the dashboard talks to Keycloak by
             # its cluster IP, no forwarding), set to "xforwarded" behind the AWS

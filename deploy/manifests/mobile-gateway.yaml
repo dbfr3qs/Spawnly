@@ -31,9 +31,11 @@ spec:
               value: "http://identity-server:8080/.well-known/openid-configuration/jwks"
             # MIGRATION-TEMPORARY (Keycloak cutover, removed in Phase 6): accept
             # BOTH the IdentityServer issuer and the Keycloak realm issuer so a
-            # mobile token from either IdP validates. Mirrors orchestrator.yaml.
+            # mobile token from either IdP validates. Mirrors orchestrator.yaml —
+            # KC_ISSUER is the fixed frontend origin (KC_HOSTNAME), KC_JWKS_URL the
+            # in-cluster backchannel host.
             - name: KC_ISSUER
-              value: "http://keycloak:8080/realms/spawnly"
+              value: "http://localhost:8090/realms/spawnly"
             - name: KC_JWKS_URL
               value: "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs"
             # The mobile access token carries aud=orchestrator and the same

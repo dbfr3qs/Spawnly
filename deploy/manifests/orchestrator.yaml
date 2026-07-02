@@ -38,8 +38,11 @@ spec:
             # (agent tokens, still minted there) AND the Keycloak realm (human
             # tokens). Blank KC_ISSUER would drop the Keycloak pair. Phase 6 flips
             # IS_ISSUER/IS_JWKS_URL to the realm and removes these.
+            # KC_ISSUER is the FIXED frontend origin Keycloak stamps on every
+            # token (KC_HOSTNAME); KC_JWKS_URL is the in-cluster backchannel host
+            # (KC_HOSTNAME_BACKCHANNEL_DYNAMIC) the orchestrator fetches keys from.
             - name: KC_ISSUER
-              value: "http://keycloak:8080/realms/spawnly"
+              value: "http://localhost:8090/realms/spawnly"
             - name: KC_JWKS_URL
               value: "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs"
             # Control-plane auth the orchestrator presents to the registry's

@@ -87,10 +87,18 @@ func NewAuthenticator(authority, internalURL, clientID, clientSecret string) *Au
 // the listener is already up and identity-server has had time to come ready.
 func (a *Authenticator) ensure(ctx context.Context) error {
 	a.once.Do(func() {
-		// Discovery, token exchange, JWKS and id_token verification all run
-		// against the internal URL, which is the token issuer — so they match
-		// with no issuer-rewriting tricks.
-		provider, err := oidc.NewProvider(ctx, a.internalURL)
+		// Split-horizon under Keycloak's fixed-frontend-hostname model: the
+		// token issuer is the dashboard ORIGIN (KC_HOSTNAME), but the dashboard
+		// reaches Keycloak in-cluster at internalURL (keycloak:8080). Fetch
+		// discovery from internalURL yet EXPECT the issuer to be the dashboard
+		// origin, so wrap the ctx to override go-oidc's issuer==discovery-URL
+		// check. Backchannel endpoints (token/JWKS) still come back as
+		// keycloak:8080 (KC_HOSTNAME_BACKCHANNEL_DYNAMIC), which the dashboard
+		// reaches directly; only the browser-facing authorize URL uses the
+		// origin (overridden below). The id_token's iss is the origin, so the
+		// verifier (built from this provider) checks against the origin too.
+		issuerURL := a.authority + a.realmPath()
+		provider, err := oidc.NewProvider(oidc.InsecureIssuerURLContext(ctx, issuerURL), a.internalURL)
 		if err != nil {
 			a.initErr = fmt.Errorf("oidc discovery: %w", err)
 			return
