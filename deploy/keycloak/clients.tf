@@ -195,8 +195,12 @@ resource "keycloak_openid_client_optional_scopes" "idp_consent" {
 }
 
 # ===========================================================================
-# Machine (agent) clients — confidential client-credentials with a PLACEHOLDER
-# secret shared via var.machine_client_secret (attestation auth is Phase 1).
+# Machine (agent) clients — confidential client-credentials authenticated by
+# the custom "spawnly-attestation" client authenticator (Phase 1). An agent
+# presents its SPIFFE JWT-SVID as a client_assertion; the SPI verifies it and
+# resolves the client by client_id — there is NO client secret in this path
+# (the authenticator is not secret-based). The verified {subject, agentId} is
+# stored in client-session notes for the Phase 2 identity mappers.
 #
 # access_token_lifespan = "120" where Config.cs sets AccessTokenLifetime=120
 # (chain-worker, flight-search, hotel-search, fx-converter). weather-monitor
@@ -262,9 +266,14 @@ resource "keycloak_openid_client" "machine" {
   implicit_flow_enabled        = false
   direct_access_grants_enabled = false
 
-  # Phase 0 placeholder secret; Phase 1 swaps these to the attestation
-  # client authenticator.
-  client_secret = var.machine_client_secret
+  # Phase 1: authenticate with the custom attestation SPI, NOT a client secret.
+  # The provider id must match SpawnlyAttestationAuthenticator.PROVIDER_ID
+  # (registered via META-INF/services in keycloak/providers). A client_secret is
+  # still set (kept from var.machine_client_secret) but is never used on this
+  # authenticator path — it exists only so the client is well-formed and to
+  # avoid a spurious secret-regeneration diff.
+  client_authenticator_type = "spawnly-attestation"
+  client_secret             = var.machine_client_secret
 
   access_token_lifespan = each.value.lifespan
 

@@ -134,9 +134,24 @@ ENTRYPOINT ["dotnet", "IdentityServer.dll"]
 #   - CIBA needs NO build flag on 26.4 — it is a SUPPORTED feature configured
 #     per-realm/client (Phase 4 enables it via Terraform), not a preview flag.
 #     (`--features=ciba` is silently ignored by `kc.sh build` here.)
-# No providers yet (Phase 1 bakes the SPI JARs); NO secrets in any layer — admin
-# creds, client secrets and user passwords all arrive at runtime via Secrets /
-# Terraform variables.
+# The Spawnly SPI provider JARs (Phase 1: the attestation client authenticator
+# + SPIFFE verifier behind the ATTESTOR seam) are built here and baked in below.
+# JARs ONLY — NO secrets in any layer: admin creds, client secrets and user
+# passwords all arrive at runtime via Secrets / Terraform variables.
+
+# ── build-keycloak-providers: compile the custom SPI JAR ───────────────────
+# Maven build of keycloak/providers (Java 17). Dependencies are `provided`
+# (Keycloak ships them), so the output is a thin providers-only JAR with no
+# shaded deps. Tests run in CI, not here (kept the image build fast + offline-
+# capable of downloading only compile deps).
+FROM maven:3.9-eclipse-temurin-17 AS build-keycloak-providers
+WORKDIR /src
+COPY keycloak/providers/pom.xml .
+# Warm the dependency cache in its own layer so source-only edits don't re-fetch.
+RUN mvn -q -e -B dependency:go-offline || true
+COPY keycloak/providers/src ./src
+RUN mvn -q -B -DskipTests package
+
 FROM quay.io/keycloak/keycloak:26.4@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007 AS build-keycloak
 # The realm issuer is fixed to the in-cluster URL by the manifest's hostname
 # env at runtime; the build step only freezes the DB vendor, feature set and the
@@ -144,7 +159,11 @@ FROM quay.io/keycloak/keycloak:26.4@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281
 # optimized image build-time options can't be set at runtime (a runtime
 # KC_HEALTH_ENABLED is IGNORED), and the manifest's readiness probe hits
 # /health/ready on the management port.
+# The provider JAR MUST be copied into /opt/keycloak/providers/ BEFORE
+# `kc.sh build` so the SPI is compiled into the optimized image (a JAR added
+# after an optimized build is ignored).
 ENV KC_DB=dev-file
+COPY --from=build-keycloak-providers /src/target/spawnly-keycloak-providers.jar /opt/keycloak/providers/
 RUN /opt/keycloak/bin/kc.sh build --features=token-exchange --health-enabled=true
 
 FROM quay.io/keycloak/keycloak:26.4@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007 AS keycloak

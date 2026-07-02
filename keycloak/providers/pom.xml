@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>run.spawnly</groupId>
+  <artifactId>spawnly-keycloak-providers</artifactId>
+  <version>1.0.0</version>
+  <packaging>jar</packaging>
+  <name>Spawnly Keycloak SPI providers</name>
+
+  <!--
+    Custom Keycloak SPI providers implementing Spawnly's identity behaviour,
+    ported from identityserver/ (Duende C#). Phase 1 delivers the pluggable
+    attestation seam + the SPIFFE credential verifier + the custom client
+    authenticator ("spawnly-attestation"). Later phases add the registry-driven
+    identity mappers, RFC 8693 token exchange, CIBA, and the AWS attestors.
+
+    DEPENDENCY DIRECTION: this code depends only on the platform's neutral
+    contracts (the SPIRE JWKS HTTP surface + the SPIFFE credential format) and
+    on Keycloak's SPI, never the reverse — no platform service depends on this.
+  -->
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.release>17</maven.compiler.release>
+    <!-- Locked to the Keycloak baked into the root Dockerfile (26.4.7). -->
+    <keycloak.version>26.4.7</keycloak.version>
+    <junit.version>5.10.2</junit.version>
+    <wiremock.version>3.9.1</wiremock.version>
+    <nimbus.version>9.40</nimbus.version>
+  </properties>
+
+  <dependencies>
+    <!-- Keycloak SPI: provided (Keycloak ships these on its own classpath). -->
+    <dependency>
+      <groupId>org.keycloak</groupId>
+      <artifactId>keycloak-server-spi</artifactId>
+      <version>${keycloak.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.keycloak</groupId>
+      <artifactId>keycloak-server-spi-private</artifactId>
+      <version>${keycloak.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.keycloak</groupId>
+      <artifactId>keycloak-services</artifactId>
+      <version>${keycloak.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.keycloak</groupId>
+      <artifactId>keycloak-core</artifactId>
+      <version>${keycloak.version}</version>
+      <scope>provided</scope>
+    </dependency>
+
+    <!-- Tests -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.wiremock</groupId>
+      <artifactId>wiremock</artifactId>
+      <version>${wiremock.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+      <version>5.12.0</version>
+      <scope>test</scope>
+    </dependency>
+    <!-- Supplies a jakarta.ws.rs RuntimeDelegate at test time so
+         ClientAuthUtil.errorResponse (which builds a JAX-RS Response) works in
+         the unit JVM; at runtime Keycloak's own RESTEasy provides it. -->
+    <dependency>
+      <groupId>org.jboss.resteasy</groupId>
+      <artifactId>resteasy-core</artifactId>
+      <version>6.2.9.Final</version>
+      <scope>test</scope>
+    </dependency>
+    <!-- Nimbus is TEST-ONLY: used to mint signed JWT-SVIDs + serve a JWKS in
+         the unit tests. Production validation uses Keycloak's own crypto
+         (TokenVerifier/JWKParser), so nimbus is never on the runtime classpath
+         and never baked into the provider JAR. -->
+    <dependency>
+      <groupId>com.nimbusds</groupId>
+      <artifactId>nimbus-jose-jwt</artifactId>
+      <version>${nimbus.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>spawnly-keycloak-providers</finalName>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-resources-plugin</artifactId>
+        <version>3.3.1</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.1</version>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>

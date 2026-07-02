@@ -77,6 +77,22 @@ spec:
                   name: keycloak-proxy
                   key: proxyHeaders
                   optional: true
+            # ── Attestation (Phase 1) ──────────────────────────────────────
+            # The custom "spawnly-attestation" client authenticator reads these
+            # exactly as identity-server does. ATTESTOR selects the credential
+            # verifier behind the seam (spiffe default; aws-sts/aws-stsweb in
+            # Phase 5; unknown = hard fail at startup). SPIRE_JWKS_URL is the
+            # SPIRE OIDC discovery provider JWKS (self-signed TLS, trusted
+            # in-cluster); mirror identity-server's value.
+            - name: ATTESTOR
+              value: "spiffe"
+            - name: SPIRE_JWKS_URL
+              value: "https://spire-spiffe-oidc-discovery-provider.spire-system/keys"
+            # DEBUG-level logging for the Spawnly SPI providers so attestation
+            # verification failures (bad signature, JWKS fetch, expiry) surface
+            # in the pod log. Root stays INFO. Harmless to keep on kind.
+            - name: KC_LOG_LEVEL
+              value: "INFO,run.spawnly:debug"
             # NOTE: health is enabled at BUILD time in the Dockerfile
             # (`kc.sh build --health-enabled=true`) — on an optimized image a
             # runtime KC_HEALTH_ENABLED would be ignored — so the /health/ready
