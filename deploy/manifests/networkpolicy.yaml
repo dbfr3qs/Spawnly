@@ -7,9 +7,9 @@
 #  - INGRESS ONLY. No egress rules, so pods keep full outbound + DNS — egress
 #    default-deny is the classic way to break a cluster and is deliberately avoided.
 #  - Only registry / orchestrator / spicedb are selected. Every other pod
-#    (dashboard, identity-server, sample-apis, travel-tools, agents) is left
+#    (dashboard, keycloak, sample-apis, travel-tools, agents) is left
 #    untouched and fully reachable — small blast radius. dashboard stays open as
-#    the OIDC-fronted public entry; identity-server stays open because its JWKS is
+#    the OIDC-fronted public entry; keycloak stays open because its JWKS is
 #    fetched by nearly every token-validating service.
 #  - Agent pods are matched by the operator-stamped `agent-platform.io/managed`
 #    label (internal/operator/reconciler.go buildPod).
@@ -21,15 +21,15 @@
 #    real access control stays SVID/token auth at each endpoint (Phase 0/1 work).
 #    This raises the cost of lateral movement from an already-running unprivileged
 #    pod; it is not a substitute for endpoint auth.
-#  - identity-server, dashboard, sample-apis, travel-tools, and ALL egress are
+#  - keycloak, dashboard, sample-apis, travel-tools, and ALL egress are
 #    intentionally left open (each is independently token/SVID-authenticated, and
-#    egress default-deny would break DNS/JWKS/SpiceDB/AI calls). identity-server
+#    egress default-deny would break DNS/JWKS/SpiceDB/AI calls). keycloak
 #    (token minting + JWKS fan-out) is the most sensitive unpoliced surface.
 #
 # CNI caveats (enforcement is CNI-dependent — validate on the target):
 #  - RECENT kindnet enforces NetworkPolicy: verified on a local `make bootstrap`
 #    cluster — a rogue pod (no allow-listed label) was blocked from registry:8080
-#    (8s drop) while still reaching the unpoliced identity-server, and an
+#    (8s drop) while still reaching the unpoliced keycloak, and an
 #    allow-listed caller plus a real spawn worked. Older kindnet did not enforce,
 #    so treat it as version-dependent. On EKS, enforcement requires the AWS VPC
 #    CNI network-policy controller to be ENABLED on the addon, not just installed.
@@ -51,8 +51,9 @@ spec:
     - Ingress
   ingress:
     # orchestrator (templates/agents/subtree/consent), operator (Complete/Fail
-    # PATCH), identity-server (CIBA/spawn-policy/consent lookups during token
-    # minting), and agent sidecars (selfRegister, updateStatus, events).
+    # PATCH), keycloak (liveness/spawn-policy/consent lookups during token
+    # minting — the IdP does the registry lookups at the token endpoint), and
+    # agent sidecars (selfRegister, updateStatus, events).
     - from:
         - podSelector:
             matchLabels:
@@ -62,7 +63,7 @@ spec:
               app: agent-operator
         - podSelector:
             matchLabels:
-              app: identity-server
+              app: keycloak
         - podSelector:
             matchLabels:
               agent-platform.io/managed: "true"

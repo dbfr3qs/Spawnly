@@ -23,8 +23,9 @@ revocable in real time, and (optionally) gated on human consent.
   AgentWorkload CRD reconciler that builds pods), `dashboard` (browser UI).
 - **Identity:** SPIRE issues each pod a **JWT-SVID** via the SPIFFE Workload API
   (no secrets on disk). That SVID is the agent's proof of who it is.
-- **Tokens:** IdentityServer (Duende) verifies the SVID and mints an access
-  token whose `sub` is the human user and whose `act` is the agent.
+- **Tokens:** Keycloak (with Spawnly's custom SPI providers in
+  `keycloak/providers/`) verifies the SVID and mints an access token whose `sub`
+  is the human user and whose `act` is the agent.
 - **Authorization:** SpiceDB holds the relationships; resource servers check it
   on every call, so revocation is real-time.
 - **Sidecar:** runs next to the agent, owns identity + token minting + the
@@ -42,13 +43,13 @@ code is the truth. After explaining, offer to **show it live** on the cluster.
 | Concept | Read these first |
 |---|---|
 | Agent identity / attestation | `internal/operator/reconciler.go` (buildPod: pod labels + the `csi.spiffe.io` workload-API mount + `SPIFFE_ENDPOINT_SOCKET`), `deploy/spire/clusterspiffeid.yaml` (the SPIFFE ID templates), `cmd/agent-sidecar/main.go` (`fetchJWT` → `workloadapi.FetchJWTSVID`) |
-| Token minting (client_credentials) | `identityserver/AgentRegistryValidator.cs` (derives agentId from the SVID, sets `sub=user:<id>` + `act`), `identityserver/SpireClientSecretValidator.cs` (verifies the SVID against SPIRE's JWKS), [token-minting docs](https://docs.spawnly.run/internals/token-minting/) |
-| Spawn consent (CIBA) | [spawn-consent docs](https://docs.spawnly.run/internals/spawn-consent/), `identityserver/CibaRequestValidator.cs` (binds the request to a registry-derived spawn edge), `identityserver/CibaConsentNotificationService.cs` (auto-approve vs. prompt), `identityserver/CibaCompletionService.cs` (records the grant + releases pending requests for the edge), `cmd/agent-sidecar/ciba.go` (the sidecar driver) |
-| Mobile consent | [mobile-ciba docs](https://docs.spawnly.run/internals/mobile-ciba/), `cmd/mobile-gateway/` + `internal/mobilegateway/` (user-token consent proxy to the orchestrator, device registry, `/internal/notify` push fan-out on :8081, `/me/stream` SSE on :8080), `mobile/` (Expo app), the public PKCE `mobile` client in `identityserver/Config.cs`. The phone answers the SAME registry-owned consent request as the dashboard — `NOTIFIER=dev` streams it locally (no cloud creds), `fcmapns` pushes on AWS |
-| Delegation / token-exchange | `identityserver/TokenExchangeGrantValidator.cs`, the registry spawn-policy handler in `cmd/registry/main.go` (`allowedChildTypes`, `maxDepth`, `childPolicies`) |
+| Token minting (client_credentials) | `keycloak/providers/src/main/java/run/spawnly/keycloak/authenticator/SpawnlyAttestationAuthenticator.java` (verifies the SVID via the attestor seam, registry liveness gate, binds SVID→client), `keycloak/providers/.../mapper/SpawnlyIdentityMapper.java` (sets `sub=user:<id>` + `act`), `keycloak/providers/.../attestor/SpireCredentialVerifier.java` (verifies the SVID against SPIRE's JWKS), [token-minting docs](https://docs.spawnly.run/internals/token-minting/) |
+| Spawn consent (CIBA) | [spawn-consent docs](https://docs.spawnly.run/internals/spawn-consent/), `keycloak/providers/.../ciba/SpawnlyAuthenticationChannelProvider.java` (binds the request to a registry-derived spawn edge, auto-approve vs. prompt), `keycloak/providers/.../ciba/SpawnlyConsentCompletionPoller.java` (polls the registry, completes/fails the CIBA request, records the grant), `keycloak/providers/.../ciba/SpawnlyCibaLoginUserResolver.java` (`login_hint`→user), `cmd/agent-sidecar/ciba.go` (the sidecar driver) |
+| Mobile consent | [mobile-ciba docs](https://docs.spawnly.run/internals/mobile-ciba/), `cmd/mobile-gateway/` + `internal/mobilegateway/` (user-token consent proxy to the orchestrator, device registry, `/internal/notify` push fan-out on :8081, `/me/stream` SSE on :8080), `mobile/` (Expo app), the public PKCE `mobile` client in `deploy/keycloak/clients.tf`. The phone answers the SAME registry-owned consent request as the dashboard — `NOTIFIER=dev` streams it locally (no cloud creds), `fcmapns` pushes on AWS |
+| Delegation / token-exchange | `keycloak/providers/.../exchange/SpawnlyTokenExchangeProvider.java`, the registry spawn-policy handler in `cmd/registry/main.go` (`allowedChildTypes`, `maxDepth`, `childPolicies`) |
 | Revoke / resume cascade | `cmd/registry/main.go` (`subtree()`, `revokeNode`, `resumeNode`) — drops/restores SpiceDB authority across an agent's whole descendant subtree |
 | Agent ownership scoping | A user only sees/acts on agents whose record `UserID` is theirs. Enforced via `?userId=` (the asserted session user): `agentOwnedBy` in `cmd/registry/main.go` gates revoke/resume/dismiss/subtree; the orchestrator (`cmd/orchestrator/main.go`, `ownsAgent`) gates the list + events/logs/message; the dashboard injects `auth.user(r)` and PathEscapes the id (`agentOpTarget`) so a crafted id can't smuggle a different userId. Deny = 404 (no existence oracle) |
-| Authenticated spawn | `cmd/orchestrator/main.go` `POST /spawn` derives identity, never trusts the body: agent path validates an `aud=orchestrator` JWT (`internal/tokenvalidator`) → `userId` from `sub`, `parentId` from `act`; dashboard path uses the `X-Control-Plane-Token` header. Audience/scope from `identityserver/Config.cs` (`orchestrator` ApiResource + `orchestrator:spawn` scope); SDK `spawn()` mints the token |
+| Authenticated spawn | `cmd/orchestrator/main.go` `POST /spawn` derives identity, never trusts the body: agent path validates an `aud=orchestrator` JWT (`internal/tokenvalidator`) → `userId` from `sub`, `parentId` from `act`; dashboard path uses the `X-Control-Plane-Token` header. Audience/scope from `deploy/keycloak/scopes.tf` (`orchestrator` audience + `orchestrator:spawn` scope); SDK `spawn()` mints the token |
 | Tenancy / global scope | `deploy/spire/clusterspiffeid.yaml` (tenant vs. global ID templates), the registry register handler (tenant tuples skipped for global agents) |
 | Lifecycle events | `cmd/agent-sidecar/main.go` + `internal/events` — the neutral event taxonomy (`svid_fetched`, `token_issued`, `work_ok`, `work_denied`, `consent_requested`, `consent_granted`, `consent_denied`) the dashboard and tests read |
 
@@ -68,7 +69,7 @@ code is the truth. After explaining, offer to **show it live** on the cluster.
 deploy + seed), `demo`, `dash` (port-forward dashboard), `e2e`, `reseed`
 (re-seed templates — the registry store is in-memory and resets on restart),
 `redeploy-<svc>` (rebuild+load+roll a Go service: registry, orchestrator,
-operator, dashboard, sample-api, identity-server), `reload-<agent>` (rebuild+load
+operator, dashboard, sample-api), `reload-<agent>` (rebuild+load
 a TypeScript agent image), `reload-sidecar`, `logs-<svc>`, `kind-down`.
 
 **Ports:** dashboard `localhost:8090`, orchestrator `localhost:8080` (both via
@@ -103,11 +104,14 @@ like revoke). All are ownership-scoped: callers pass `?userId=` and the registry
 - **Stale images:** on a pre-existing cluster the `:latest` manifests are
   no-ops, so a re-bootstrap keeps old code unless deployments are rolled —
   `bootstrap.sh` now `rollout restart`s them; otherwise use `redeploy-<svc>`.
-- **Never bake `identityserver/keys/`** into the image (local Duende dev signing
-  keys; in-cluster the pod can't unprotect them) — see `.dockerignore`.
+- **Keycloak realm is wiped on restart** on kind (in-memory dev-file DB), so a
+  keycloak pod restart drops the `spawnly` realm — re-run `make bootstrap`
+  (Terraform re-applies the realm idempotently). Never bake secrets/keys into
+  the image — realm signing keys, client secrets and admin creds all arrive at
+  runtime via Secrets / Terraform variables.
 - **DELETE doesn't cascade**: killing a chain root orphans its children; tear
   down subtrees explicitly or use revoke for authority.
-- **Consent-gated child types** need a client entry in `identityserver/Config.cs`
+- **Consent-gated child types** need a client entry in `deploy/keycloak/clients.tf`
   with the CIBA grant + `openid` scope, or token minting 400s.
 
 When unsure, prefer reading the file and the live cluster over guessing.

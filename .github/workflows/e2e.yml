@@ -101,7 +101,7 @@ jobs:
           kubectl get pods -A -o wide || true
           kubectl get agentworkloads -A || true
           kubectl describe pods -l 'agent-type' || true
-          for d in registry orchestrator agent-operator identity-server dashboard; do
+          for d in registry orchestrator agent-operator keycloak dashboard; do
             echo "===== logs: deploy/$d ====="
             kubectl logs "deploy/$d" --tail=100 --all-containers || true
           done

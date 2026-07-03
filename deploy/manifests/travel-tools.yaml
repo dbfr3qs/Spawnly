@@ -29,10 +29,12 @@ spec:
             # OAuth protected-resource config. The MCP server validates every
             # Spawnly access token against the IdP JWKS and requires aud to
             # contain RESOURCE_AUDIENCE; per-tool scope is enforced per request.
+            # IS_ISSUER is the FIXED frontend origin Keycloak stamps on every
+            # token (KC_HOSTNAME); IS_JWKS_URL is the in-cluster backchannel host.
             - name: IS_ISSUER
-              value: "http://identity-server:8080"
+              value: "http://localhost:8090/realms/spawnly"
             - name: IS_JWKS_URL
-              value: "http://identity-server:8080/.well-known/openid-configuration/jwks"
+              value: "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs"
             - name: RESOURCE_AUDIENCE
               value: "travel-tools"
             - name: PORT

@@ -13,7 +13,7 @@ import (
 )
 
 // OIDCConfig configures an OIDC control-plane Authenticator. It validates a
-// client-credentials access token (e.g. minted by IdentityServer for the
+// client-credentials access token (e.g. minted by Keycloak for the
 // orchestrator/IdP clients) against a configured JWKS — never by calling a
 // specific IdP, so the registry stays IdP-agnostic.
 type OIDCConfig struct {

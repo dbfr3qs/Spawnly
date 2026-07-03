@@ -86,16 +86,22 @@ jobs:
         run: npm ci && npm run build
         working-directory: agents/${{ matrix.agent }}
 
-  dotnet:
-    name: dotnet build
+  java:
+    name: keycloak providers build + test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-java@v4
         with:
-          dotnet-version: '8.0'
-      - name: build IdentityServer
-        run: dotnet build identityserver/IdentityServer.csproj -c Release
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'maven'
+          cache-dependency-path: keycloak/providers/pom.xml
+      # Compile the custom Keycloak SPI providers + run the JUnit suite
+      # (SPIFFE verifier, ATTESTOR selector, attestation client authenticator).
+      - name: mvn verify (keycloak/providers)
+        run: mvn -B -e verify
+        working-directory: keycloak/providers
 
   manifests:
     name: validate k8s manifests

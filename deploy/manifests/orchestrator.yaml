@@ -25,14 +25,17 @@ spec:
               value: "poc-secret"
             - name: REGISTRY_URL
               value: "http://registry:8080"
-            # IdentityServer issuer + JWKS for validating agent spawn tokens
-            # (buildSpawnValidator). The Service listens on :8080 — without the
-            # explicit port the code default (:80) has no Service route, so the
-            # orchestrator wedges in its JWKS retry loop and never serves /spawn.
+            # Keycloak issuer + JWKS for validating agent spawn tokens
+            # (buildSpawnValidator). IS_ISSUER is the FIXED frontend origin
+            # Keycloak stamps on every token (KC_HOSTNAME); IS_JWKS_URL is the
+            # in-cluster backchannel host (KC_HOSTNAME_BACKCHANNEL_DYNAMIC) the
+            # orchestrator fetches keys from. The issuer the token carries
+            # (localhost:8090) differs from where we fetch keys (keycloak:8080),
+            # so the two URLs are intentionally different hosts.
             - name: IS_ISSUER
-              value: "http://identity-server:8080"
+              value: "http://localhost:8090/realms/spawnly"
             - name: IS_JWKS_URL
-              value: "http://identity-server:8080/.well-known/openid-configuration/jwks"
+              value: "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs"
             # Control-plane auth the orchestrator presents to the registry's
             # template + consent endpoints; must match the registry's setting.
             # (NOT used for dashboard→orchestrator spawn auth — that now uses
@@ -58,7 +61,7 @@ spec:
                   optional: true
             # --- oidc tier ---
             # - name: CONTROL_PLANE_TOKEN_URL
-            #   value: "http://identity-server:8080/connect/token"
+            #   value: "http://keycloak:8080/realms/spawnly/protocol/openid-connect/token"
             # - name: CONTROL_PLANE_CLIENT_ID
             #   value: "orchestrator"
             # - name: CONTROL_PLANE_CLIENT_SECRET

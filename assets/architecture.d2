@@ -5,8 +5,8 @@
 #  - The agent-sidecar (not the agent) fetches the JWT-SVID, self-registers the
 #    agent with the Agent Registry, and exchanges the SVID for OAuth tokens. The
 #    agent asks the sidecar for scoped tokens over :8089 via the SDK TokenClient.
-#  - IdentityServer checks the Agent Registry that the agent exists and is active
-#    before it issues an access token.
+#  - Keycloak (with Spawnly's custom SPI providers) checks the Agent Registry
+#    that the agent exists and is active before it issues an access token.
 
 direction: down
 
@@ -33,7 +33,7 @@ k8s: "Kubernetes (Kind)" {
   spicedb: "SpiceDB\n:50051" {
     shape: cylinder
   }
-  idsrv: "IdentityServer\n:5001\nOAuth 2.0 authority" {
+  idsrv: "Keycloak\n:8080\nOAuth 2.0 authority\n(+ Spawnly SPIs)" {
     shape: rectangle
   }
   sampleapi: "Sample API\n:8080\n/work · /task" {

@@ -88,7 +88,7 @@ func New(ctx context.Context, issuer, jwksURL string) (*JWKSValidator, error) {
 		return nil, err
 	}
 	if _, err := cache.Get(ctx, jwksURL); err != nil {
-		return nil, fmt.Errorf("fetch IS JWKS: %w", err)
+		return nil, fmt.Errorf("fetch JWKS: %w", err)
 	}
 	return &JWKSValidator{issuer: issuer, jwksURL: jwksURL, cache: cache}, nil
 }
@@ -104,9 +104,9 @@ func (v *JWKSValidator) ValidateAccessToken(ctx context.Context, token string) (
 		jwt.WithValidate(true),
 	)
 	if err != nil {
-		// The IdentityServer may have rotated its signing keys (e.g. on redeploy),
-		// leaving our cached JWKS stale. Force a refresh and retry once so key
-		// rotation doesn't require restarting resource servers.
+		// The IdP may have rotated its signing keys (e.g. on redeploy), leaving
+		// our cached JWKS stale. Force a refresh and retry once so key rotation
+		// doesn't require restarting resource servers.
 		if refreshed, rerr := v.cache.Refresh(ctx, v.jwksURL); rerr == nil {
 			if tok2, perr := jwt.Parse([]byte(token),
 				jwt.WithKeySet(refreshed),

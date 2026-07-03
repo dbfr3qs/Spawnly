@@ -189,8 +189,8 @@ func main() {
 	ctx := context.Background()
 	spicedbEndpoint := getenv("SPICEDB_ENDPOINT", "spicedb:50051")
 	spicedbPSK := getenv("SPICEDB_PSK", "poc-secret")
-	isIssuer := getenv("IS_ISSUER", "http://identity-server")
-	isJWKSURL := getenv("IS_JWKS_URL", "http://identity-server/.well-known/openid-configuration/jwks")
+	isIssuer := getenv("IS_ISSUER", "http://keycloak:8080/realms/spawnly")
+	isJWKSURL := getenv("IS_JWKS_URL", "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs")
 
 	audience := getenv("API_AUDIENCE", "sample-api")
 	scopePrefix := getenv("SCOPE_PREFIX", audience)
@@ -202,6 +202,8 @@ func main() {
 		log.Fatalf("spicedb connect: %v", err)
 	}
 
+	// Validate Keycloak-minted access tokens: the single realm issuer (agents
+	// authenticate via the attestation SPI; humans via authorization-code).
 	validator, err := tokenvalidator.New(ctx, isIssuer, isJWKSURL)
 	if err != nil {
 		log.Fatalf("token validator init: %v", err)

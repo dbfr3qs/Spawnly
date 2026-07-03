@@ -8,9 +8,10 @@ import { configFromEnv } from "./config.js";
 import { registerTools } from "./tools/index.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
-const ISSUER = process.env.IS_ISSUER ?? "http://identity-server:8080";
+const ISSUER = process.env.IS_ISSUER ?? "http://keycloak:8080/realms/spawnly";
 const JWKS_URL =
-  process.env.IS_JWKS_URL ?? "http://identity-server:8080/.well-known/openid-configuration/jwks";
+  process.env.IS_JWKS_URL ??
+  "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs";
 // The RFC 8707 resource identifier this server accepts tokens for (token `aud`).
 const AUDIENCE = process.env.RESOURCE_AUDIENCE ?? "travel-tools";
 

@@ -23,7 +23,7 @@ From a checkout of this repo:
 /spawnly:demo      # guided, narrated tour using the example agents
 ```
 
-`/spawnly:up` builds the Kind cluster, SPIRE, IdentityServer, the control plane,
+`/spawnly:up` builds the Kind cluster, SPIRE, Keycloak, the control plane,
 and seeds the example agent templates. `/spawnly:demo` then walks you through the
 platform's headline behaviours on the agents that ship with the repo.
 

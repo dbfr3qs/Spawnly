@@ -1,0 +1,90 @@
+# ---------------------------------------------------------------------------
+# Provider / connection
+# ---------------------------------------------------------------------------
+
+variable "keycloak_url" {
+  description = "Base URL of the Keycloak instance (e.g. a local port-forward). NOT the realm issuer."
+  type        = string
+  default     = "http://localhost:8080"
+}
+
+variable "keycloak_admin_username" {
+  description = "Keycloak master-realm admin username (password grant on admin-cli)."
+  type        = string
+  sensitive   = true
+}
+
+variable "keycloak_admin_password" {
+  description = "Keycloak master-realm admin password."
+  type        = string
+  sensitive   = true
+}
+
+# ---------------------------------------------------------------------------
+# Human login
+# ---------------------------------------------------------------------------
+
+variable "dashboard_origin" {
+  description = "Browser-facing origin of the dashboard; used to build the redirect/post-logout URIs. Mirrors Config.cs DashboardOrigin."
+  type        = string
+  default     = "http://localhost:8090"
+}
+
+variable "dashboard_client_secret" {
+  description = "Client secret for the confidential `dashboard` client."
+  type        = string
+  sensitive   = true
+}
+
+# ---------------------------------------------------------------------------
+# Control-plane clients (client-credentials)
+# ---------------------------------------------------------------------------
+
+variable "orchestrator_client_secret" {
+  description = "Client secret for the `orchestrator` control-plane client."
+  type        = string
+  sensitive   = true
+}
+
+variable "idp_consent_client_secret" {
+  description = "Client secret for the `idp-consent` control-plane client."
+  type        = string
+  sensitive   = true
+}
+
+# ---------------------------------------------------------------------------
+# Machine clients
+# ---------------------------------------------------------------------------
+
+variable "machine_client_secret" {
+  description = <<-EOT
+    Placeholder client secret shared by the six machine clients for Phase 0.
+    Mirrors Config.cs's Secret("placeholder"). In Phase 1 these clients switch
+    to the custom attestation (SPIFFE JWT-SVID) client authenticator and this
+    secret goes away.
+  EOT
+  type        = string
+  sensitive   = true
+}
+
+# ---------------------------------------------------------------------------
+# Users — passwords come from TF vars; nothing committed.
+#
+# Fail-closed posture (mirrors today's "absent password => no user"): each
+# user is created only when its password var is non-empty. A production tfvars
+# can omit the viewer entirely by leaving viewer_password = "".
+# ---------------------------------------------------------------------------
+
+variable "alice_password" {
+  description = "Initial password for the admin user `alice`. Empty => alice not created."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "viewer_password" {
+  description = "Initial password for the non-admin user `viewer`. Empty => viewer not created."
+  type        = string
+  sensitive   = true
+  default     = ""
+}

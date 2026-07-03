@@ -1,5 +1,12 @@
 import { test, expect } from '@playwright/test';
-import { login, DEMO_USER } from '../helpers/auth';
+import {
+  login,
+  DEMO_USER,
+  LOGIN_USERNAME,
+  LOGIN_PASSWORD,
+  LOGIN_SUBMIT,
+  expectLoginForm,
+} from '../helpers/auth';
 import { spawn, listAgents } from '../helpers/dashboard';
 
 // Unauthenticated behaviour: these run with an empty session, overriding the
@@ -9,8 +16,8 @@ test.describe('unauthenticated', () => {
 
   test('the dashboard redirects to the login page when there is no session', async ({ page }) => {
     await page.goto('/');
-    // Lands on the (proxied) IdentityServer login form, not the dashboard shell.
-    await expect(page.locator('#Username')).toBeVisible({ timeout: 30_000 });
+    // Lands on the (proxied) Keycloak login form, not the dashboard shell.
+    await expectLoginForm(page);
     await expect(page.locator('#agent-list')).toHaveCount(0);
   });
 
@@ -21,13 +28,13 @@ test.describe('unauthenticated', () => {
 
   test('a wrong password does not establish a session', async ({ page }) => {
     await page.goto('/');
-    await expect(page.locator('#Username')).toBeVisible({ timeout: 30_000 });
-    await page.locator('#Username').fill(DEMO_USER);
-    await page.locator('#Password').fill('wrong-password');
-    await page.locator('button[type="submit"]').click();
+    await expectLoginForm(page);
+    await page.locator(LOGIN_USERNAME).fill(DEMO_USER);
+    await page.locator(LOGIN_PASSWORD).fill('wrong-password');
+    await page.locator(LOGIN_SUBMIT).click();
     // Still on the login page with an error; no dashboard, no session.
     await expect(page.locator('#agent-list')).toHaveCount(0);
-    await expect(page.locator('#Username')).toBeVisible();
+    await expectLoginForm(page);
     const resp = await page.request.get('/api/agents');
     expect(resp.status()).toBe(401);
   });
@@ -43,10 +50,10 @@ test.describe('unauthenticated', () => {
     // Back to a logged-out state: the app session is gone (API 401) and a fresh
     // visit redirects to the login form again — i.e. the IdP session was killed
     // too (no silent SSO straight back into the dashboard).
-    await expect(page.locator('#Username')).toBeVisible({ timeout: 30_000 });
+    await expectLoginForm(page);
     expect((await page.request.get('/api/agents')).status()).toBe(401);
     await page.goto('/');
-    await expect(page.locator('#Username')).toBeVisible({ timeout: 30_000 });
+    await expectLoginForm(page);
   });
 });
 

@@ -38,7 +38,7 @@ Spawnly is a handful of small, single-purpose services. Before the architecture 
 
 - **SPIRE** — issues every agent pod a unique cryptographic identity (a JWT-SVID) at startup — no shared secrets or static keys.
 - **agent-sidecar** — a helper container in every agent pod. It exchanges the pod's SVID for scoped OAuth access tokens and hands them to the agent on request, so agent code carries no identity plumbing.
-- **IdentityServer** — the OAuth 2.0 authority that mints those access tokens, trusting the SVID as proof of who the agent is — but only after checking the agent registry that the agent exists and is active.
+- **Keycloak** — the OAuth 2.0 authority that mints those access tokens, trusting the SVID as proof of who the agent is — but only after checking the agent registry that the agent exists and is active. Spawnly's custom logic (SVID/attestation client auth, registry-driven identity, RFC 8693 delegation, CIBA spawn-consent) lives in Keycloak Java SPI providers (`keycloak/providers/`).
 - **SpiceDB** — the authorisation database. Relationship-based ("this agent may act for this tenant"); protected services check it before serving a request.
 
 **Agents & the services they call**
@@ -48,7 +48,7 @@ Spawnly is a handful of small, single-purpose services. Before the architecture 
 
 **Observability**
 
-- **Agent Registry** — the system's memory. The sidecar registers each agent here, every component records lifecycle events here, agent templates live here, and IdentityServer consults it to check an agent is active before issuing a token.
+- **Agent Registry** — the system's memory. The sidecar registers each agent here, every component records lifecycle events here, agent templates live here, and Keycloak consults it to check an agent is active before issuing a token.
 - **Dashboard UI** — the real-time web view: spawn agents, watch their event timelines, and chat with long-lived ones ([screenshot](spawnly-ui.jpg)).
 
 For the directory-level breakdown (paths, languages, internal packages), see [Repository layout](#repository-layout).
@@ -61,9 +61,9 @@ The diagram shows the full flow for a single agent — spawn request → CRD →
 
 ![Spawnly architecture](assets/architecture.svg)
 
-**The key thing the sidecar does:** the agent container never performs the SVID/registration/token dance itself. The `agent-sidecar` fetches the JWT-SVID from SPIRE, **self-registers the agent** with the agent registry (SVID as Bearer), exchanges the SVID at IdentityServer for a scoped access token, and exposes a local `/token` endpoint (`:8089`). The agent asks the sidecar for tokens via the SDK's `TokenClient`. This keeps agent code framework- and language-agnostic.
+**The key thing the sidecar does:** the agent container never performs the SVID/registration/token dance itself. The `agent-sidecar` fetches the JWT-SVID from SPIRE, **self-registers the agent** with the agent registry (SVID as Bearer), exchanges the SVID at Keycloak for a scoped access token, and exposes a local `/token` endpoint (`:8089`). The agent asks the sidecar for tokens via the SDK's `TokenClient`. This keeps agent code framework- and language-agnostic.
 
-IdentityServer doesn't mint a token blindly: during the grant it **looks up the agent registry to confirm the agent exists and is `active`** (`AgentRegistryValidator`), so a deregistered or unknown agent can't obtain credentials.
+Keycloak doesn't mint a token blindly: during the grant its Spawnly attestation SPI **looks up the agent registry to confirm the agent exists and is `active`**, so a deregistered or unknown agent can't obtain credentials.
 
 ### Lifecycle events
 
@@ -109,7 +109,8 @@ Every directory, by language and purpose:
 | `mcp/travel-tools/` | TypeScript | Scope-enforcing MCP server exposing `search_flights` / `search_hotels` / `convert_currency` to the travel specialists, backed by real upstream providers (Duffel / LiteAPI / Frankfurter) |
 | `sdks/typescript/` | TypeScript | The `@spawnly/sdk` package — token/HTTP/event helpers consumed by the TypeScript agents |
 | `sdks/go/` | Go | The `github.com/spawnly/sdk-go` module — the same token/HTTP/event helpers for Go agents (no example Go agent ships at the moment) |
-| `identityserver/` | C# (.NET) | Duende IdentityServer. Issues OAuth 2.0 access tokens; authenticates the sidecar via JWT-SVID `client_assertion` |
+| `keycloak/providers/` | Java | Custom Keycloak SPI providers implementing Spawnly's identity behaviour: attestation client authentication (JWT-SVID / AWS STS `client_assertion`), registry-driven identity mappers, RFC 8693 delegation, and CIBA spawn-consent. Baked into a custom Keycloak image |
+| `deploy/keycloak/` | Terraform | Declares the `spawnly` realm (clients, scopes, audiences, roles, users, flows, CIBA) with the `keycloak/keycloak` provider |
 | `internal/events/` | Go | Shared lifecycle event types and HTTP client used by all Go services |
 | `internal/operator/` | Go | Reconciler logic (separated from `cmd/operator/` for testability) |
 | `internal/registry/` | Go | Registry client interface and mock (used by operator and orchestrator) |
@@ -135,7 +136,7 @@ Every directory, by language and purpose:
 - [jq](https://stedolan.github.io/jq/)
 - Go 1.25+ (for local builds and tests)
 - Node.js 20+ and npm (for the TypeScript agents and the docs site)
-- .NET 8 SDK (for IdentityServer local builds only; not required for Docker/Kind)
+- JDK 17+ and Maven (for the Keycloak SPI providers' local builds/tests only; not required for Docker/Kind)
 
 > If you are using the included devcontainer, all of these are pre-installed.
 
@@ -176,7 +177,7 @@ make bootstrap
 
 This single command:
 1. Creates a Kind cluster named `agent-platform`
-2. Builds all Docker images (Go services, the TypeScript agents, and the .NET IdentityServer)
+2. Builds all Docker images (Go services, the TypeScript agents, and the custom Keycloak image with the Spawnly SPI providers)
 3. Loads images into Kind nodes
 4. Installs SPIRE via Helm and applies the `ClusterSPIFFEID`
 5. Applies the `AgentWorkload` CRD, the `ai-provider` Secret, and all Kubernetes manifests
@@ -197,7 +198,7 @@ This will:
 
 Open `http://localhost:8090` to watch events, spin up agents, and chat with long-lived ones in real time — as in the [dashboard screenshot](#lifecycle-events) above.
 
-**Logging in.** The dashboard now requires a human login over OIDC. Visiting it without a session redirects to the IdentityServer login page; sign in with the seeded demo user **`alice` / `alice`**. The logged-in identity becomes the `userId` on every agent you spawn (so the agent's access token carries `sub=user:alice`) — the spawn form no longer takes a free-text user. The **Log out** button in the header ends both the dashboard session and the IdentityServer session. This is the machine-vs-human split: agents authenticate with SPIFFE JWT-SVIDs, while a person logs in with a username/password.
+**Logging in.** The dashboard now requires a human login over OIDC. Visiting it without a session redirects to the Keycloak login page; sign in with the seeded demo user **`alice` / `alice`**. The logged-in identity becomes the `userId` on every agent you spawn (so the agent's access token carries `sub=user:alice`) — the spawn form no longer takes a free-text user. The **Log out** button in the header ends both the dashboard session and the Keycloak session. This is the machine-vs-human split: agents authenticate with SPIFFE JWT-SVIDs, while a person logs in with a username/password.
 
 **Reconnecting later?** If you just want the dashboard back — e.g. after a Docker/Kind restart drops the connection — run `make dash`. It repairs the kubeconfig (the control-plane container's IP can drift across restarts) and port-forwards the dashboard to `localhost:8090`, without re-running the bootstrap.
 
@@ -239,7 +240,7 @@ See [Defining a Template](https://docs.spawnly.run/authoring/04-defining-a-templ
 
 Sub-agent spawning can require **human approval**, using OpenID Client-Initiated Backchannel Authentication (CIBA) — the flow banks use for out-of-band payment approval, repurposed for agent authority:
 
-- A parent template's delegation policy marks a child type as consent-gated. When such a child spawns, **its sidecar initiates a CIBA request** at IdentityServer (SVID as client assertion) and polls for the token; the child cannot obtain credentials until the user decides.
+- A parent template's delegation policy marks a child type as consent-gated. When such a child spawns, **its sidecar initiates a CIBA request** at Keycloak (SVID as client assertion) and polls for the token; the child cannot obtain credentials until the user decides.
 - The dashboard shows the pending request to the logged-in user — **approve** and the child's token is minted with the user bound as `sub`; **deny** (or let it expire) and the child is marked `failed`, with a `consent_denied` event on both child and parent.
 - Consent is **recorded per (user, parent type, child type, scopes)**, so an identical spawn next time auto-approves without re-prompting. Scope escalation, expiry, or the user revoking consent from the dashboard all force a re-prompt — and because token renewal re-runs the grant, **revoking consent starves a running child of tokens within ~2 minutes**.
 
@@ -249,7 +250,7 @@ Full design and flow diagrams: [Spawn consent internals](https://docs.spawnly.ru
 
 ## Control-plane auth
 
-The registry's **control-plane** endpoints — template create/update/disable/delete and the consent broker — are gated by a shared-secret bearer (`CONTROL_PLANE_AUTH=shared-secret`, the default). `make bootstrap` generates the token once into the `control-plane-auth` Secret and wires it into the registry, orchestrator, IdentityServer, and `seed.sh`, so their tokens match by construction; re-bootstraps reuse the existing token so seeded clients keep working mid-session. Run the registry open with `CONTROL_PLANE_AUTH=none` (the agent-facing self-registration and event paths are authenticated separately by SVID and are never behind this secret). To drive the control plane from outside the cluster, pull the token:
+The registry's **control-plane** endpoints — template create/update/disable/delete and the consent broker — are gated by a shared-secret bearer (`CONTROL_PLANE_AUTH=shared-secret`, the default). `make bootstrap` generates the token once into the `control-plane-auth` Secret and wires it into the registry, orchestrator, Keycloak, and `seed.sh`, so their tokens match by construction; re-bootstraps reuse the existing token so seeded clients keep working mid-session. Run the registry open with `CONTROL_PLANE_AUTH=none` (the agent-facing self-registration and event paths are authenticated separately by SVID and are never behind this secret). To drive the control plane from outside the cluster, pull the token:
 
 ```bash
 export SPAWNLY_TOKEN=$(kubectl get secret control-plane-auth \
@@ -370,7 +371,7 @@ curl -X POST http://localhost:8080/v1/agents/<workloadName>/resume
 ```bash
 kubectl logs -l app=orchestrator --follow
 kubectl logs -l app=registry --follow
-kubectl logs -l app=identity-server --follow
+kubectl logs -l app=keycloak --follow
 kubectl logs -l app=sample-api-a --follow
 # Agent pods are ephemeral — find them by name:
 kubectl get pods
@@ -410,7 +411,7 @@ make kind-load
 
 - **SPIFFE/SPIRE for workload identity**: every agent pod gets a unique JWT-SVID (`spiffe://cluster.local/...`) via the CSI driver — no shared secrets or static API keys.
 - **A per-pod sidecar owns registration and token exchange**: the `agent-sidecar` self-registers the agent with the agent registry and turns the SVID into scoped OAuth tokens served at `:8089`, so agent code stays free of identity plumbing and works the same in Go or TypeScript.
-- **IdentityServer as the OAuth 2.0 authority**: the sidecar uses the SVID as a `client_assertion` (RFC 7523 JWT Bearer) to obtain a scoped access token, validated against SPIRE's JWKS endpoint — and IdentityServer additionally checks the agent registry that the agent is `active` before issuing.
+- **Keycloak as the OAuth 2.0 authority**: the sidecar uses the SVID as a `client_assertion` (RFC 7523 JWT Bearer) to obtain a scoped access token, validated by the Spawnly attestation SPI against SPIRE's JWKS endpoint — and Keycloak additionally checks the agent registry that the agent is `active` before issuing.
 - **SpiceDB for authorisation**: the registry writes the agent's relationships on registration (a `tenant:T#agent@agent:X` relation when tenanted, none when global). The sample API checks `work_on` permission before serving requests.
 - **Tenancy from presence**: an agent is tenanted if a tenant id is present; the same code path serves global agents by simply omitting the tenant segment, header, and relations.
 - **CIBA for human-in-the-loop spawn consent**: the consent-gated child's own sidecar runs the backchannel grant, so "user approves the spawn" is a standard OAuth flow rather than bespoke plumbing — stored consent auto-approves repeats, and revocation starves the child's token renewal.

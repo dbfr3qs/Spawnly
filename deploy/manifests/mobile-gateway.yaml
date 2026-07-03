@@ -22,13 +22,15 @@ spec:
             # user-scoped endpoints (which stay the authorization authority).
             - name: ORCHESTRATOR_URL
               value: "http://orchestrator:8080"
-            # Same IdP issuer + JWKS the orchestrator validates mobile/dashboard
-            # access tokens with. The explicit :8080 matters — the Service has no
-            # :80 route, so the bare default would wedge the JWKS retry loop.
+            # Same Keycloak issuer + JWKS the orchestrator validates
+            # mobile/dashboard access tokens with. IS_ISSUER is the FIXED
+            # frontend origin Keycloak stamps on every token (KC_HOSTNAME);
+            # IS_JWKS_URL is the in-cluster backchannel host
+            # (KC_HOSTNAME_BACKCHANNEL_DYNAMIC).
             - name: IS_ISSUER
-              value: "http://identity-server:8080"
+              value: "http://localhost:8090/realms/spawnly"
             - name: IS_JWKS_URL
-              value: "http://identity-server:8080/.well-known/openid-configuration/jwks"
+              value: "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs"
             # The mobile access token carries aud=orchestrator and the same
             # read/write scopes the dashboard uses (it calls the orchestrator's
             # consent endpoints), so the gateway validates against those.

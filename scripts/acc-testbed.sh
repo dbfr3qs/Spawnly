@@ -3,7 +3,7 @@
 # provider's acceptance + parity tests.
 #
 # It runs only what those tests actually exercise: an in-memory SpiceDB plus the
-# registry under shared-secret control-plane auth. No SPIRE, identity-server,
+# registry under shared-secret control-plane auth. No SPIRE, Keycloak,
 # kind, or agents — the provider only talks to the registry's template
 # control-plane API, and the registry boots fine with REGISTRANT_VERIFIER=mtls
 # (which the template endpoints never invoke).

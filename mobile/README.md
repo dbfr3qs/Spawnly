@@ -9,13 +9,13 @@ a device biometric.
 It talks only to the **mobile-gateway** (`/me/*`), which proxies consent actions
 to the orchestrator's user-scoped endpoints. The app holds no special authority:
 it authenticates the user via OAuth2 authorization-code + PKCE against the same
-IdentityServer the dashboard uses (the public `mobile` client), and every action
+Keycloak the dashboard uses (the public `mobile` client), and every action
 is the user's own delegated token.
 
 ## Architecture at a glance
 
 ```
-app ──PKCE──> IdentityServer (mobile client, aud=orchestrator, read/write scopes)
+app ──PKCE──> Keycloak (mobile client, aud=orchestrator, read/write scopes)
 app ──Bearer─> mobile-gateway /me/consent-requests|consents|devices|stream
                      │ forwards the user token
                      └──> orchestrator (user-scoped) ──> registry

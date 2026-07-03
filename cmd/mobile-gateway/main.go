@@ -28,8 +28,8 @@ func getEnv(key, def string) string {
 // orchestrator's buildSpawnValidator (the JWKS fetch is bounded inside
 // tokenvalidator.New, so a hung IdP surfaces as a retryable error).
 func buildValidator(ctx context.Context) tokenvalidator.TokenValidator {
-	issuer := getEnv("IS_ISSUER", "http://identity-server")
-	jwksURL := getEnv("IS_JWKS_URL", "http://identity-server/.well-known/openid-configuration/jwks")
+	issuer := getEnv("IS_ISSUER", "http://keycloak:8080/realms/spawnly")
+	jwksURL := getEnv("IS_JWKS_URL", "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs")
 	for attempt := 1; ; attempt++ {
 		v, err := tokenvalidator.New(ctx, issuer, jwksURL)
 		if err == nil {

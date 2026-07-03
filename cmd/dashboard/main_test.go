@@ -57,7 +57,7 @@ func TestLogsOpTargetCarriesParams(t *testing.T) {
 // stubAuth returns an Authenticator wired with a no-op ensure() and the given
 // oauth config, so token-handling can be exercised without real OIDC discovery.
 func stubAuth(oauth *oauth2.Config) *Authenticator {
-	a := NewAuthenticator("http://localhost:8090", "http://identity-server:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
 	a.once.Do(func() {}) // mark ensure() done so it won't hit the network
 	a.oauth = oauth
 	return a
@@ -160,7 +160,7 @@ func TestProxyAttachesBearerNoUserID(t *testing.T) {
 		tokenSrc:  oauth.TokenSource(context.Background(), &oauth2.Token{AccessToken: "at-1", Expiry: time.Now().Add(time.Hour)}),
 		expiresAt: time.Now().Add(time.Hour),
 	}
-	mux := buildMux(a, upstream.URL, "http://identity-server:8080", "http://docs", fstest.MapFS{})
+	mux := buildMux(a, upstream.URL, "http://keycloak:8080", "http://docs", fstest.MapFS{})
 
 	req := httptest.NewRequest("GET", "/api/agents", nil)
 	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "sid"})
@@ -181,8 +181,78 @@ func TestProxyAttachesBearerNoUserID(t *testing.T) {
 	}
 }
 
+// TestKeycloakProxyAllowlist proves the dashboard reverse-proxies ONLY
+// Keycloak's browser-facing login surface (/realms/, /resources/) to the
+// Keycloak host, forwarding the request path verbatim, and DOES NOT proxy the
+// Keycloak admin console (/admin) — a security invariant (the admin console
+// must be unreachable through the dashboard origin). It also proves the proxy
+// target strips the realm path from IDENTITY_INTERNAL_URL so the /realms/
+// prefix isn't doubled.
+func TestKeycloakProxyAllowlist(t *testing.T) {
+	var gotPath string
+	kc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("keycloak"))
+	}))
+	defer kc.Close()
+
+	a := NewAuthenticator("http://localhost:8090", kc.URL+"/realms/spawnly", "dashboard", "secret")
+	// buildMux only needs the auth + a stub upstream for the /api routes.
+	mux := buildMux(a, "http://orch.invalid", kc.URL+"/realms/spawnly", "http://docs", fstest.MapFS{})
+
+	// /realms/... is forwarded verbatim (path NOT doubled with /realms/spawnly).
+	gotPath = ""
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/realms/spawnly/protocol/openid-connect/auth", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("/realms authorize: status = %d, want 200 (proxied)", rec.Code)
+	}
+	if gotPath != "/realms/spawnly/protocol/openid-connect/auth" {
+		t.Errorf("proxied path = %q, want the request path verbatim (no doubled /realms/spawnly)", gotPath)
+	}
+
+	// /resources/... (login theme assets) is forwarded.
+	gotPath = ""
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/resources/abc/login/keycloak/css/login.css", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("/resources: status = %d, want 200 (proxied)", rec.Code)
+	}
+
+	// /realms/master/... (a DIFFERENT realm — notably its internet-reachable
+	// direct-grant token endpoint) is NOT proxied: the allowlist is scoped to the
+	// spawnly realm derived from IDENTITY_INTERNAL_URL. It falls through to the
+	// session-gated "/" handler and the upstream Keycloak is NEVER hit.
+	gotPath = ""
+	rec = httptest.NewRecorder()
+	masterReq := httptest.NewRequest("GET", "/realms/master/protocol/openid-connect/token", nil)
+	mux.ServeHTTP(rec, masterReq)
+	if gotPath != "" {
+		t.Fatalf("SECURITY: /realms/master was proxied to Keycloak (path %q) — only the spawnly realm may be reachable via the dashboard origin", gotPath)
+	}
+	if rec.Code == http.StatusOK {
+		t.Errorf("/realms/master: status = %d, want a non-200 (not served)", rec.Code)
+	}
+
+	// /admin (the Keycloak admin console + admin REST API) is NOT proxied: it
+	// must not reach Keycloak. It falls through to the session-gated "/" handler,
+	// which returns 401 for this non-navigation request — critically, the
+	// upstream Keycloak is NEVER hit (gotPath stays empty).
+	gotPath = ""
+	rec = httptest.NewRecorder()
+	adminReq := httptest.NewRequest("GET", "/admin/master/console/", nil)
+	mux.ServeHTTP(rec, adminReq)
+	if gotPath != "" {
+		t.Fatalf("SECURITY: /admin was proxied to Keycloak (path %q) — admin console must not be reachable via the dashboard origin", gotPath)
+	}
+	if rec.Code == http.StatusOK {
+		t.Errorf("/admin: status = %d, want a non-200 (not served)", rec.Code)
+	}
+}
+
 func TestRequireUnauthenticated(t *testing.T) {
-	a := NewAuthenticator("http://localhost:8090", "http://identity-server:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
 	h := a.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("next should not run without a session")
 	}))
@@ -220,7 +290,7 @@ func TestRequireUnauthenticated(t *testing.T) {
 }
 
 func TestRequireAuthenticated(t *testing.T) {
-	a := NewAuthenticator("http://localhost:8090", "http://identity-server:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
 	a.sessions["sid-1"] = session{username: "alice", expiresAt: time.Now().Add(time.Hour)}
 
 	called := false
@@ -246,7 +316,7 @@ func TestRequireAuthenticated(t *testing.T) {
 }
 
 func TestExpiredSessionRejected(t *testing.T) {
-	a := NewAuthenticator("http://localhost:8090", "http://identity-server:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
 	a.sessions["old"] = session{username: "alice", expiresAt: time.Now().Add(-time.Minute)}
 
 	req := httptest.NewRequest("GET", "/api/agents", nil)
@@ -283,7 +353,7 @@ func TestTemplateRoutesRequireAdminAtBFF(t *testing.T) {
 		tokenSrc:  oauth.TokenSource(context.Background(), &oauth2.Token{AccessToken: "at-1", Expiry: time.Now().Add(time.Hour)}),
 		expiresAt: time.Now().Add(time.Hour),
 	}
-	mux := buildMux(a, upstream.URL, "http://identity-server:8080", "http://docs", fstest.MapFS{})
+	mux := buildMux(a, upstream.URL, "http://keycloak:8080", "http://docs", fstest.MapFS{})
 
 	mutateCases := []struct {
 		method string
@@ -386,7 +456,7 @@ func TestTemplateRoutesRequireAdminAtBFF(t *testing.T) {
 // session and isAdmin=false for an ordinary (non-admin) session — the UI gates
 // the Agent Types admin view on this flag.
 func TestHandleMeReportsIsAdmin(t *testing.T) {
-	a := NewAuthenticator("http://localhost:8090", "http://identity-server:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
 	a.sessions["admin-sid"] = session{username: "alice", isAdmin: true, expiresAt: time.Now().Add(time.Hour)}
 	a.sessions["viewer-sid"] = session{username: "viewer", isAdmin: false, expiresAt: time.Now().Add(time.Hour)}
 
@@ -424,7 +494,7 @@ func TestHandleMeReportsIsAdmin(t *testing.T) {
 // through to the wrapped handler. This is the dashboard-BFF enforcement; the
 // orchestrator enforces the same role independently (defense in depth).
 func TestRequireAdmin(t *testing.T) {
-	a := NewAuthenticator("http://localhost:8090", "http://identity-server:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
 	a.sessions["admin-sid"] = session{username: "alice", isAdmin: true, expiresAt: time.Now().Add(time.Hour)}
 	a.sessions["viewer-sid"] = session{username: "viewer", isAdmin: false, expiresAt: time.Now().Add(time.Hour)}
 

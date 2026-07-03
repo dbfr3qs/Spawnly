@@ -15,8 +15,9 @@ import (
 	"github.com/spawnly/platform/internal/attestor"
 )
 
-// fakeIS is a minimal IdentityServer double for the two CIBA endpoints. Its
-// verdict field scripts what the token endpoint answers for pending requests.
+// fakeIS is a minimal Keycloak double for the two CIBA endpoints (the realm's
+// OIDC token endpoint and the ext/ciba/auth backchannel endpoint). Its verdict
+// field scripts what the token endpoint answers for pending requests.
 type fakeIS struct {
 	mu        sync.Mutex
 	verdict   string // "pending" | "granted" | "denied" | "expired"
@@ -27,7 +28,7 @@ type fakeIS struct {
 
 func (f *fakeIS) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /connect/ciba", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /realms/spawnly/protocol/openid-connect/ext/ciba/auth", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.requests++
@@ -41,7 +42,7 @@ func (f *fakeIS) handler() http.Handler {
 			"interval":    1,
 		})
 	})
-	mux.HandleFunc("POST /connect/token", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /realms/spawnly/protocol/openid-connect/token", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.polls++
@@ -71,7 +72,7 @@ func testSource(t *testing.T, f *fakeIS) *cibaTokenSource {
 	cs := newCibaTokenSource(config{
 		agentType:     "currency-converter",
 		userID:        "alice",
-		isTokenURL:    srv.URL + "/connect/token",
+		isTokenURL:    srv.URL + "/realms/spawnly/protocol/openid-connect/token",
 		consentScopes: "openid sample-api-b:read",
 	})
 	cs.source = &attestor.MockSource{Cred: attestor.Credential{
@@ -180,6 +181,43 @@ func TestGet_RevokedConsentLeavesRenewalPending(t *testing.T) {
 	cs.nextPoll = time.Now()
 	if tok, _, err := cs.get(context.Background()); err != nil || tok != "user-bound-token" {
 		t.Fatalf("after re-approval: tok=%q err=%v", tok, err)
+	}
+}
+
+// TestCibaAuthURL verifies the CIBA backchannel endpoint is derived as
+// Keycloak's .../ext/ciba/auth from the realm token endpoint.
+func TestCibaAuthURL(t *testing.T) {
+	got := cibaAuthURL("http://keycloak:8080/realms/spawnly/protocol/openid-connect/token")
+	want := "http://keycloak:8080/realms/spawnly/protocol/openid-connect/ext/ciba/auth"
+	if got != want {
+		t.Fatalf("cibaAuthURL = %q, want %q", got, want)
+	}
+}
+
+// TestBindingMessage verifies the binding_message is space-free and ≤50 chars,
+// which Keycloak requires (it rejects spaces and caps the length).
+func TestBindingMessage(t *testing.T) {
+	cs := &cibaTokenSource{cfg: config{agentType: "flight-search"}}
+	msg := cs.bindingMessage()
+	if len(msg) > 50 {
+		t.Fatalf("binding_message too long: %d chars (%q)", len(msg), msg)
+	}
+	// Keycloak's default CIBA validation allows ONLY basic alphanumerics — no
+	// spaces AND no punctuation (so the ':' and '-' an earlier attempt used are
+	// both rejected). "flight-search" must yield "spawnflightsearch".
+	for _, r := range msg {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			t.Fatalf("binding_message contains a non-alphanumeric character %q: %q", r, msg)
+		}
+	}
+	if msg != "spawnflightsearch" {
+		t.Fatalf("binding_message = %q, want %q", msg, "spawnflightsearch")
+	}
+
+	// A pathologically long agentType is truncated to 50 chars.
+	long := &cibaTokenSource{cfg: config{agentType: "a-very-long-agent-type-name-that-blows-past-the-fifty-char-limit"}}
+	if got := long.bindingMessage(); len(got) != 50 {
+		t.Fatalf("long agentType binding_message not truncated to 50: %d (%q)", len(got), got)
 	}
 }
 

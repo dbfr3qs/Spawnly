@@ -109,15 +109,80 @@ COPY sdks/typescript/package.json ./node_modules/@spawnly/sdk/package.json
 COPY --from=build-ts-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
 CMD ["node", "dist/index.js"]
 
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build-identity-server
-WORKDIR /src
-COPY identityserver/ .
-RUN dotnet publish -c Release -o /app/publish
+# ── Keycloak (IdP) ─────────────────────────────────────────────────────────
+# Custom Keycloak image that runs `kc.sh build` for an optimized server. It is
+# the platform's sole IdP: humans log in via Keycloak, and agents mint tokens
+# via the custom attestation SPI baked in below. Base pinned by DIGEST (26.4) so
+# the build is reproducible and can't drift under a moving tag.
+#
+# Features enabled at BUILD time (they can't be turned on at runtime on an
+# optimized image):
+#   - token-exchange — the gated legacy (v1) token-exchange preview, needed by
+#     Phase 3's delegation extension. NOTE (verified on this pinned 26.4): the
+#     STANDARD token-exchange endpoint (formerly "v2") is now DEFAULT-ON and
+#     needs no flag; only the legacy v1 grant is gated behind `token-exchange`.
+#   - CIBA needs NO build flag on 26.4 — it is a SUPPORTED feature configured
+#     per-realm/client (Phase 4 enables it via Terraform), not a preview flag.
+#     (`--features=ciba` is silently ignored by `kc.sh build` here.)
+# The Spawnly SPI provider JARs (Phase 1: the attestation client authenticator
+# + SPIFFE verifier behind the ATTESTOR seam) are built here and baked in below.
+# JARs ONLY — NO secrets in any layer: admin creds, client secrets and user
+# passwords all arrive at runtime via Secrets / Terraform variables.
 
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS identity-server
-WORKDIR /app
-COPY --from=build-identity-server /app/publish .
-ENTRYPOINT ["dotnet", "IdentityServer.dll"]
+# ── build-keycloak-providers: compile the custom SPI JAR ───────────────────
+# Maven build of keycloak/providers (Java 17). Dependencies are `provided`
+# (Keycloak ships them), so the output is a thin providers-only JAR with no
+# shaded deps. Tests run in CI, not here (kept the image build fast + offline-
+# capable of downloading only compile deps).
+FROM maven:3.9-eclipse-temurin-17 AS build-keycloak-providers
+WORKDIR /src
+COPY keycloak/providers/pom.xml .
+# Warm the dependency cache in its own layer so source-only edits don't re-fetch.
+RUN mvn -q -e -B dependency:go-offline || true
+COPY keycloak/providers/src ./src
+RUN mvn -q -B -DskipTests package
+
+FROM quay.io/keycloak/keycloak:26.4@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007 AS build-keycloak
+# The realm issuer is fixed to the in-cluster URL by the manifest's hostname
+# env at runtime; the build step only freezes the DB vendor, feature set and the
+# build-time server options. `--health-enabled=true` MUST be baked here: on an
+# optimized image build-time options can't be set at runtime (a runtime
+# KC_HEALTH_ENABLED is IGNORED), and the manifest's readiness probe hits
+# /health/ready on the management port.
+# The provider JAR MUST be copied into /opt/keycloak/providers/ BEFORE
+# `kc.sh build` so the SPI is compiled into the optimized image (a JAR added
+# after an optimized build is ignored).
+ENV KC_DB=dev-file
+COPY --from=build-keycloak-providers /src/target/spawnly-keycloak-providers.jar /opt/keycloak/providers/
+# --spi-ciba-auth-channel-provider-default: select the custom Spawnly CIBA
+# authentication-channel provider as the realm's decoupled channel (Phase 4).
+# This is a BUILD-TIME SPI option on an optimized image (a runtime env is
+# rejected with "build time options ... will NOT be used"), so it is baked here
+# — two channel factories now exist (built-in ciba-http-auth-channel + ours) and
+# the default must be pinned. Ours drives consent through the REGISTRY
+# (dashboard/mobile) rather than an HTTP channel or Keycloak's built-in consent
+# screen.
+# --spi-ciba-login-user-resolver-provider-default: select the custom Spawnly
+# CIBA login-user resolver, which accepts login_hint="user:<id>" (the form the
+# sidecar sends) as well as a bare "<id>", matching the C# CibaUserValidator.
+# Also a build-time SPI option on an optimized image.
+# NOTE (Keycloak 26.4 SPI option syntax): the separator between the SPI name and
+# the option is a DOUBLE dash (`--spi-<spi>--<option>`). The single-dash legacy
+# form (`--spi-<spi>-provider-default`) is NOT treated as a build-time option on
+# 26.4 (it logs "using the legacy format … not being treated as build time") and
+# the default selection silently doesn't take effect.
+RUN /opt/keycloak/bin/kc.sh build \
+    --features=token-exchange \
+    --health-enabled=true \
+    --spi-ciba-auth-channel--provider-default=spawnly-ciba-channel \
+    --spi-ciba-login-user-resolver--provider-default=spawnly-ciba-user-resolver
+
+FROM quay.io/keycloak/keycloak:26.4@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007 AS keycloak
+COPY --from=build-keycloak /opt/keycloak/ /opt/keycloak/
+# Start the pre-built (optimized) server; the manifest supplies KC_HOSTNAME /
+# KC_HTTP_ENABLED / admin bootstrap creds so no secret is baked here.
+ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]
+CMD ["start", "--optimized"]
 
 # travel-tools MCP server — a resource server (validates Spawnly tokens), NOT an
 # agent, so it does not depend on the @spawnly/sdk. Dev deps pruned after build.

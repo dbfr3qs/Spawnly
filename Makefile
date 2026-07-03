@@ -11,7 +11,7 @@ NODE_AGENTS   := chain-worker travel-specialist travel-planner
 # Demo agents built from their own Dockerfile stage. They follow the standard
 # agent-<name> image convention (unlike agent-sidecar), so they need no special
 # casing — they just weren't in any list before.
-EXTRA_AGENTS  := identity-server weather-monitor
+EXTRA_AGENTS  := keycloak weather-monitor
 # MCP servers: scope-enforcing resource servers exposing real-upstream tools to
 # agents (not agents themselves). Built from their own Dockerfile stage as
 # agent-<name>, same convention as the rest.

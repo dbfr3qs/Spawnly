@@ -23,10 +23,12 @@ func main() {
 		orchestratorURL = "http://orchestrator:8080"
 	}
 
-	// OIDC config. Authority is the browser-facing origin (== IdentityServer
-	// IssuerUri); identityInternalURL is the in-cluster back-channel target.
+	// OIDC config. Authority is the browser-facing origin; identityInternalURL is
+	// the in-cluster back-channel target — the Keycloak realm issuer
+	// (http://keycloak:8080/realms/spawnly), which is also the token issuer the
+	// resource servers validate against.
 	authority := getenv("OIDC_AUTHORITY", "http://localhost:8090")
-	identityInternalURL := getenv("IDENTITY_INTERNAL_URL", "http://identity-server:8080")
+	identityInternalURL := getenv("IDENTITY_INTERNAL_URL", "http://keycloak:8080/realms/spawnly")
 	clientID := getenv("OIDC_CLIENT_ID", "dashboard")
 	clientSecret := getenv("OIDC_CLIENT_SECRET", "dashboard-secret")
 	auth := NewAuthenticator(authority, identityInternalURL, clientID, clientSecret)
@@ -62,25 +64,79 @@ func main() {
 func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL string, staticFS fs.FS) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	// Reverse-proxy the browser-facing OIDC endpoints to identity-server so the
-	// browser only ever talks to the dashboard origin (single issuer). These are
-	// public — they must not be gated by require().
-	idTarget, err := url.Parse(identityInternalURL)
+	// Reverse-proxy the browser-facing OIDC endpoints to Keycloak so the browser
+	// only ever talks to the dashboard origin (single issuer). These are public —
+	// they must not be gated by require().
+	//
+	// IDENTITY_INTERNAL_URL is the realm issuer (http://keycloak:8080/realms/
+	// spawnly), but the browser-facing paths (/realms/<realm>/..., /resources/...)
+	// are absolute from Keycloak's ROOT, so we proxy to the host (scheme+host)
+	// only — stripping the /realms/spawnly path — and forward the request path
+	// verbatim. Using the issuer URL as the proxy target would double the
+	// /realms/spawnly prefix.
+	idHost, err := url.Parse(identityInternalURL)
 	if err != nil {
 		log.Fatalf("invalid IDENTITY_INTERNAL_URL: %v", err)
 	}
-	idProxy := httputil.NewSingleHostReverseProxy(idTarget)
-	mux.Handle("/connect/", idProxy)
-	mux.Handle("/.well-known/", idProxy)
-	mux.Handle("/Account/", idProxy)
-	// The IdentityServer login page is served at /login (its Razor @page route);
-	// proxy it (GET render + POST submit) so the browser sees a clean /login URL
-	// on the dashboard origin. The dashboard's own login *initiator* lives at
-	// /signin (below) — it can't also own /login.
-	mux.Handle("/login", idProxy)
-	// Pending spawn-consent is now served by the registry-native broker via the
-	// /api/consent-requests routes below (Phase 5b); the old IdentityServer
-	// /ciba/ browser approval path has been removed.
+	idHost.Path, idHost.RawQuery, idHost.Fragment = "", "", ""
+	idProxy := httputil.NewSingleHostReverseProxy(idHost)
+	// PRESERVE the inbound browser Host on the proxied request. Keycloak runs with
+	// dynamic hostname (KC_HOSTNAME_STRICT=false, no fixed KC_HOSTNAME), so it
+	// derives the login page's form action + asset URLs and the frontend issuer
+	// from the request Host. By forwarding the browser's Host (the dashboard
+	// origin) instead of the upstream keycloak:8080, those URLs land on the
+	// dashboard origin and the browser stays single-origin — while backchannel
+	// calls (discovery/token/JWKS, made directly by the dashboard/resource
+	// servers to keycloak:8080) keep the internal issuer. Without this, Keycloak
+	// would emit an absolute http://keycloak:8080/... login action the browser
+	// can't reach. The default SingleHostReverseProxy director rewrites only
+	// URL.Scheme/Host, so we set req.Host explicitly to be robust across Go
+	// versions.
+	baseDirector := idProxy.Director
+	idProxy.Director = func(req *http.Request) {
+		inboundHost := req.Host
+		baseDirector(req)
+		req.Host = inboundHost
+		// Strip client-controlled forwarding headers. We drive Keycloak's frontend
+		// URLs purely via the preserved Host (above); if the deploy ever sets
+		// KC_PROXY_HEADERS=xforwarded (the future ALB switch), a browser-forged
+		// X-Forwarded-Host / Forwarded could otherwise steer Keycloak's generated
+		// issuer/redirect/asset URLs to an attacker origin. Deleting them here means
+		// the future flag can only ever trust headers a real upstream proxy sets,
+		// never ones a client smuggled through this proxy.
+		req.Header.Del("X-Forwarded-Host")
+		req.Header.Del("X-Forwarded-Proto")
+		req.Header.Del("X-Forwarded-Port")
+		req.Header.Del("Forwarded")
+	}
+	// ALLOWLIST — forward ONLY Keycloak's browser-facing login/OIDC surface:
+	//   /realms/<realm>/ — authorize, token, logout, JWKS, discovery, login POST,
+	//                      for THIS realm only. The realm segment is derived from
+	//                      IDENTITY_INTERNAL_URL (realmPath()) so it stays in sync
+	//                      with the issuer; other realms — notably /realms/master/
+	//                      and its internet-reachable direct-grant token endpoint —
+	//                      are NOT proxied and fall through to the session-gated
+	//                      "/" handler (upstream Keycloak never hit).
+	//   /resources/      — Keycloak's login-theme static assets (CSS/JS/images);
+	//                      not realm-scoped in Keycloak's URL space.
+	// Everything else (notably /admin and /admin/** — the Keycloak admin console
+	// and admin REST API) is DELIBERATELY NOT proxied, so the admin console is
+	// unreachable through the dashboard origin. Adding a prefix here widens that
+	// boundary — do not add /admin.
+	//
+	// realmPath() is e.g. "/realms/spawnly"; register the trailing-slash prefix so
+	// only that realm's subtree matches. Fall back to "/realms/" only if the realm
+	// couldn't be derived (misconfigured IDENTITY_INTERNAL_URL surfaces at
+	// discovery anyway) rather than proxying nothing and breaking login.
+	realmPrefix := "/realms/"
+	if rp := auth.realmPath(); rp != "" {
+		realmPrefix = rp + "/"
+	}
+	mux.Handle(realmPrefix, idProxy)
+	mux.Handle("/resources/", idProxy)
+	// Pending spawn-consent is served by the registry-native broker via the
+	// /api/consent-requests routes below (Phase 5b); Keycloak's own consent UI is
+	// not used.
 
 	// Relying-party routes (public). /signin starts the OIDC code+PKCE flow
 	// (require() redirects here); the browser then rests on the /login form above.
@@ -211,7 +267,7 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	// Pending consent requests (Phase 5b broker). The registry owns the
 	// pending->approved/denied lifecycle, so the dashboard banner reads pending
 	// requests for the session user and approves/denies them here rather than
-	// via IdentityServer's CIBA endpoints. The orchestrator scopes every call to
+	// via Keycloak's CIBA endpoints. The orchestrator scopes every call to
 	// the token's user (confused-deputy protection on approve/deny).
 	mux.Handle("GET /api/consent-requests", auth.require(proxy("GET", orchestratorURL+"/v1/consent-requests?status=pending")))
 	mux.Handle("POST /api/consent-requests/{id}/approve", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

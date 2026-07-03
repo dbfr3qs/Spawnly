@@ -10,7 +10,7 @@
 //
 // Per the platform dependency-direction rule, no implementation depends on a
 // specific IdP. The OIDC authenticator validates tokens against a *configured*
-// JWKS (IdentityServer, Cognito, Auth0, ...); it never calls a particular IdP.
+// JWKS (Keycloak, Cognito, Auth0, ...); it never calls a particular IdP.
 package controlplane
 
 import (
