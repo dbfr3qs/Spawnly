@@ -7,6 +7,12 @@ resource "keycloak_realm" "spawnly" {
 
   display_name = "Spawnly"
 
+  # Spawnly-branded login pages. The `spawnly` theme directory ships in the
+  # Keycloak image (root Dockerfile copies keycloak/themes/spawnly into
+  # /opt/keycloak/themes/) — it MUST exist there or Keycloak falls back/errors
+  # on login, so this attribute and that COPY change ship in the same commit.
+  login_theme = "spawnly"
+
   # Refresh-token rotation, one-time use. The mobile client relies on
   # rotation (Config.cs: RefreshTokenUsage.OneTimeOnly); enforcing it at the
   # realm keeps the posture even for the dashboard's offline_access token.
