@@ -6,7 +6,7 @@
 //
 // The control-plane half — verifying the presented credential and deriving an
 // agent identity from it — lives in internal/registrant (registry side) and
-// identityserver (token-minting side).
+// the Keycloak attestation SPI (keycloak/providers, token-minting side).
 package attestor
 
 import "context"

@@ -51,7 +51,7 @@ spec:
                   optional: true
             # --- oidc tier ---
             # - name: CONTROL_PLANE_OIDC_JWKS_URL
-            #   value: "http://identity-server:8080/.well-known/openid-configuration/jwks"
+            #   value: "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs"
             # - name: CONTROL_PLANE_OIDC_AUDIENCE
             #   value: "registry"
             # - name: CONTROL_PLANE_OIDC_SCOPE

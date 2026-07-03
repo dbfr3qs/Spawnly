@@ -210,9 +210,9 @@ func requireToken(v tokenvalidator.TokenValidator, audience, scope string, next 
 // requireAdmin gates a dashboard-facing handler behind an admin role in addition
 // to a valid delegated token: it runs requireToken's token/audience/scope
 // checks, then requires the token's `role` claim to include "admin" (else 403).
-// The admin role is issued by IdentityServer (TestUsers) and rides in the
-// orchestrator-audience access token via the orchestrator ApiResource's
-// UserClaims. This is the orchestrator-side enforcement; the dashboard BFF
+// The admin role is issued by Keycloak (the realm `admin` role) and rides in
+// the orchestrator-audience access token via the realm's flat `role` mapper.
+// This is the orchestrator-side enforcement; the dashboard BFF
 // gates the same routes with requireAdmin too (defense in depth), so a
 // non-admin is rejected at both tiers — UI hiding is cosmetic and never the
 // only gate.
@@ -962,9 +962,10 @@ func getEnv(key, def string) string {
 // IS_JWKS_URL surfaces as a retryable error — the loop logs and retries every
 // 3s rather than blocking startup on a hung connection.
 func buildSpawnValidator(ctx context.Context) tokenvalidator.TokenValidator {
-	pairs := issuerPairs()
+	issuer := getEnv("IS_ISSUER", "http://keycloak:8080/realms/spawnly")
+	jwksURL := getEnv("IS_JWKS_URL", "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs")
 	for attempt := 1; ; attempt++ {
-		v, err := tokenvalidator.NewMulti(ctx, pairs...)
+		v, err := tokenvalidator.New(ctx, issuer, jwksURL)
 		if err == nil {
 			log.Printf("spawn token validator ready after %d attempt(s)", attempt)
 			return v
@@ -972,32 +973,6 @@ func buildSpawnValidator(ctx context.Context) tokenvalidator.TokenValidator {
 		log.Printf("waiting for spawn token validator JWKS (attempt %d): %v", attempt, err)
 		time.Sleep(3 * time.Second)
 	}
-}
-
-// issuerPairs returns the (issuer, JWKS) pairs the spawn validator accepts.
-// MIGRATION-TEMPORARY (removed in Phase 6): during the Keycloak cutover the
-// orchestrator accepts BOTH the IdentityServer issuer (agent tokens, still
-// minted there) and the Keycloak realm issuer (human tokens). IS_ISSUER/
-// IS_JWKS_URL keep the IdentityServer pair; KC_ISSUER/KC_JWKS_URL add the
-// Keycloak realm. KC_ISSUER is opt-in (default empty) so pre-Keycloak deploys
-// stay single-issuer and never wedge waiting for a Keycloak that isn't there.
-func issuerPairs() []tokenvalidator.IssuerJWKS {
-	pairs := []tokenvalidator.IssuerJWKS{{
-		Issuer:  getEnv("IS_ISSUER", "http://identity-server"),
-		JWKSURL: getEnv("IS_JWKS_URL", "http://identity-server/.well-known/openid-configuration/jwks"),
-	}}
-	// KC_ISSUER is OPT-IN (default empty): only when explicitly set does the
-	// validator add the Keycloak pair. Defaulting it on would wedge a deploy that
-	// isn't running Keycloak in the JWKS retry loop, waiting for a Keycloak that
-	// never comes up. The Phase 0 manifests set it explicitly; a pre-Keycloak
-	// deploy leaves it unset and stays single-issuer (IdentityServer only).
-	if kcIssuer := getEnv("KC_ISSUER", ""); kcIssuer != "" {
-		pairs = append(pairs, tokenvalidator.IssuerJWKS{
-			Issuer:  kcIssuer,
-			JWKSURL: getEnv("KC_JWKS_URL", "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs"),
-		})
-	}
-	return pairs
 }
 
 // waitForRegistrySchema blocks until the registry's GET /v1/schema returns 200,

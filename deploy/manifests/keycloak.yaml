@@ -37,8 +37,7 @@ spec:
                 secretKeyRef:
                   name: keycloak-admin
                   key: password
-            # Plain HTTP inside the cluster (TLS is terminated at the edge, like
-            # identity-server's ASPNETCORE_URLS http listener).
+            # Plain HTTP inside the cluster (TLS is terminated at the edge).
             - name: KC_HTTP_ENABLED
               value: "true"
             # FIXED frontend hostname + DYNAMIC backchannel — the correct
@@ -141,9 +140,8 @@ spec:
             # ── Registry-driven identity (Phase 2) ─────────────────────────
             # The attestation authenticator's liveness gate + the identity
             # mapper look agents up in the registry (status active, userId,
-            # agentType==client_id) via AgentRegistryClient. Same value +
-            # control-plane auth the identity-server manifest uses, so the two
-            # IdPs behave identically against the registry.
+            # agentType==client_id) via AgentRegistryClient, carrying the same
+            # control-plane auth the other services present to the registry.
             - name: REGISTRY_URL
               value: "http://registry:8080"
             # Control-plane auth the IdP presents to the registry (must match

@@ -86,17 +86,6 @@ jobs:
         run: npm ci && npm run build
         working-directory: agents/${{ matrix.agent }}
 
-  dotnet:
-    name: dotnet build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0'
-      - name: build IdentityServer
-        run: dotnet build identityserver/IdentityServer.csproj -c Release
-
   java:
     name: keycloak providers build + test
     runs-on: ubuntu-latest

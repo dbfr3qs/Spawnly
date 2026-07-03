@@ -201,8 +201,8 @@ kubectl create secret generic dashboard-user \
   --from-literal=viewerPassword="viewer" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# Keycloak bootstrap admin (Phase 0). Keycloak runs NEXT TO identity-server; the
-# realm (deploy/keycloak/) is applied by Terraform further below. The admin
+# Keycloak bootstrap admin. Keycloak is the platform's sole IdP; the realm
+# (deploy/keycloak/) is applied by Terraform further below. The admin
 # credential is generated here (never baked into the image) and reused across
 # re-bootstraps so a mid-session `terraform apply` keeps working. On kind the
 # store is the in-memory dev-file DB, so this admin is re-created from the Secret
@@ -241,7 +241,6 @@ echo "==> Deploying services..."
 kubectl apply -f deploy/manifests/rbac.yaml
 kubectl apply -f deploy/manifests/spicedb.yaml
 kubectl apply -f deploy/manifests/registry.yaml
-kubectl apply -f deploy/manifests/identityserver.yaml
 kubectl apply -f deploy/manifests/keycloak.yaml
 kubectl apply -f deploy/manifests/sample-api-a.yaml
 kubectl apply -f deploy/manifests/sample-api-b.yaml
@@ -249,6 +248,7 @@ kubectl apply -f deploy/manifests/travel-tools.yaml
 kubectl apply -f deploy/manifests/operator.yaml
 kubectl apply -f deploy/manifests/orchestrator.yaml
 kubectl apply -f deploy/manifests/dashboard.yaml
+kubectl apply -f deploy/manifests/mobile-gateway.yaml
 # Ingress NetworkPolicies for registry/orchestrator/spicedb. Inert under kind's
 # default kindnet (no NetworkPolicy enforcement) — see the file header.
 kubectl apply -f deploy/manifests/networkpolicy.yaml
@@ -257,28 +257,24 @@ kubectl apply -f deploy/manifests/networkpolicy.yaml
 # `:latest`), so the applies above are no-ops and the running pods keep the
 # PREVIOUSLY loaded images — a bootstrap would silently test stale code.
 # Restart every platform deployment so the freshly kind-loaded images take
-# effect (this also resets IdentityServer's in-memory grant store, dropping
-# stale pending CIBA requests from earlier sessions).
+# effect (this also resets Keycloak's in-memory dev-file store, dropping stale
+# pending CIBA requests from earlier sessions).
 echo "==> Restarting platform deployments to pick up freshly loaded images..."
 kubectl rollout restart \
-  deployment/registry deployment/identity-server deployment/keycloak \
+  deployment/registry deployment/keycloak \
   deployment/sample-api-a deployment/sample-api-b \
   deployment/travel-tools deployment/agent-operator \
-  deployment/orchestrator deployment/dashboard
+  deployment/orchestrator deployment/dashboard deployment/mobile-gateway
 
 echo "==> Waiting for all services to be ready..."
 kubectl wait --for=condition=ready pod -l app=spicedb --timeout=120s
 kubectl rollout status deployment/registry --timeout=120s
-kubectl rollout status deployment/identity-server --timeout=120s
-# Keycloak's first start builds/imports the realm DB and can be slower than the
-# .NET IdP, so give it a longer window.
+# Keycloak's first start builds/imports the realm DB, so give it a longer window.
 kubectl rollout status deployment/keycloak --timeout=300s
-kubectl rollout status deployment/sample-api-a --timeout=120s
-kubectl rollout status deployment/sample-api-b --timeout=120s
-kubectl rollout status deployment/travel-tools --timeout=120s
-kubectl rollout status deployment/agent-operator --timeout=120s
-kubectl rollout status deployment/orchestrator --timeout=120s
-kubectl rollout status deployment/dashboard --timeout=120s
+# NOTE: the JWKS-dependent resource servers (sample-api-*, travel-tools,
+# orchestrator, dashboard, operator) are NOT waited on here — they fetch the
+# Keycloak realm JWKS at startup and crash-loop until the `spawnly` realm exists.
+# They are restarted + waited on BELOW, right after the realm is applied.
 
 # ── Keycloak realm (Terraform) ─────────────────────────────────────────────────
 # Declare the `spawnly` realm (clients/scopes/audiences/roles/users) with the
@@ -286,7 +282,7 @@ kubectl rollout status deployment/dashboard --timeout=120s
 # Keycloak's admin API; all secrets are passed as TF vars (the generated admin
 # password, the demo client secrets + alice/viewer passwords that match the
 # `dashboard-user`/manifest values used by the resource servers). Nothing is
-# committed. IdentityServer bring-up above is untouched — agents stay on it.
+# committed.
 #
 # NOTE: on kind, Keycloak uses the in-memory dev-file DB (deploy/manifests/
 # keycloak.yaml), so a keycloak pod restart WIPES the realm — re-run bootstrap
@@ -336,6 +332,23 @@ KC_TF_DIR="$REPO_ROOT/deploy/keycloak"
   terraform -chdir="$KC_TF_DIR" apply -input=false -auto-approve
 )
 echo "  Keycloak realm applied (spawnly)."
+
+# The JWKS-dependent resource servers crash-loop until the realm exists (they do
+# a hard JWKS fetch at startup with no in-process retry). Now that the realm is
+# applied, restart them to clear any CrashLoopBackOff, then wait for them to come
+# ready against the freshly-applied realm.
+echo "==> Restarting + waiting for realm-dependent services..."
+kubectl rollout restart \
+  deployment/sample-api-a deployment/sample-api-b \
+  deployment/travel-tools deployment/agent-operator \
+  deployment/orchestrator deployment/dashboard deployment/mobile-gateway
+kubectl rollout status deployment/sample-api-a --timeout=120s
+kubectl rollout status deployment/sample-api-b --timeout=120s
+kubectl rollout status deployment/travel-tools --timeout=120s
+kubectl rollout status deployment/agent-operator --timeout=120s
+kubectl rollout status deployment/orchestrator --timeout=120s
+kubectl rollout status deployment/dashboard --timeout=120s
+kubectl rollout status deployment/mobile-gateway --timeout=120s
 
 # ── Secrets ──────────────────────────────────────────────────────────────────
 

@@ -66,7 +66,7 @@ func TestReconcileNew_PullsTemplateAndCreatesPod(t *testing.T) {
 		Scheme:       s,
 		Registry:     reg,
 		RegistryURL:  "http://registry:8080",
-		ISTokenURL:   "http://identity-server:8080/connect/token",
+		ISTokenURL:   "http://keycloak:8080/realms/spawnly/protocol/openid-connect/token",
 		SampleAPIURL: "http://sample-api:8080",
 		EventsClient: events.NewMock(),
 	}
@@ -197,7 +197,7 @@ func TestReconcileNew_GlobalAgent_StampsGlobalScopeLabel(t *testing.T) {
 		Scheme:       s,
 		Registry:     reg,
 		RegistryURL:  "http://registry:8080",
-		ISTokenURL:   "http://identity-server:8080/connect/token",
+		ISTokenURL:   "http://keycloak:8080/realms/spawnly/protocol/openid-connect/token",
 		SampleAPIURL: "http://sample-api:8080",
 		EventsClient: events.NewMock(),
 	}
@@ -287,7 +287,7 @@ func TestReconcileNew_EmitsPodCreatedEvent(t *testing.T) {
 		Scheme:       s,
 		Registry:     reg,
 		RegistryURL:  "http://registry:8080",
-		ISTokenURL:   "http://identity-server:8080/connect/token",
+		ISTokenURL:   "http://keycloak:8080/realms/spawnly/protocol/openid-connect/token",
 		SampleAPIURL: "http://sample-api:8080",
 		EventsClient: mockEvents,
 	}
@@ -337,7 +337,7 @@ func TestReconcileNew_WithTask_SetsEnvVar(t *testing.T) {
 		Scheme:       s,
 		Registry:     reg,
 		RegistryURL:  "http://registry:8080",
-		ISTokenURL:   "http://identity-server:8080/connect/token",
+		ISTokenURL:   "http://keycloak:8080/realms/spawnly/protocol/openid-connect/token",
 		SampleAPIURL: "http://sample-api:8080",
 		EventsClient: events.NewMock(),
 	}
@@ -386,7 +386,7 @@ func TestReconcileNew_NilEventsClient_NoPanic(t *testing.T) {
 		Scheme:       s,
 		Registry:     reg,
 		RegistryURL:  "http://registry:8080",
-		ISTokenURL:   "http://identity-server:8080/connect/token",
+		ISTokenURL:   "http://keycloak:8080/realms/spawnly/protocol/openid-connect/token",
 		SampleAPIURL: "http://sample-api:8080",
 		EventsClient: nil,
 	}
@@ -507,7 +507,7 @@ func TestReconcileNew_ConsentRequired_SetsSidecarEnv(t *testing.T) {
 		Scheme:       s,
 		Registry:     reg,
 		RegistryURL:  "http://registry:8080",
-		ISTokenURL:   "http://identity-server:8080/connect/token",
+		ISTokenURL:   "http://keycloak:8080/realms/spawnly/protocol/openid-connect/token",
 		SampleAPIURL: "http://sample-api:8080",
 		EventsClient: events.NewMock(),
 	}

@@ -1,12 +1,16 @@
-# Keycloak realm (Terraform) — Phase 0
+# Keycloak realm (Terraform)
 
-Declares the `spawnly` Keycloak realm that reproduces the OIDC configuration
-previously hardcoded in `identityserver/Config.cs`. This is Phase 0 of the
-Keycloak-replaces-IdentityServer migration (see
-`plans/keycloak-idp/plan.md`): human login + realm shape only. Custom
-attestation, token-exchange, and CIBA SPIs arrive in later phases.
+Declares the `spawnly` Keycloak realm — the OIDC configuration (clients, scopes,
+audiences, roles, users, authentication flows, CIBA) that Keycloak, together
+with the custom Spawnly SPI providers in `keycloak/providers/`, uses to serve
+human login, attestation-based agent token minting, RFC 8693 delegation, and
+CIBA spawn-consent. See `plans/keycloak-idp/plan.md` / `spec.md`.
 
-The in-cluster issuer is exactly `http://keycloak:8080/realms/spawnly`.
+Under Keycloak's fixed-frontend-hostname model (`KC_HOSTNAME` +
+`KC_HOSTNAME_BACKCHANNEL_DYNAMIC`), tokens carry `iss` = the frontend origin
+(on kind `http://localhost:8090/realms/spawnly`), while the token/JWKS
+endpoints resolve to the in-cluster backchannel host
+`http://keycloak:8080/realms/spawnly/...`.
 
 ## What it declares
 

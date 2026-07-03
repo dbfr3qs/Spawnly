@@ -4,7 +4,7 @@ import { InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.
 import { SpawnlyTokenVerifier, parseScopes } from "./auth.js";
 import { requireScope, ScopeError, SCOPE_FX } from "./scopes.js";
 
-const ISSUER = "http://identity-server:8080";
+const ISSUER = "http://localhost:8090/realms/spawnly";
 const AUDIENCE = "travel-tools";
 
 async function setup() {

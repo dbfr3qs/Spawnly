@@ -57,10 +57,27 @@ type cibaTokenSource struct {
 func newCibaTokenSource(cfg config) *cibaTokenSource {
 	return &cibaTokenSource{
 		cfg: cfg,
-		// The backchannel endpoint lives next to the token endpoint.
-		cibaURL: strings.Replace(cfg.isTokenURL, "/connect/token", "/connect/ciba", 1),
+		// The CIBA backchannel-authentication endpoint lives next to the token
+		// endpoint under the same realm base. Keycloak exposes it at
+		// .../protocol/openid-connect/ext/ciba/auth (the token endpoint is
+		// .../protocol/openid-connect/token), so derive it from the token URL by
+		// swapping the trailing "/token" segment.
+		cibaURL: cibaAuthURL(cfg.isTokenURL),
 		source:  cfg.source,
 	}
+}
+
+// cibaAuthURL derives Keycloak's CIBA backchannel-authentication endpoint from
+// the OIDC token endpoint (…/protocol/openid-connect/token →
+// …/protocol/openid-connect/ext/ciba/auth). Falls back to appending the CIBA
+// suffix if the token URL doesn't end in the expected segment.
+func cibaAuthURL(tokenURL string) string {
+	const tokenSuffix = "/token"
+	const cibaSuffix = "/ext/ciba/auth"
+	if strings.HasSuffix(tokenURL, tokenSuffix) {
+		return strings.TrimSuffix(tokenURL, tokenSuffix) + cibaSuffix
+	}
+	return strings.TrimRight(tokenURL, "/") + cibaSuffix
 }
 
 // scopes returns the consent scope set the backchannel request asks for —
@@ -78,6 +95,26 @@ func (cs *cibaTokenSource) covered(requested string) bool {
 	return registry.FirstUncoveredScope(strings.Fields(cs.scopes()), strings.Fields(requested)) == ""
 }
 
+// bindingMessage builds the CIBA binding_message the user sees on the consent
+// prompt. Keycloak's default CIBA validation rejects a binding_message that is
+// >50 chars OR contains anything but basic ALPHANUMERIC characters (no spaces
+// and no punctuation — so ':' and '-' are rejected too). So build a compact
+// "spawn<AgentType>" with every non-alphanumeric stripped, truncated to 50.
+func (cs *cibaTokenSource) bindingMessage() string {
+	var b strings.Builder
+	b.WriteString("spawn")
+	for _, r := range cs.cfg.agentType {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	msg := b.String()
+	if len(msg) > 50 {
+		msg = msg[:50]
+	}
+	return msg
+}
+
 // initiate opens a fresh backchannel authentication request. Callers hold mu.
 func (cs *cibaTokenSource) initiate(ctx context.Context) error {
 	cred, err := cs.source.Fetch(ctx, cs.cfg.isTokenURL)
@@ -90,7 +127,7 @@ func (cs *cibaTokenSource) initiate(ctx context.Context) error {
 		"client_assertion":      {cred.Value},
 		"scope":                 {cs.scopes()},
 		"login_hint":            {"user:" + cs.cfg.userID},
-		"binding_message":       {fmt.Sprintf("%s requests %s", cs.cfg.agentType, cs.scopes())},
+		"binding_message":       {cs.bindingMessage()},
 	}
 	req, err := http.NewRequestWithContext(ctx, "POST", cs.cibaURL, strings.NewReader(form.Encode()))
 	if err != nil {

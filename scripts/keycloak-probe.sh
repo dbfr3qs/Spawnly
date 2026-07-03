@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # scripts/keycloak-probe.sh
 #
-# Keycloak parity probe (kept through Phase 6). Proves the agent-token flow works
-# end-to-end against Keycloak with a REAL registered agent, without cutting the
-# fleet over (agents still mint from IdentityServer for their real work).
+# Keycloak parity probe (kept as a doctor/debug tool). Proves the agent-token
+# flow works end-to-end against Keycloak with a REAL registered agent:
+# client-credentials mint via the attestation SPI, registry-driven identity,
+# RFC 8693 delegation, and CIBA spawn-consent. The full e2e/ suite now covers
+# these flows against the live fleet; this script stays for standalone
+# troubleshooting of the IdP path.
 #
 # Phase 1 asserted: a real SPIRE JWT-SVID mints a client-credentials token via
 # the custom "spawnly-attestation" client authenticator; a garbage assertion is

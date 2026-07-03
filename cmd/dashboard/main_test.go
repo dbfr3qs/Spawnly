@@ -57,7 +57,7 @@ func TestLogsOpTargetCarriesParams(t *testing.T) {
 // stubAuth returns an Authenticator wired with a no-op ensure() and the given
 // oauth config, so token-handling can be exercised without real OIDC discovery.
 func stubAuth(oauth *oauth2.Config) *Authenticator {
-	a := NewAuthenticator("http://localhost:8090", "http://identity-server:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
 	a.once.Do(func() {}) // mark ensure() done so it won't hit the network
 	a.oauth = oauth
 	return a
@@ -160,7 +160,7 @@ func TestProxyAttachesBearerNoUserID(t *testing.T) {
 		tokenSrc:  oauth.TokenSource(context.Background(), &oauth2.Token{AccessToken: "at-1", Expiry: time.Now().Add(time.Hour)}),
 		expiresAt: time.Now().Add(time.Hour),
 	}
-	mux := buildMux(a, upstream.URL, "http://identity-server:8080", "http://docs", fstest.MapFS{})
+	mux := buildMux(a, upstream.URL, "http://keycloak:8080", "http://docs", fstest.MapFS{})
 
 	req := httptest.NewRequest("GET", "/api/agents", nil)
 	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "sid"})
@@ -252,7 +252,7 @@ func TestKeycloakProxyAllowlist(t *testing.T) {
 }
 
 func TestRequireUnauthenticated(t *testing.T) {
-	a := NewAuthenticator("http://localhost:8090", "http://identity-server:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
 	h := a.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("next should not run without a session")
 	}))
@@ -290,7 +290,7 @@ func TestRequireUnauthenticated(t *testing.T) {
 }
 
 func TestRequireAuthenticated(t *testing.T) {
-	a := NewAuthenticator("http://localhost:8090", "http://identity-server:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
 	a.sessions["sid-1"] = session{username: "alice", expiresAt: time.Now().Add(time.Hour)}
 
 	called := false
@@ -316,7 +316,7 @@ func TestRequireAuthenticated(t *testing.T) {
 }
 
 func TestExpiredSessionRejected(t *testing.T) {
-	a := NewAuthenticator("http://localhost:8090", "http://identity-server:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
 	a.sessions["old"] = session{username: "alice", expiresAt: time.Now().Add(-time.Minute)}
 
 	req := httptest.NewRequest("GET", "/api/agents", nil)
@@ -353,7 +353,7 @@ func TestTemplateRoutesRequireAdminAtBFF(t *testing.T) {
 		tokenSrc:  oauth.TokenSource(context.Background(), &oauth2.Token{AccessToken: "at-1", Expiry: time.Now().Add(time.Hour)}),
 		expiresAt: time.Now().Add(time.Hour),
 	}
-	mux := buildMux(a, upstream.URL, "http://identity-server:8080", "http://docs", fstest.MapFS{})
+	mux := buildMux(a, upstream.URL, "http://keycloak:8080", "http://docs", fstest.MapFS{})
 
 	mutateCases := []struct {
 		method string
@@ -456,7 +456,7 @@ func TestTemplateRoutesRequireAdminAtBFF(t *testing.T) {
 // session and isAdmin=false for an ordinary (non-admin) session — the UI gates
 // the Agent Types admin view on this flag.
 func TestHandleMeReportsIsAdmin(t *testing.T) {
-	a := NewAuthenticator("http://localhost:8090", "http://identity-server:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
 	a.sessions["admin-sid"] = session{username: "alice", isAdmin: true, expiresAt: time.Now().Add(time.Hour)}
 	a.sessions["viewer-sid"] = session{username: "viewer", isAdmin: false, expiresAt: time.Now().Add(time.Hour)}
 
@@ -494,7 +494,7 @@ func TestHandleMeReportsIsAdmin(t *testing.T) {
 // through to the wrapped handler. This is the dashboard-BFF enforcement; the
 // orchestrator enforces the same role independently (defense in depth).
 func TestRequireAdmin(t *testing.T) {
-	a := NewAuthenticator("http://localhost:8090", "http://identity-server:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
 	a.sessions["admin-sid"] = session{username: "alice", isAdmin: true, expiresAt: time.Now().Add(time.Hour)}
 	a.sessions["viewer-sid"] = session{username: "viewer", isAdmin: false, expiresAt: time.Now().Add(time.Hour)}
 

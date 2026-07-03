@@ -24,18 +24,12 @@ spec:
               value: "spicedb:50051"
             - name: SPICEDB_PSK
               value: "poc-secret"
+            # Keycloak issuer + JWKS. IS_ISSUER is the FIXED frontend origin
+            # Keycloak stamps on every token (KC_HOSTNAME); IS_JWKS_URL is the
+            # in-cluster backchannel host (KC_HOSTNAME_BACKCHANNEL_DYNAMIC).
             - name: IS_ISSUER
-              value: "http://identity-server:8080"
-            - name: IS_JWKS_URL
-              value: "http://identity-server:8080/.well-known/openid-configuration/jwks"
-            # MIGRATION-TEMPORARY (Keycloak cutover, removed in Phase 6): also
-            # accept Keycloak-minted agent tokens (the attestation SPI path,
-            # exercised by keycloak-probe). KC_ISSUER is the FIXED frontend
-            # origin Keycloak stamps on every token (KC_HOSTNAME); KC_JWKS_URL
-            # is the in-cluster backchannel host. Mirror orchestrator.yaml.
-            - name: KC_ISSUER
               value: "http://localhost:8090/realms/spawnly"
-            - name: KC_JWKS_URL
+            - name: IS_JWKS_URL
               value: "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs"
           ports:
             - containerPort: 8080

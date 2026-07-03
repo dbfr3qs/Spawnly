@@ -9,7 +9,7 @@ You are diagnosing Spawnly cluster health. Live snapshot:
 - Pods: !`kubectl get pods 2>/dev/null | head -30 || echo "kubectl unavailable"`
 - SPIRE pods: !`kubectl get pods -n spire-system 2>/dev/null | head || echo "no spire-system ns"`
 - registry log tail: !`kubectl logs deploy/registry --tail=15 2>/dev/null || echo "registry not running"`
-- identity-server log tail: !`kubectl logs deploy/identity-server --tail=15 2>/dev/null || echo "identity-server not running"`
+- keycloak log tail: !`kubectl logs deploy/keycloak --tail=15 2>/dev/null || echo "keycloak not running"`
 - port-forwards: !`pgrep -af 'kubectl port-forward' 2>/dev/null || echo "none"`
 
 Using the spawnly-platform skill's "operational gotchas", diagnose against the
@@ -27,8 +27,10 @@ known failure modes and report what you find. Check specifically for:
 5. **kubeconfig drift** (devcontainer) — kubectl pointing at localhost:8080 /
    "connection refused". Fix: `kind export kubeconfig --name agent-platform`.
 6. **Port-forward conflicts** — duplicate/leftover forwards on 8080/8090.
-7. **Baked dev keys** — identity-server "Error unprotecting signing key" spam
-   (`identityserver/keys/` was baked into the image; see `.dockerignore`).
+7. **Keycloak realm wiped** — on kind Keycloak uses the in-memory dev-file DB, so
+   a keycloak pod restart drops the `spawnly` realm (clients/scopes/users) and
+   logins/token minting fail. Fix: re-run `make bootstrap` (Terraform re-applies
+   the realm idempotently).
 
 For each problem found: name it, explain the cause in one line, and give the
 exact fix command. **Ask for confirmation before running anything that

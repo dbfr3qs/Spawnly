@@ -88,7 +88,7 @@ func New(ctx context.Context, issuer, jwksURL string) (*JWKSValidator, error) {
 		return nil, err
 	}
 	if _, err := cache.Get(ctx, jwksURL); err != nil {
-		return nil, fmt.Errorf("fetch IS JWKS: %w", err)
+		return nil, fmt.Errorf("fetch JWKS: %w", err)
 	}
 	return &JWKSValidator{issuer: issuer, jwksURL: jwksURL, cache: cache}, nil
 }
@@ -104,9 +104,9 @@ func (v *JWKSValidator) ValidateAccessToken(ctx context.Context, token string) (
 		jwt.WithValidate(true),
 	)
 	if err != nil {
-		// The IdentityServer may have rotated its signing keys (e.g. on redeploy),
-		// leaving our cached JWKS stale. Force a refresh and retry once so key
-		// rotation doesn't require restarting resource servers.
+		// The IdP may have rotated its signing keys (e.g. on redeploy), leaving
+		// our cached JWKS stale. Force a refresh and retry once so key rotation
+		// doesn't require restarting resource servers.
 		if refreshed, rerr := v.cache.Refresh(ctx, v.jwksURL); rerr == nil {
 			if tok2, perr := jwt.Parse([]byte(token),
 				jwt.WithKeySet(refreshed),
@@ -240,106 +240,6 @@ func splitNonEmpty(s string) []string {
 		out = append(out, f)
 	}
 	return out
-}
-
-// ── Transitional multi-issuer support (MIGRATION-TEMPORARY) ──────────────────
-//
-// REMOVE IN PHASE 6. During the Keycloak cutover the fleet's agent tokens are
-// still minted by IdentityServer (issuer http://identity-server:8080) while
-// human tokens are minted by Keycloak (issuer
-// http://keycloak:8080/realms/spawnly). A resource server must accept BOTH for
-// the duration of the migration. MultiIssuerValidator holds one JWKSValidator
-// per (issuer, JWKS URL) pair and tries each in turn: the first that validates
-// wins. Once Phase 6 flips every issuer to Keycloak and deletes IdentityServer,
-// this type and NewMulti go away and callers revert to a single New().
-type MultiIssuerValidator struct {
-	validators []*JWKSValidator
-}
-
-// IssuerJWKS is one (issuer, JWKS URL) pair for NewMulti.
-type IssuerJWKS struct {
-	Issuer  string
-	JWKSURL string
-}
-
-// NewMulti builds a validator that accepts tokens from any of the given
-// (issuer, JWKS URL) pairs. It constructs one JWKSValidator per pair (each
-// fetches its JWKS up front, so an unreachable IdP surfaces as an error the
-// caller's retry loop recovers from). At least one pair is required.
-//
-// MIGRATION-TEMPORARY (see MultiIssuerValidator) — removed in Phase 6.
-func NewMulti(ctx context.Context, pairs ...IssuerJWKS) (*MultiIssuerValidator, error) {
-	if len(pairs) == 0 {
-		return nil, fmt.Errorf("tokenvalidator: NewMulti requires at least one issuer")
-	}
-	m := &MultiIssuerValidator{}
-	for _, p := range pairs {
-		v, err := New(ctx, p.Issuer, p.JWKSURL)
-		if err != nil {
-			return nil, fmt.Errorf("tokenvalidator: issuer %q: %w", p.Issuer, err)
-		}
-		m.validators = append(m.validators, v)
-	}
-	return m, nil
-}
-
-// ValidateAccessToken validates the token against the configured issuers. It
-// first ROUTES on the token's `iss` claim (parsed WITHOUT verification, purely
-// to pick which validator to try) to the matching JWKSValidator, so a token is
-// checked by exactly the validator that owns its issuer. Routing is an
-// optimization, not a trust decision: the chosen JWKSValidator still fully
-// verifies the signature AND re-checks `iss` via jwt.WithIssuer, so a forged
-// `iss` cannot bypass validation — it just picks the (wrong) validator, which
-// then rejects it.
-//
-// When routing MATCHES a validator (routed >= 0), we return that validator's
-// result directly — success or failure. The other validators can never accept
-// the token anyway: each enforces its own jwt.WithIssuer, so a token whose iss
-// matched the routed validator is guaranteed to fail every other validator's
-// issuer check. Trying them would be pure dead work that (a) recreates the very
-// cross-issuer JWKS refresh-and-retry storm this routing exists to prevent, and
-// (b) MASKS the routed validator's real error (e.g. `exp`) behind some other
-// validator's issuer-mismatch. Only when routing finds NO match (routed == -1,
-// e.g. iss absent/unparsed) do we try every validator as a fallback so a
-// correct token is never dropped on a routing miss.
-//
-// Routing matters here because each JWKSValidator does a JWKS refresh-and-retry
-// on failure (for key rotation): without it, every Keycloak token would force a
-// spurious IdentityServer JWKS refresh (and vice-versa) on the losing
-// validator, hammering the other IdP's JWKS endpoint. Widening issuers must not
-// mean cross-issuer refresh storms.
-//
-// MIGRATION-TEMPORARY (see MultiIssuerValidator) — removed in Phase 6.
-func (m *MultiIssuerValidator) ValidateAccessToken(ctx context.Context, token string) (Claims, error) {
-	// Parse the `iss` WITHOUT verification just to route. A bad/forged iss only
-	// misroutes to a validator that then rejects it — never accepts it.
-	routed := -1
-	if unverified, err := jwt.Parse([]byte(token), jwt.WithVerify(false), jwt.WithValidate(false)); err == nil {
-		for i, v := range m.validators {
-			if v.issuer == unverified.Issuer() {
-				routed = i
-				break
-			}
-		}
-	}
-	if routed >= 0 {
-		// The routed validator OWNS this issuer; its result is authoritative. No
-		// other validator can accept the token (each enforces a different issuer),
-		// so return here — don't restart the cross-issuer refresh storm or mask
-		// this validator's real error.
-		return m.validators[routed].ValidateAccessToken(ctx, token)
-	}
-	// Routing miss (iss absent/unparsed/unknown): try every validator so a
-	// correct token is never dropped, returning the last error otherwise.
-	var lastErr error
-	for _, v := range m.validators {
-		c, err := v.ValidateAccessToken(ctx, token)
-		if err == nil {
-			return c, nil
-		}
-		lastErr = err
-	}
-	return Claims{}, lastErr
 }
 
 type MockValidator struct {

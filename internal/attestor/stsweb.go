@@ -11,7 +11,7 @@ import (
 
 // DefaultStsWebAudience is the JWT `aud` requested for the web-identity token —
 // the platform control plane that validates it. Both the registry and the
-// IdentityServer verifiers must expect this value.
+// Keycloak attestation verifiers must expect this value.
 const DefaultStsWebAudience = "spawnly"
 
 // StsWebSource fetches an AWS STS web-identity token via the outbound

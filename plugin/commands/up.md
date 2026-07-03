@@ -29,7 +29,7 @@ Steps:
      images and resets the in-memory stores).
 
 3. **Verify green.** After bootstrap, confirm the core deployments are Ready
-   (registry, identity-server, orchestrator, operator, dashboard) and templates
+   (registry, keycloak, orchestrator, operator, dashboard) and templates
    are seeded. If anything failed, hand off to the `/spawnly:doctor` logic
    (especially the stuck spire-oidc → registry crashloop case).
 

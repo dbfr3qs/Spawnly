@@ -1269,8 +1269,8 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		json.NewEncoder(w).Encode(resp)
 	})
 
-	// Record a fresh user consent for one spawn edge (called by IdentityServer
-	// when the user approves a CIBA request, or auto-renewed on auto-approval).
+	// Record a fresh user consent for one spawn edge (called by Keycloak's CIBA
+	// completion path when the user approves, or auto-renewed on auto-approval).
 	// The expiry is derived here from the parent template's consentTTL so the
 	// policy lives in one place. Replaces any prior record for the same edge.
 	handleCP("POST /v1/consents", func(w http.ResponseWriter, r *http.Request) {
@@ -1340,8 +1340,8 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	})
 
 	// Consent decision for a spawn edge: does a stored consent cover the
-	// requested scopes right now? Always HTTP 200; IdentityServer's CIBA
-	// notification hook calls this to decide auto-approve vs. prompt-the-user.
+	// requested scopes right now? Always HTTP 200; Keycloak's CIBA channel
+	// provider calls this to decide auto-approve vs. prompt-the-user.
 	// Scopes repeat: ?scope=a&scope=b.
 	handleCP("GET /v1/consents/check", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -1680,8 +1680,8 @@ func main() {
 	// registering an agent. It follows the platform-wide ATTESTOR selector by
 	// default (spiffe -> spiffe-svid, aws-sts -> oidc), but REGISTRANT_VERIFIER
 	// can override it explicitly for mixed-attestor deployments. Whatever is
-	// chosen, its AgentID derivation MUST match the IdentityServer verifier's,
-	// or minted tokens won't line up with registry records.
+	// chosen, its AgentID derivation MUST match the Keycloak attestation
+	// verifier's, or minted tokens won't line up with registry records.
 	var attestorDefault string
 	switch a := getEnv("ATTESTOR", "spiffe"); a {
 	case "spiffe":

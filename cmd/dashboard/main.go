@@ -267,7 +267,7 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	// Pending consent requests (Phase 5b broker). The registry owns the
 	// pending->approved/denied lifecycle, so the dashboard banner reads pending
 	// requests for the session user and approves/denies them here rather than
-	// via IdentityServer's CIBA endpoints. The orchestrator scopes every call to
+	// via Keycloak's CIBA endpoints. The orchestrator scopes every call to
 	// the token's user (confused-deputy protection on approve/deny).
 	mux.Handle("GET /api/consent-requests", auth.require(proxy("GET", orchestratorURL+"/v1/consent-requests?status=pending")))
 	mux.Handle("POST /api/consent-requests/{id}/approve", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -109,21 +109,11 @@ COPY sdks/typescript/package.json ./node_modules/@spawnly/sdk/package.json
 COPY --from=build-ts-sdk /sdk/dist/ ./node_modules/@spawnly/sdk/dist/
 CMD ["node", "dist/index.js"]
 
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build-identity-server
-WORKDIR /src
-COPY identityserver/ .
-RUN dotnet publish -c Release -o /app/publish
-
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS identity-server
-WORKDIR /app
-COPY --from=build-identity-server /app/publish .
-ENTRYPOINT ["dotnet", "IdentityServer.dll"]
-
-# ── Keycloak (IdP, Phase 0) ────────────────────────────────────────────────
-# Custom Keycloak image that runs `kc.sh build` for an optimized server. Brought
-# up NEXT TO identity-server on kind: humans log in via Keycloak, agents stay on
-# IdentityServer until later phases. Base pinned by DIGEST (26.4) so the build is
-# reproducible and can't drift under a moving tag.
+# ── Keycloak (IdP) ─────────────────────────────────────────────────────────
+# Custom Keycloak image that runs `kc.sh build` for an optimized server. It is
+# the platform's sole IdP: humans log in via Keycloak, and agents mint tokens
+# via the custom attestation SPI baked in below. Base pinned by DIGEST (26.4) so
+# the build is reproducible and can't drift under a moving tag.
 #
 # Features enabled at BUILD time (they can't be turned on at runtime on an
 # optimized image):
@@ -171,7 +161,7 @@ COPY --from=build-keycloak-providers /src/target/spawnly-keycloak-providers.jar 
 # — two channel factories now exist (built-in ciba-http-auth-channel + ours) and
 # the default must be pinned. Ours drives consent through the REGISTRY
 # (dashboard/mobile) rather than an HTTP channel or Keycloak's built-in consent
-# screen, matching IdentityServer.
+# screen.
 # --spi-ciba-login-user-resolver-provider-default: select the custom Spawnly
 # CIBA login-user resolver, which accepts login_hint="user:<id>" (the form the
 # sidecar sends) as well as a bare "<id>", matching the C# CibaUserValidator.

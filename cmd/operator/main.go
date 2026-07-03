@@ -46,7 +46,7 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	registryURL := getenv("REGISTRY_URL", "http://registry:8080")
-	isTokenURL := getenv("IS_TOKEN_URL", "http://identity-server:8080/connect/token")
+	isTokenURL := getenv("IS_TOKEN_URL", "http://keycloak:8080/realms/spawnly/protocol/openid-connect/token")
 	sampleAPIURL := getenv("SAMPLE_API_URL", "http://sample-api-a:8080")
 	apiAURL := getenv("API_A_URL", "http://sample-api-a:8080")
 	apiBURL := getenv("API_B_URL", "http://sample-api-b:8080")

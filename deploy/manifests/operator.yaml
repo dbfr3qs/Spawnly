@@ -22,7 +22,7 @@ spec:
             - name: REGISTRY_URL
               value: "http://registry:8080"
             - name: IS_TOKEN_URL
-              value: "http://identity-server:8080/connect/token"
+              value: "http://keycloak:8080/realms/spawnly/protocol/openid-connect/token"
             - name: SAMPLE_API_URL
               value: "http://sample-api-a:8080"
             - name: ORCHESTRATOR_URL

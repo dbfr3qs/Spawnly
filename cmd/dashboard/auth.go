@@ -84,7 +84,7 @@ func NewAuthenticator(authority, internalURL, clientID, clientSecret string) *Au
 }
 
 // ensure lazily performs OIDC discovery. Done on first use (not at startup) so
-// the listener is already up and identity-server has had time to come ready.
+// the listener is already up and Keycloak has had time to come ready.
 func (a *Authenticator) ensure(ctx context.Context) error {
 	a.once.Do(func() {
 		// Split-horizon under Keycloak's fixed-frontend-hostname model: the
@@ -387,8 +387,8 @@ func isPageNavigation(r *http.Request) bool {
 // or a refresh fails (callers fail closed with a 5xx); never an empty/stale token.
 //
 // Refresh runs against the discovered token endpoint, which is the internal
-// identity-server URL (split-horizon: see ensure), so the back-channel never
-// depends on the browser-facing origin.
+// Keycloak URL (split-horizon: see ensure), so the back-channel never depends
+// on the browser-facing origin.
 func (a *Authenticator) orchestratorToken(ctx context.Context, r *http.Request) (string, error) {
 	if err := a.ensure(ctx); err != nil {
 		return "", err

@@ -66,12 +66,11 @@ resource "keycloak_openid_client_optional_scopes" "dashboard" {
 # sub = username. Keycloak's default `sub` is the user UUID, but the platform
 # keys HUMAN identity on the username (orchestrator does
 # strings.TrimPrefix(claims.User, "user:"); the sidecar sends
-# login_hint="user:"+userID; IdentityServer's CibaUserValidator resolves it via
-# FindByUsername). A UUID sub would split identity across the dual-issuer
-# boundary and break consent, so we override `sub` = username for the human
-# clients (dashboard + mobile), matching IdentityServer and the Phase 2
-# sub-override direction. Machine/control-plane clients keep the default UUID
-# sub (they're on IdentityServer in Phase 0 and carry no user identity anyway).
+# login_hint="user:"+userID; the CIBA login-user resolver looks it up by
+# username). A UUID sub would break consent keying, so we override `sub` =
+# username for the human clients (dashboard + mobile). Machine/control-plane
+# clients keep the default UUID sub; their user identity comes from the
+# registry-driven identity mapper (sub=user:<id>), not this human sub override.
 resource "keycloak_openid_user_property_protocol_mapper" "dashboard_sub_username" {
   realm_id  = keycloak_realm.spawnly.id
   client_id = keycloak_openid_client.dashboard.id

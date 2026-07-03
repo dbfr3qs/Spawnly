@@ -28,13 +28,13 @@ analyze-dashboard.mjs
 e2e/analyze-ui.mjs
 e2e/test-theme-*.mjs
 
-# .NET build output
-identityserver/bin/
-identityserver/obj/
+# Keycloak SPI provider build output (Maven)
+keycloak/providers/target/
+
+# Stray local tooling caches
 dotnet/
 
 # IDE
-identityserver/.idea/
 .idea/
 *.suo
 *.user
@@ -55,7 +55,5 @@ kubeconfig
 .env.local
 !.env.example
 
-# Duende auto-generated dev signing keys (local runs)
-identityserver/keys/
 plans/
 .piignore

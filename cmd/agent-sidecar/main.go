@@ -30,8 +30,8 @@ type config struct {
 	registryURL string
 	isTokenURL  string
 	socketPath  string
-	// source fetches the attestation credential the sidecar presents to the
-	// IdentityServer (a JWT-SVID under SPIFFE/SPIRE). Pluggable per ATTESTOR.
+	// source fetches the attestation credential the sidecar presents to
+	// Keycloak (a JWT-SVID under SPIFFE/SPIRE). Pluggable per ATTESTOR.
 	source attestor.Source
 	// consentRequired (CONSENT_REQUIRED=true, stamped by the orchestrator from
 	// the parent template) gates the agent's tokens behind a CIBA backchannel

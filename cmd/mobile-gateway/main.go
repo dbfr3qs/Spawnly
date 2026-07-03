@@ -28,36 +28,16 @@ func getEnv(key, def string) string {
 // orchestrator's buildSpawnValidator (the JWKS fetch is bounded inside
 // tokenvalidator.New, so a hung IdP surfaces as a retryable error).
 func buildValidator(ctx context.Context) tokenvalidator.TokenValidator {
-	pairs := issuerPairs()
+	issuer := getEnv("IS_ISSUER", "http://keycloak:8080/realms/spawnly")
+	jwksURL := getEnv("IS_JWKS_URL", "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs")
 	for attempt := 1; ; attempt++ {
-		v, err := tokenvalidator.NewMulti(ctx, pairs...)
+		v, err := tokenvalidator.New(ctx, issuer, jwksURL)
 		if err == nil {
 			return v
 		}
 		log.Printf("waiting for mobile token validator JWKS (attempt %d): %v", attempt, err)
 		time.Sleep(3 * time.Second)
 	}
-}
-
-// issuerPairs returns the (issuer, JWKS) pairs the gateway accepts.
-// MIGRATION-TEMPORARY (removed in Phase 6): during the Keycloak cutover the
-// gateway accepts BOTH the IdentityServer issuer and the Keycloak realm issuer,
-// so a mobile token minted by either IdP validates. KC_ISSUER is opt-in
-// (default empty) so pre-Keycloak deploys stay single-issuer and never wedge
-// waiting for a Keycloak that isn't there. Mirrors the orchestrator's
-// issuerPairs.
-func issuerPairs() []tokenvalidator.IssuerJWKS {
-	pairs := []tokenvalidator.IssuerJWKS{{
-		Issuer:  getEnv("IS_ISSUER", "http://identity-server"),
-		JWKSURL: getEnv("IS_JWKS_URL", "http://identity-server/.well-known/openid-configuration/jwks"),
-	}}
-	if kcIssuer := getEnv("KC_ISSUER", ""); kcIssuer != "" {
-		pairs = append(pairs, tokenvalidator.IssuerJWKS{
-			Issuer:  kcIssuer,
-			JWKSURL: getEnv("KC_JWKS_URL", "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs"),
-		})
-	}
-	return pairs
 }
 
 // buildControlPlaneAuth selects the authenticator for the /internal/notify

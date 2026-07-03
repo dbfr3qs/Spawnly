@@ -13,7 +13,7 @@ export function parseScopes(scope: unknown): string[] {
 }
 
 export interface SpawnlyVerifierOptions {
-  /** IdP issuer the token's `iss` must equal (IS_ISSUER, e.g. http://identity-server:8080). */
+  /** IdP issuer the token's `iss` must equal (IS_ISSUER, e.g. http://localhost:8090/realms/spawnly). */
   issuer: string;
   /** IdP JWKS endpoint (IS_JWKS_URL). */
   jwksUrl: string;
