@@ -1,11 +1,10 @@
 # Base kustomization for the platform manifests.
 #
 # Exists so out-of-repo overlays (e.g. the private AWS deploy in spawnly-infra)
-# can consume this directory as a pinned remote kustomize base:
-#   resources:
-#     - github.com/dbfr3qs/Spawnly/deploy/manifests?ref=main
-# Resources are listed by relative path (no parent-escaping) so the remote base
-# builds without needing LoadRestrictionsNone.
+# can consume this directory as a kustomize base. spawnly-infra vendors this
+# directory locally via its deploy/aws/sync-bases.sh (the repo is private, so it
+# is no longer consumed as a remote base). Resources are listed by relative path
+# (no parent-escaping) so the base builds without needing LoadRestrictionsNone.
 #
 # Order mirrors scripts/bootstrap.sh: RBAC and SpiceDB first, then the control
 # plane, sample APIs, and the ingress NetworkPolicies last.
