@@ -73,8 +73,18 @@ jobs:
         with:
           node-version: '22'
 
+      # bootstrap.sh applies the Keycloak realm (deploy/keycloak/) with the
+      # keycloak/keycloak Terraform provider, so the runner needs terraform.
+      # terraform_wrapper=false: the action's default wrapper shims terraform
+      # for step outputs and breaks plain shell invocations like bootstrap's.
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.15.7'
+          terraform_wrapper: false
+
       # Brings up the whole platform: Kind cluster, all images built + loaded,
-      # SPIRE, CRD, control-plane secret, every deployment, seeded templates.
+      # SPIRE, CRD, control-plane secret, every deployment, seeded templates,
+      # and the Keycloak realm (Terraform).
       - name: Bootstrap the platform
         run: ./scripts/bootstrap.sh
 
