@@ -179,6 +179,10 @@ RUN /opt/keycloak/bin/kc.sh build \
 
 FROM quay.io/keycloak/keycloak:26.4@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281d480c7ca402f51ed3d5977e6007 AS keycloak
 COPY --from=build-keycloak /opt/keycloak/ /opt/keycloak/
+# Custom `spawnly` login theme (CSS-only reskin of keycloak.v2). Directory
+# themes under /opt/keycloak/themes/ are loaded at RUNTIME on the optimized
+# image, so this needs no `kc.sh build` change — copy it straight in.
+COPY keycloak/themes/spawnly /opt/keycloak/themes/spawnly
 # Start the pre-built (optimized) server; the manifest supplies KC_HOSTNAME /
 # KC_HTTP_ENABLED / admin bootstrap creds so no secret is baked here.
 ENTRYPOINT ["/opt/keycloak/bin/kc.sh"]

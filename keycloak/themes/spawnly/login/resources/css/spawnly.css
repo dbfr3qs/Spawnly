@@ -1,0 +1,226 @@
+/*
+ * Spawnly login theme — palette lifted VERBATIM from the dashboard's CSS
+ * variables (cmd/dashboard/static/index.html lines 10-48): dark by default,
+ * light under `@media (prefers-color-scheme: light)`, with matching
+ * `color-scheme`. This restyles keycloak.v2's existing PatternFly v5 classes
+ * and Keycloak #kc-* ids ONLY — no markup, no element-id, no .ftl changes.
+ *
+ * The login page has no user theme-toggle (unlike the dashboard, whose
+ * :root[data-theme] switch defaults to dark), so this theme keys off the OS:
+ * dark palette by default, light only under `@media (prefers-color-scheme:
+ * light)`. On a dark-OS browser keycloak.v2's JS adds a `pf-v5-theme-dark`
+ * class to <html> and PatternFly's dark variables kick in via descendant
+ * selectors that would out-specify our single-class overrides; the
+ * colour-critical declarations below therefore carry `!important` to win over
+ * that theme layer. The `!important` is confined to colour/background/border —
+ * never to layout.
+ */
+
+/* Dark palette (default) — index.html:10-28 */
+:root {
+  --bg:        #1a1626;
+  --card:      #2a1f42;
+  --accent:    #6d28d9;
+  --accent-hi: #7c3aed;
+  --border:    #3d2667;
+  --text:      #f3f0ff;
+  --text-dim:  #b4a5d6;
+  --green:     #10b981;
+  --blue:      #3b82f6;
+  --red:       #ef4444;
+  --grey:      #8b7ca8;
+  --indigo:    #6366f1;
+  --purple:    #a855f7;
+  --orange:    #f97316;
+  --font:      'Segoe UI', system-ui, -apple-system, sans-serif;
+
+  color-scheme: dark;
+
+  /* keycloak.v2 draws the card's top accent bar from this var (styles.css);
+     re-point it at the Spawnly accent instead of PatternFly blue. */
+  --keycloak-card-top-color: var(--accent);
+}
+
+/* Light palette — index.html:30-48 */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg:        #faf5ff;
+    --card:      #ffffff;
+    --accent:    #6d28d9;
+    --accent-hi: #5b21b6;
+    --border:    #e9d5ff;
+    --text:      #2a1f42;
+    --text-dim:  #6d28d9;
+    --green:     #059669;
+    --blue:      #2563eb;
+    --red:       #dc2626;
+    --grey:      #6b7280;
+    --indigo:    #4f46e5;
+    --purple:    #9333ea;
+    --orange:    #ea580c;
+
+    color-scheme: light;
+  }
+}
+
+/* ── Page background ────────────────────────────────────────────────────── */
+/* keycloak.v2 paints `.login-pf body` with a background-image; replace it with
+   the flat Spawnly bg (the shorthand also clears that image). #keycloak-bg is
+   the <body> id, so this out-specifies `.login-pf body` without !important. */
+body#keycloak-bg {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+}
+
+/* ── Login card ─────────────────────────────────────────────────────────── */
+.pf-v5-c-login__main {
+  background-color: var(--card) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 12px;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.35);
+}
+
+.pf-v5-c-login__main-header,
+.pf-v5-c-login__main-body,
+.pf-v5-c-login__main-footer {
+  background-color: transparent !important;
+  color: var(--text) !important;
+}
+
+/* Card title ("Sign in to your account"). */
+.pf-v5-c-title,
+#kc-page-title {
+  color: var(--text) !important;
+}
+
+/* ── Wordmark (Keycloak realm display_name = "Spawnly") ─────────────────── */
+/* keycloak.v2 forces this white with !important, so we must too. Echo the
+   dashboard brand: weight 600, gentle tracking (not uppercase), plus the
+   signature glowing purple dot (`header h1::before`, index.html:102-110). */
+#kc-header-wrapper {
+  color: var(--text) !important;
+  font-family: var(--font);
+  font-weight: 600;
+  font-size: 30px;
+  letter-spacing: 0.5px;
+  text-transform: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+
+#kc-header-wrapper::before {
+  content: '';
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--purple);
+  box-shadow: 0 0 10px var(--purple);
+}
+
+/* ── Labels ─────────────────────────────────────────────────────────────── */
+.pf-v5-c-form__label,
+.pf-v5-c-form__label-text {
+  color: var(--text-dim) !important;
+}
+
+/* ── Inputs ─────────────────────────────────────────────────────────────── */
+/* The PatternFly form-control <span> carries the box; the <input> is
+   transparent inside it. Tint both. */
+.pf-v5-c-form-control {
+  background-color: var(--bg) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px;
+  /* PatternFly draws its focus indicator as an ::after border-bottom fed by
+     this custom property (stock: an active-blue). Re-point it at the Spawnly
+     accent so no stock-blue underline shows through on focus. */
+  --pf-v5-c-form-control--focus--after--BorderBottomColor: var(--accent-hi);
+}
+
+.pf-v5-c-form-control,
+.pf-v5-c-form-control input,
+.pf-v5-c-form-control input::placeholder {
+  color: var(--text) !important;
+}
+
+.pf-v5-c-form-control input {
+  background-color: transparent !important;
+}
+
+/* Focus ring in the Spawnly accent. color-mix keeps the ring tracking whichever
+   palette (dark/light) is active, matching the border on the same element. */
+.pf-v5-c-form-control:focus-within {
+  border-color: var(--accent-hi) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-hi) 35%, transparent);
+}
+
+/* Invalid-credentials field state. */
+.pf-v5-c-form-control.pf-m-error {
+  border-color: var(--red) !important;
+}
+
+/* ── Primary button (#kc-login "Sign In") ───────────────────────────────── */
+.pf-v5-c-button.pf-m-primary {
+  background-color: var(--accent) !important;
+  color: #ffffff !important;
+  border: 1px solid transparent !important;
+  border-radius: 8px;
+}
+
+.pf-v5-c-button.pf-m-primary:hover,
+.pf-v5-c-button.pf-m-primary:focus {
+  background-color: var(--accent-hi) !important;
+}
+
+/* Show/hide-password control button — match the input chrome. */
+.pf-v5-c-button.pf-m-control {
+  background-color: var(--bg) !important;
+  color: var(--text-dim) !important;
+  border: 1px solid var(--border) !important;
+}
+
+/* ── Links (register / reset / try-another-way) ─────────────────────────── */
+.pf-v5-c-login a,
+#kc-info a {
+  color: var(--accent-hi) !important;
+}
+
+.pf-v5-c-login a:hover,
+#kc-info a:hover {
+  color: var(--purple) !important;
+}
+
+/* ── Error / alert text and boxes ───────────────────────────────────────── */
+/* Inline field feedback ("Invalid username or password."). */
+.kc-feedback-text,
+.pf-v5-c-helper-text__item.pf-m-error,
+.pf-v5-c-helper-text__item-text.pf-m-error {
+  color: var(--red) !important;
+}
+
+/* Page-level alert banner (error/info/warning/success pages share the DOM). */
+.pf-v5-c-alert {
+  background-color: var(--card) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px;
+}
+
+.pf-v5-c-alert.pf-m-danger {
+  border-color: var(--red) !important;
+}
+
+.pf-v5-c-alert.pf-m-warning {
+  border-color: var(--orange) !important;
+}
+
+.pf-v5-c-alert.pf-m-success {
+  border-color: var(--green) !important;
+}
+
+.pf-v5-c-alert.pf-m-info {
+  border-color: var(--blue) !important;
+}
