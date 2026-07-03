@@ -7,14 +7,20 @@ own `make` targets and APIs in guided, state-aware commands, and adds an ambient
 
 ## Install
 
-From a checkout of this repo:
+This repo is private, so installing the plugin requires repo access — an SSH
+key GitHub accepts for `dbfr3qs/Spawnly`. Add the marketplace over SSH:
 
 ```
-/plugin marketplace add dbfr3qs/Spawnly
+/plugin marketplace add git@github.com:dbfr3qs/Spawnly.git
 /plugin install spawnly
 ```
 
 (or `/plugin marketplace add .` if you're pointing at a local clone.)
+
+**Existing installs:** marketplaces added via the old public shorthand (the
+bare `dbfr3qs/Spawnly` slug) will fail on refresh now that the repo is private.
+Fix it with `/plugin marketplace remove spawnly`, then re-add via the SSH URL
+above and `/plugin install spawnly` again.
 
 ## Get going in two commands
 
