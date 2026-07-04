@@ -17,10 +17,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/spawnly/platform/internal/controlplane"
 	"github.com/spawnly/platform/internal/events"
 	"github.com/spawnly/platform/internal/registrant"
 	"github.com/spawnly/platform/internal/registry"
+	"github.com/spawnly/platform/internal/registry/dynamostore"
 	"github.com/spawnly/platform/internal/spicedb"
 	"github.com/spawnly/platform/internal/spiffe"
 )
@@ -57,14 +61,13 @@ type store struct {
 	consentRequests map[string]registry.ConsentRequest
 	openRequests    map[string]string // consentKey -> pending request ID
 
-	// Active SpiceDB schema: the text written to SpiceDB on boot, the model used
-	// to validate templates, plus version/source for GET /v1/schema. Seeded with
-	// the embedded default in newStore; main() overrides it from
-	// SPICEDB_SCHEMA_PATH when set.
-	schemaModel   *registry.SchemaModel
-	schemaText    string
-	schemaVersion string
-	schemaSource  string
+	// Active SpiceDB schema (text/version/source + parsed validation model).
+	// Embedded so SetSchema/Schema/ValidateTemplate are shared verbatim with the
+	// DynamoDB store — the schema is boot-time config both stores keep in memory,
+	// NOT persisted data (see registry.SchemaState). Seeded with the embedded
+	// default in newStore; main() re-applies the loaded active schema (default or
+	// SPICEDB_SCHEMA_PATH override).
+	registry.SchemaState
 }
 
 func newStore() *store {
@@ -76,37 +79,8 @@ func newStore() *store {
 		consentRequests: map[string]registry.ConsentRequest{},
 		openRequests:    map[string]string{},
 	}
-	s.setSchema(defaultSchema, defaultSchemaVersion, "default")
+	s.SetSchema(defaultSchema, defaultSchemaVersion, "default")
 	return s
-}
-
-// setSchema records the active schema text/version/source and parses it into a
-// validation model. A parse failure disables template validation (model stays
-// nil) rather than crashing — the embedded default is known-good, so this only
-// degrades gracefully for a malformed override.
-func (s *store) setSchema(text, version, source string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.schemaText, s.schemaVersion, s.schemaSource = text, version, source
-	m, err := registry.ParseSchema(text)
-	if err != nil {
-		log.Printf("schema parse failed (source=%s); template validation disabled: %v", source, err)
-		s.schemaModel = nil
-		return
-	}
-	s.schemaModel = m
-}
-
-// validateTemplate checks a template's relations against the active schema.
-// Returns nil when validation is disabled (no parsed model).
-func (s *store) validateTemplate(t registry.AgentTemplate) error {
-	s.mu.RLock()
-	m := s.schemaModel
-	s.mu.RUnlock()
-	if m == nil {
-		return nil
-	}
-	return m.Validate(t.AuthZ)
 }
 
 func (s *store) putTemplate(t registry.AgentTemplate) {
@@ -218,8 +192,11 @@ func (s *store) updateAgent(id, status string) bool {
 	return true
 }
 
+// consentKey / openRequestKey delegate to the shared registry key builders so the
+// in-memory store and the DynamoDB store serialise edges identically (single
+// source of truth in the registry contract).
 func consentKey(userID, parentType, childType string) string {
-	return userID + "|" + parentType + "|" + childType
+	return registry.ConsentEdgeKey(userID, parentType, childType)
 }
 
 // upsertConsent stores a fresh grant for its (user, parentType, childType)
@@ -326,16 +303,8 @@ func (s *store) createConsentRequest(req registry.ConsentRequest) (registry.Cons
 	return req, true
 }
 
-// openRequestKey is the dedup key for an open (pending) consent request. It is
-// the specific waiting agent when known (so each consent-gated agent gets its
-// own correlatable request, and a retry from the same agent's sidecar dedupes),
-// falling back to the (user, parentType, childType) edge for callers that don't
-// identify an agent. Consent *grants* and the approve-sweep remain per-edge.
 func openRequestKey(userID, parentType, childType, agentID string) string {
-	if agentID != "" {
-		return "agent:" + agentID
-	}
-	return consentKey(userID, parentType, childType)
+	return registry.OpenRequestKey(userID, parentType, childType, agentID)
 }
 
 // createApprovedConsentRequest stores a request already resolved as approved —
@@ -463,10 +432,17 @@ func (s *store) resolveConsentRequest(id, userID string, approve bool, scopes []
 // It is built on the registry.Store primitives GetAgent + ListChildren (Phase
 // 4), so the traversal logic is storage-agnostic: each BFS step is one backend
 // call, which a DynamoDB Store turns into a GetItem / ParentID-GSI Query.
-func subtree(ctx context.Context, s registry.Store, id string) []string {
-	root, _ := s.GetAgent(ctx, id)
+// Returns (nil, nil) when the id is unknown; a non-nil error means a backend read
+// failed and the caller MUST fail the request rather than act on a partial walk —
+// a truncated subtree would silently leave descendants un-revoked (still holding
+// live authority), so the durable-backend error path fails loud (5xx).
+func subtree(ctx context.Context, s registry.Store, id string) ([]string, error) {
+	root, err := s.GetAgent(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	if root.AgentID == "" {
-		return nil
+		return nil, nil
 	}
 	out := []string{}
 	seen := map[string]bool{}
@@ -479,12 +455,15 @@ func subtree(ctx context.Context, s registry.Store, id string) []string {
 		}
 		seen[cur] = true
 		out = append(out, cur)
-		children, _ := s.ListChildren(ctx, cur)
+		children, err := s.ListChildren(ctx, cur)
+		if err != nil {
+			return nil, err
+		}
 		for _, c := range children {
 			queue = append(queue, c.AgentID)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // agentOwnedBy reports whether the agent exists and is owned by userId. Ownership
@@ -593,14 +572,24 @@ func relationResourceTypes(tpl registry.AgentTemplate, hasTenant bool) []string 
 // cascade never clobbers a descendant that already exited (completed/failed/
 // killed) — that node keeps its terminal status and resumeNode won't resurrect
 // it. This also makes revoke idempotent.
-func revokeNode(ctx context.Context, s registry.Store, sdb spicedb.Client, id string) bool {
-	// Best-effort/idempotent: store errors are logged-and-ignored (the in-memory
-	// store never errors; a durable backend's transient error must not abort a
-	// cascade mid-subtree).
-	if rec, _ := s.GetAgent(ctx, id); rec.Status != "active" {
-		return false
+// Returns (revoked?, error). A non-nil error (agent read OR the status write
+// failed) must abort the cascade with a 5xx rather than silently skip the node:
+// a swallowed read/write error here would drop a descendant's revocation while
+// still reporting success, leaving it with live authority. The SpiceDB tuple drop
+// and the audit event stay best-effort (logged) — the status flip is the durable
+// pivot permission checks key off, and an external-system or audit-log hiccup must
+// not un-revoke an agent whose record already flipped.
+func revokeNode(ctx context.Context, s registry.Store, sdb spicedb.Client, id string) (bool, error) {
+	rec, err := s.GetAgent(ctx, id)
+	if err != nil {
+		return false, err
 	}
-	s.UpdateAgentStatus(ctx, id, "revoked")
+	if rec.Status != "active" {
+		return false, nil // idempotent: never clobber a node that already exited
+	}
+	if _, err := s.UpdateAgentStatus(ctx, id, "revoked"); err != nil {
+		return false, err
+	}
 	// Phase 5a: revoke is reversible, so drop only the agent's `enabled` status
 	// tuple — a single write regardless of template size. The template relations
 	// are deliberately left in place so resumeNode can re-enable in O(1) without
@@ -610,12 +599,14 @@ func revokeNode(ctx context.Context, s registry.Store, sdb spicedb.Client, id st
 	if err := sdb.DeleteRelationship(ctx, "agent:"+id, "enabled", "agent:"+id); err != nil {
 		log.Printf("spicedb revoke (enabled-tuple delete) error for %s: %v", id, err)
 	}
-	s.AppendEvent(ctx, id, events.Event{
+	if _, err := s.AppendEvent(ctx, id, events.Event{
 		Source:  events.SourceRegistry,
 		Type:    "agent_revoked",
 		Payload: mustMarshal(map[string]string{"agentId": id}),
-	})
-	return true
+	}); err != nil {
+		log.Printf("append agent_revoked event error for %s: %v", id, err)
+	}
+	return true, nil
 }
 
 // resumeNode reverses revokeNode by re-writing the agent's single `enabled`
@@ -627,20 +618,30 @@ func revokeNode(ctx context.Context, s registry.Store, sdb spicedb.Client, id st
 // relations were never removed by revoke, so re-enabling is a single write that
 // does not depend on the template still existing or matching what it was at
 // registration time (fixing the re-derivation-drift risk of the old approach).
-func resumeNode(ctx context.Context, s registry.Store, sdb spicedb.Client, id string) bool {
-	if rec, _ := s.GetAgent(ctx, id); rec.Status != "revoked" {
-		return false
+// Returns (resumed?, error). Like revokeNode, a backend read/write error aborts
+// the cascade with a 5xx rather than silently skipping the node.
+func resumeNode(ctx context.Context, s registry.Store, sdb spicedb.Client, id string) (bool, error) {
+	rec, err := s.GetAgent(ctx, id)
+	if err != nil {
+		return false, err
 	}
-	s.UpdateAgentStatus(ctx, id, "active")
+	if rec.Status != "revoked" {
+		return false, nil
+	}
+	if _, err := s.UpdateAgentStatus(ctx, id, "active"); err != nil {
+		return false, err
+	}
 	if err := sdb.WriteRelationship(ctx, "agent:"+id, "enabled", "agent:"+id); err != nil {
 		log.Printf("spicedb resume (enabled-tuple write) error for %s: %v", id, err)
 	}
-	s.AppendEvent(ctx, id, events.Event{
+	if _, err := s.AppendEvent(ctx, id, events.Event{
 		Source:  events.SourceRegistry,
 		Type:    "agent_resumed",
 		Payload: mustMarshal(map[string]string{"agentId": id}),
-	})
-	return true
+	}); err != nil {
+		log.Printf("append agent_resumed event error for %s: %v", id, err)
+	}
+	return true, nil
 }
 
 // rejectDuplicateUserID is a defense-in-depth guard for every userId-scoped
@@ -1102,14 +1103,24 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		nodes := subtree(r.Context(), s, id)
+		nodes, err := subtree(r.Context(), s, id)
+		if storeErr(w, err) {
+			return
+		}
 		if nodes == nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 		revoked := []string{}
 		for _, id := range nodes {
-			if revokeNode(r.Context(), s, sdb, id) {
+			// A per-node backend error fails the whole cascade (5xx): better a loud,
+			// retryable failure (revoke is idempotent) than a 200 that silently left
+			// descendants un-revoked with live authority.
+			ok, err := revokeNode(r.Context(), s, sdb, id)
+			if storeErr(w, err) {
+				return
+			}
+			if ok {
 				revoked = append(revoked, id)
 			}
 		}
@@ -1131,14 +1142,21 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		nodes := subtree(r.Context(), s, id)
+		nodes, err := subtree(r.Context(), s, id)
+		if storeErr(w, err) {
+			return
+		}
 		if nodes == nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 		resumed := []string{}
 		for _, id := range nodes {
-			if resumeNode(r.Context(), s, sdb, id) {
+			ok, err := resumeNode(r.Context(), s, sdb, id)
+			if storeErr(w, err) {
+				return
+			}
+			if ok {
 				resumed = append(resumed, id)
 			}
 		}
@@ -1161,7 +1179,10 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		nodes := subtree(r.Context(), s, id)
+		nodes, err := subtree(r.Context(), s, id)
+		if storeErr(w, err) {
+			return
+		}
 		if nodes == nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -1764,12 +1785,14 @@ func main() {
 	// configured JWKS (any IdP), enforcing audience + scope.
 	cpAuth := buildControlPlaneAuth(ctx)
 
-	s := newStore() // already seeded with the embedded default schema
-	if schemaSource != "default" {
-		// Only an override needs a re-parse; the default was parsed in newStore.
-		s.setSchema(activeSchema, schemaVersion, schemaSource)
-	}
-	log.Printf("registry listening on :8080 (schema source=%s version=%s)", schemaSource, schemaVersion)
+	s := buildStore(ctx)
+	// Apply the active schema (default or SPICEDB_SCHEMA_PATH override) to whatever
+	// backend was selected. The schema is boot-time config every Store keeps in
+	// memory (registry.SchemaState), so this seeds the DynamoDB store — which
+	// starts with none — and re-applies the same value to the in-memory store.
+	s.SetSchema(activeSchema, schemaVersion, schemaSource)
+	log.Printf("registry listening on :8080 (store=%s schema source=%s version=%s)",
+		getEnv("STORE", "memory"), schemaSource, schemaVersion)
 	srv := &http.Server{
 		Addr:              ":8080",
 		Handler:           buildMux(s, sdb, verifier, cpAuth),
@@ -1781,6 +1804,50 @@ func main() {
 		// truncating any forwarded long response.
 	}
 	log.Fatal(srv.ListenAndServe())
+}
+
+// schemaSettableStore is a registry.Store that also accepts the boot-time
+// SpiceDB schema. Every concrete store embeds registry.SchemaState, so both the
+// in-memory and DynamoDB backends satisfy it; main() uses it so it can apply the
+// active schema uniformly regardless of which backend STORE selected. SetSchema
+// is intentionally NOT on registry.Store — it is config, not a persistence op.
+type schemaSettableStore interface {
+	registry.Store
+	SetSchema(text, version, source string)
+}
+
+// buildStore selects the registry's persistence backend from the STORE env:
+// "memory" (default) keeps the in-memory maps — the kind/local path, byte-for-byte
+// unchanged; "dynamodb" uses the durable single-table DynamoDB store for the AWS
+// deploy. It log.Fatals on a misconfiguration (matching buildControlPlaneAuth's
+// fail-loud style) so a deploy that intends durable state never silently runs on
+// ephemeral memory.
+func buildStore(ctx context.Context) schemaSettableStore {
+	switch v := getEnv("STORE", "memory"); v {
+	case "memory":
+		return newStore()
+	case "dynamodb":
+		table := getEnv("REGISTRY_DYNAMODB_TABLE", "")
+		if table == "" {
+			log.Fatalf("REGISTRY_DYNAMODB_TABLE required when STORE=dynamodb")
+		}
+		// Region + credentials come from the standard AWS chain (AWS_REGION,
+		// container/IRSA/Pod-Identity credentials) — no static keys in config.
+		cfg, err := config.LoadDefaultConfig(ctx)
+		if err != nil {
+			log.Fatalf("load AWS config for DynamoDB store: %v", err)
+		}
+		var opts []func(*dynamodb.Options)
+		// DYNAMODB_ENDPOINT overrides the resolved endpoint for local runs
+		// (dynamodb-local); unset in AWS, where the SDK resolves the real endpoint.
+		if ep := getEnv("DYNAMODB_ENDPOINT", ""); ep != "" {
+			opts = append(opts, func(o *dynamodb.Options) { o.BaseEndpoint = aws.String(ep) })
+		}
+		return dynamostore.New(cfg, table, opts...)
+	default:
+		log.Fatalf("unknown STORE %q", v)
+		return nil // unreachable
+	}
 }
 
 // buildControlPlaneAuth selects the consent-endpoint authenticator from

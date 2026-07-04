@@ -66,6 +66,25 @@ type ConsentRequest struct {
 	ExternalRef string `json:"externalRef,omitempty"`
 }
 
+// ConsentEdgeKey is the canonical (user, parentType, childType) consent-edge
+// key. It is the single source of truth for how an edge is serialised, shared by
+// every Store implementation (the in-memory map key and the DynamoDB pk/gsi
+// keys) so the two can never drift. userIDs/types never contain "|".
+func ConsentEdgeKey(userID, parentType, childType string) string {
+	return userID + "|" + parentType + "|" + childType
+}
+
+// OpenRequestKey is the dedup key for an open (pending) consent request: the
+// specific waiting agent when known (so each consent-gated agent gets its own
+// correlatable request and a sidecar retry dedupes), else the edge. Consent
+// grants and the approve-sweep remain per-edge. Shared by every Store impl.
+func OpenRequestKey(userID, parentType, childType, agentID string) string {
+	if agentID != "" {
+		return "agent:" + agentID
+	}
+	return ConsentEdgeKey(userID, parentType, childType)
+}
+
 // FirstUncoveredScope returns the first requested scope missing from the
 // granted set, or "" when every requested scope is covered. It is the single
 // definition of "scope subset" for consent decisions — the registry's

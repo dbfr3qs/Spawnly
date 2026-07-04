@@ -18,7 +18,7 @@ EXTRA_AGENTS  := keycloak weather-monitor
 MCP_SERVERS   := travel-tools
 SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS) $(EXTRA_AGENTS) $(MCP_SERVERS)
 
-.PHONY: build test test-provider docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed print-% e2e-setup e2e mobile-dev
+.PHONY: build test test-provider test-dynamodb docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed print-% e2e-setup e2e mobile-dev
 
 # print-<VAR> — echo a make variable so shell scripts can read the authoritative
 # lists instead of re-declaring them. e.g. `make -s print-SERVICES`.
@@ -44,6 +44,22 @@ test:
 # terraform-provider CI workflow.
 test-provider:
 	./scripts/test-provider.sh
+
+# test-dynamodb — run the DynamoDB-backed Store (and, from Phase 2, DeviceStore)
+# conformance suites against a throwaway amazon/dynamodb-local container. These
+# tests are gated on DYNAMODB_TEST_ENDPOINT, so a plain `make test` skips them;
+# this target supplies the container + endpoint. Needs docker. dynamodb-local
+# ignores credentials, but the AWS SDK still signs requests, so dummy creds are
+# provided — no real secrets, so this stays fork-safe in CI lane 1.
+test-dynamodb:
+	@docker rm -f spawnly-dynamodb-test >/dev/null 2>&1 || true
+	docker run -d --name spawnly-dynamodb-test -p 8000:8000 amazon/dynamodb-local >/dev/null
+	@echo "Waiting for dynamodb-local..."
+	@for i in $$(seq 1 30); do curl -s -o /dev/null http://localhost:8000 && break; sleep 0.5; done
+	@trap 'docker rm -f spawnly-dynamodb-test >/dev/null 2>&1 || true' EXIT; \
+	 DYNAMODB_TEST_ENDPOINT=http://localhost:8000 \
+	 AWS_ACCESS_KEY_ID=dummy AWS_SECRET_ACCESS_KEY=dummy AWS_REGION=us-east-1 \
+	 go test ./internal/registry/... ./internal/mobilegateway/... -count=1
 
 docker-build:
 	@for svc in $(filter-out agent-sidecar,$(SERVICES)); do \
