@@ -11,8 +11,12 @@ import (
 	"os"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/spawnly/platform/internal/controlplane"
 	"github.com/spawnly/platform/internal/mobilegateway"
+	"github.com/spawnly/platform/internal/mobilegateway/dynamostore"
 	"github.com/spawnly/platform/internal/tokenvalidator"
 )
 
@@ -111,12 +115,47 @@ func mustReadFile(pathEnv string) []byte {
 	return b
 }
 
+// buildDeviceStore selects the device registry backend from DEVICE_STORE:
+// "memory" (default) keeps the in-memory MemoryDeviceStore — the kind/local path,
+// byte-for-byte unchanged; "dynamodb" uses the durable DynamoDB store for the AWS
+// deploy so a registered phone survives a gateway restart. It log.Fatals on a
+// misconfiguration (matching buildControlPlaneAuth's fail-loud style) so a deploy
+// that intends durable devices never silently runs on ephemeral memory. Mirrors
+// the registry's buildStore selector.
+func buildDeviceStore(ctx context.Context) mobilegateway.DeviceStore {
+	switch v := getEnv("DEVICE_STORE", "memory"); v {
+	case "memory":
+		return mobilegateway.NewMemoryDeviceStore()
+	case "dynamodb":
+		table := getEnv("DEVICES_DYNAMODB_TABLE", "")
+		if table == "" {
+			log.Fatalf("DEVICES_DYNAMODB_TABLE required when DEVICE_STORE=dynamodb")
+		}
+		// Region + credentials come from the standard AWS chain (AWS_REGION,
+		// container/IRSA/Pod-Identity credentials) — no static keys in config.
+		cfg, err := config.LoadDefaultConfig(ctx)
+		if err != nil {
+			log.Fatalf("load AWS config for DynamoDB device store: %v", err)
+		}
+		var opts []func(*dynamodb.Options)
+		// DYNAMODB_ENDPOINT overrides the resolved endpoint for local runs
+		// (dynamodb-local); unset in AWS, where the SDK resolves the real endpoint.
+		if ep := getEnv("DYNAMODB_ENDPOINT", ""); ep != "" {
+			opts = append(opts, func(o *dynamodb.Options) { o.BaseEndpoint = aws.String(ep) })
+		}
+		return dynamostore.New(cfg, table, opts...)
+	default:
+		log.Fatalf("unknown DEVICE_STORE %q", v)
+		return nil // unreachable
+	}
+}
+
 func main() {
 	orchestratorURL := getEnv("ORCHESTRATOR_URL", "http://orchestrator:8080")
 
 	deps := mobilegateway.Deps{
 		Validator:       buildValidator(context.Background()),
-		Devices:         mobilegateway.NewMemoryDeviceStore(),
+		Devices:         buildDeviceStore(context.Background()),
 		OrchestratorURL: orchestratorURL,
 		Audience:        getEnv("SPAWN_OIDC_AUDIENCE", "orchestrator"),
 		ReadScope:       getEnv("ORCH_READ_SCOPE", "orchestrator:read"),
