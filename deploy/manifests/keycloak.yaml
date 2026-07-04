@@ -76,6 +76,40 @@ spec:
                   name: keycloak-proxy
                   key: proxyHeaders
                   optional: true
+            # ── DB connection (AWS only) ───────────────────────────────────
+            # The DB VENDOR is frozen at build time (Dockerfile `kc.sh build`
+            # with KC_DB): kind builds bake dev-file, the AWS build bakes
+            # postgres. These three envs supply the RUNTIME connection for the
+            # postgres-built image, from the OPTIONAL `keycloak-db` Secret the
+            # AWS deploy script creates (aws-persistence Phase 5;
+            # url = jdbc:postgresql://<rds>:5432/keycloak). Same optional-secret
+            # pattern as KC_PROXY_HEADERS/control-plane-auth: absent Secret
+            # (kind) → env unset → nothing to apply; present (AWS) → the
+            # postgres-built image connects to RDS. (Only the vendor is
+            # build-time; the URL/credentials are runtime, so no image rebuild
+            # is needed to repoint the DB.) Do NOT create this Secret on kind:
+            # KC_DB_URL is a RUNTIME option honoured regardless of the baked
+            # vendor, so a postgres URL would be fed to the dev-file image's H2
+            # driver and fail the boot — the safety here is the secret's
+            # absence, not the image ignoring it.
+            - name: KC_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-db
+                  key: url
+                  optional: true
+            - name: KC_DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-db
+                  key: username
+                  optional: true
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-db
+                  key: password
+                  optional: true
             # ── Attestation (Phase 1) ──────────────────────────────────────
             # The custom "spawnly-attestation" client authenticator reads these
             # exactly as identity-server does. ATTESTOR selects the credential
