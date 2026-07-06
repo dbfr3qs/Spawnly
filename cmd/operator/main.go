@@ -104,16 +104,19 @@ func main() {
 	}
 
 	if err = (&operator.AgentWorkloadReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		Registry:         registry.NewWithTokenSource(registryURL, controlPlaneBearer),
-		RegistryURL:      registryURL,
-		ISTokenURL:       isTokenURL,
-		SampleAPIURL:     sampleAPIURL,
-		APIAUrl:          apiAURL,
-		APIBUrl:          apiBURL,
-		OrchestratorURL:  orchestratorURL,
-		EventsClient:     events.New(registryURL),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		Registry:        registry.NewWithTokenSource(registryURL, controlPlaneBearer),
+		RegistryURL:     registryURL,
+		ISTokenURL:      isTokenURL,
+		SampleAPIURL:    sampleAPIURL,
+		APIAUrl:         apiAURL,
+		APIBUrl:         apiBURL,
+		OrchestratorURL: orchestratorURL,
+		// Present the control-plane bearer on event posts: the events endpoint is
+		// now authenticated, and the reconciler posts to arbitrary agent ids, so it
+		// authenticates as a control-plane caller (empty/no-op under auth=none).
+		EventsClient:     events.NewWithToken(registryURL, controlPlaneBearer),
 		Clientset:        clientset,
 		IdentityInjector: identityInjector,
 		SidecarImage:     getenv("SIDECAR_IMAGE", "agent-sidecar:latest"),
@@ -140,8 +143,10 @@ func main() {
 		sweeper := &operator.StaleSweeper{
 			// A distinct registry client (not the reconciler's) keeps the sweep's
 			// lifecycle independent; both share the same control-plane bearer.
-			Registry:  registry.NewWithTokenSource(registryURL, controlPlaneBearer),
-			Events:    events.New(registryURL),
+			Registry: registry.NewWithTokenSource(registryURL, controlPlaneBearer),
+			// Control-plane bearer: the sweep posts reconcile.stale to arbitrary
+			// orphaned agent ids, so it authenticates as a control-plane caller.
+			Events:    events.NewWithToken(registryURL, controlPlaneBearer),
 			Reader:    mgr.GetClient(),
 			Namespace: getenv("AGENT_NAMESPACE", "default"),
 		}

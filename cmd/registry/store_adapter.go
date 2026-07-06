@@ -165,3 +165,8 @@ func (s *store) ResolveConsentRequest(_ context.Context, id, userID string, appr
 	cr, ok := s.resolveConsentRequest(id, userID, approve, scopes)
 	return cr, ok, nil
 }
+
+func (s *store) ApprovePendingConsentRequest(_ context.Context, id string) (registry.ConsentRequest, bool, error) {
+	cr, ok := s.approvePendingConsentRequest(id)
+	return cr, ok, nil
+}

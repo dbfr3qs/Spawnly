@@ -201,6 +201,16 @@ func requireToken(v tokenvalidator.TokenValidator, audience, scope string, next 
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		// Validate the token-derived subject once, here at the point of extraction,
+		// before it is forwarded to the registry as a userId that keys consent edges
+		// and per-user scoping. A well-formed IdP subject always passes; a malformed
+		// one is a bad token, so reject it as unauthorized rather than propagating a
+		// key-corrupting value downstream (the registry re-checks at its own ingest).
+		if !registry.ValidUserID(userID) {
+			log.Printf("dashboard auth: token subject %q is not a valid userId", userID)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		ctx := context.WithValue(r.Context(), ctxUserID, userID)
 		ctx = context.WithValue(ctx, ctxRoles, claims.Roles)
 		next(w, r.WithContext(ctx))
@@ -263,7 +273,10 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	controlPlaneBearer := controlPlaneBearerSource()
 
 	regClient := registry.NewWithTokenSource(registryURL, controlPlaneBearer)
-	evtClient := events.New(registryURL)
+	// The events endpoint is now authenticated; the orchestrator posts to parent
+	// and child agent ids, so it presents the control-plane bearer (empty/no-op
+	// under auth=none, exactly like its registry client).
+	evtClient := events.NewWithToken(registryURL, controlPlaneBearer)
 
 	mux.HandleFunc("POST /spawn", func(w http.ResponseWriter, r *http.Request) {
 		var req SpawnRequest
@@ -312,6 +325,13 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		userID := strings.TrimPrefix(claims.User, "user:")
 		if userID == "" {
 			log.Printf("spawn: token has no user subject")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		// Validate the token-derived subject at extraction, before it becomes the
+		// spawned agent's userId (registry record owner + consent-edge key).
+		if !registry.ValidUserID(userID) {
+			log.Printf("spawn: token subject %q is not a valid userId", userID)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

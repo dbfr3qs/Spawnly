@@ -1288,7 +1288,7 @@
 
   let agentEventPollers  = {};   // agentId -> intervalId
   let expandedAgents     = new Set();
-  let renderedEventCount = {};   // agentId -> number of events already in the DOM
+  let renderedEventIds = {};     // agentId -> Set of event ids already in the DOM
 
   let expandedChats = new Set();
   let chatHistory   = {};
@@ -2074,16 +2074,25 @@
       if (newest > 0 && newest > (lastEventAt[agentId] || 0)) lastEventAt[agentId] = newest;
     }
 
-    const already = renderedEventCount[agentId] || 0;
-    for (const e of evts.slice(already)) {
+    // Key each row on its UNIQUE event id (registry-stamped) rather than array
+    // position: a durable backend can return events in an order that differs
+    // between polls, and keying on slice-position would then duplicate or hide
+    // rows. The id set tracks exactly which events are already in the DOM.
+    const seen = renderedEventIds[agentId] || (renderedEventIds[agentId] = new Set());
+    (Array.isArray(evts) ? evts : []).forEach((e, i) => {
+      // Fall back to the append-stable index only for a legacy event with no id,
+      // so an id-less row still renders exactly once.
+      const key = (e && e.id) ? e.id : `#${i}`;
+      if (seen.has(key)) return;
+      seen.add(key);
       const payload = JSON.stringify(e.payload ?? {}, null, 2);
       const typeCls = eventTypeClass(e.type);
       const icon    = eventTypeIcon(e.type);
       const item = document.createElement('div');
       item.className = 'event-item' + (typeCls ? ' ' + typeCls : '');
       // Tag every row with its filter category — never skip rendering, so the
-      // append-only renderedEventCount invariant holds. Filtering is purely
-      // visual (toggle .evt-hidden), applied below.
+      // seen-id invariant holds. Filtering is purely visual (toggle .evt-hidden),
+      // applied below.
       item.dataset.evtCat = eventCategory(e.type);
       // Stable hook for E2E tests — assert on the neutral event type directly
       // rather than the icon/CSS class.
@@ -2098,8 +2107,7 @@
         <pre class="event-payload">${escHtml(payload)}</pre>
       </details>`;
       listEl.appendChild(item);
-    }
-    renderedEventCount[agentId] = evts.length;
+    });
 
     // Hide rows in this agent's filtered-out categories (including freshly
     // appended heartbeats) and update the header count.
@@ -2347,7 +2355,7 @@
       expandedAgents.delete(agentId);
       clearInterval(agentEventPollers[agentId]);
       delete agentEventPollers[agentId];
-      delete renderedEventCount[agentId];
+      delete renderedEventIds[agentId];
       stopLogPoller(agentId);
       const panel = document.getElementById(`events-${agentId}`);
       if (panel) panel.remove();
@@ -2487,7 +2495,7 @@
       clearInterval(agentEventPollers[agentId]);
       delete agentEventPollers[agentId];
       expandedAgents.delete(agentId);
-      delete renderedEventCount[agentId];
+      delete renderedEventIds[agentId];
       stopLogPoller(agentId);
       const panel = document.getElementById(`events-${agentId}`);
       if (panel) panel.remove();
@@ -2507,7 +2515,7 @@
       clearInterval(agentEventPollers[agentId]);
       delete agentEventPollers[agentId];
       expandedAgents.delete(agentId);
-      delete renderedEventCount[agentId];
+      delete renderedEventIds[agentId];
       stopLogPoller(agentId);
       delete agentStatus[agentId];
       delete lastEventAt[agentId];

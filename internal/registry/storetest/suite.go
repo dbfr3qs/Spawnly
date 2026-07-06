@@ -46,6 +46,45 @@ func Run(t *testing.T, newStore func(t *testing.T) registry.Store) {
 	t.Run("ConsentRequestsDedupe", func(t *testing.T) { testConsentRequestDedupe(t, ctx, s) })
 	t.Run("ConsentRequestResolve", func(t *testing.T) { testConsentResolve(t, ctx, s) })
 	t.Run("ConsentRequestSweep", func(t *testing.T) { testConsentSweep(t, ctx, s) })
+	t.Run("ApprovePendingConsentRequest", func(t *testing.T) { testApprovePending(t, ctx, s) })
+}
+
+// testApprovePending covers the status-only backstop primitive: it flips a
+// pending request to approved WITHOUT creating a grant, is idempotent on an
+// already-resolved request, and reports not-found for an unknown id.
+func testApprovePending(t *testing.T, ctx context.Context, s registry.Store) {
+	const (
+		user = "st-ap-user"
+		p    = "st-ap-parent"
+		c    = "st-ap-child"
+	)
+	cr, _, err := s.CreateConsentRequest(ctx, registry.ConsentRequest{
+		UserID: user, ParentType: p, ChildType: c, AgentID: "st-ap-agent", Scopes: []string{"x"},
+	})
+	if err != nil {
+		t.Fatalf("CreateConsentRequest: %v", err)
+	}
+
+	got, ok, err := s.ApprovePendingConsentRequest(ctx, cr.ID)
+	if err != nil || !ok {
+		t.Fatalf("ApprovePendingConsentRequest: ok=%v err=%v", ok, err)
+	}
+	if got.Status != registry.ConsentApproved || got.ResolvedAt == nil {
+		t.Errorf("flipped request = %+v, want approved+resolvedAt", got)
+	}
+	// Crucially, it must NOT have created a covering grant (that is the whole
+	// point — the grant is a precondition the backstop never writes).
+	if _, ok, _ := s.FindConsent(ctx, user, p, c); ok {
+		t.Errorf("ApprovePendingConsentRequest wrongly created a ConsentRecord")
+	}
+	// Idempotent on the now-approved request.
+	if again, ok, err := s.ApprovePendingConsentRequest(ctx, cr.ID); err != nil || !ok || again.Status != registry.ConsentApproved {
+		t.Errorf("idempotent approve = %+v ok=%v err=%v", again, ok, err)
+	}
+	// Unknown id → not found.
+	if _, ok, _ := s.ApprovePendingConsentRequest(ctx, "st-ap-nope"); ok {
+		t.Errorf("ApprovePendingConsentRequest(unknown) reported found")
+	}
 }
 
 // tpl builds a minimal valid template for the given type. The default in-memory
@@ -277,10 +316,17 @@ func testEvents(t *testing.T, ctx context.Context, s registry.Store) {
 	if len(got) != len(wantOrder) {
 		t.Fatalf("GetEvents len = %d, want %d", len(got), len(wantOrder))
 	}
+	seenID := map[string]bool{}
 	for i, e := range got {
 		if e.Type != wantOrder[i] {
 			t.Errorf("GetEvents[%d].Type = %q, want %q (append order not preserved)", i, e.Type, wantOrder[i])
 		}
+		// Event ids must be unique — the dashboard's incremental renderer keys
+		// off them, so a collision would hide or duplicate a row.
+		if seenID[e.ID] {
+			t.Errorf("GetEvents[%d].ID = %q is a duplicate; ids must be unique", i, e.ID)
+		}
+		seenID[e.ID] = true
 	}
 }
 
