@@ -7,7 +7,6 @@ const agentId         = process.env.AGENT_ID         ?? 'unknown';
 const agentType       = process.env.AGENT_TYPE       ?? 'chain-worker';
 const parentId        = process.env.PARENT_ID        || '';
 const tenantId        = process.env.TENANT_ID        || undefined;
-const registryUrl     = process.env.REGISTRY_URL     ?? 'http://registry:8080';
 const orchestratorUrl = process.env.ORCHESTRATOR_URL ?? 'http://orchestrator:8080';
 const sidecarUrl      = process.env.SIDECAR_URL      ?? 'http://localhost:8089';
 const apiUrl          = process.env.API_A_URL        ?? 'http://sample-api-a:8080';
@@ -29,18 +28,18 @@ async function spawnChild(): Promise<void> {
     const r = await spawn(orchestratorUrl, tokens, agentType);
     if (r.ok) {
       console.log(`[chain-worker] spawned child ${r.workloadName}`);
-      await postEvent(registryUrl, agentId, 'child_spawned', { childId: r.workloadName });
+      await postEvent(sidecarUrl, agentId, 'child_spawned', { childId: r.workloadName });
     } else if (r.status === 403) {
       // Depth cap reached — we are the last link in the chain.
       console.log('[chain-worker] depth cap reached; no child spawned');
-      await postEvent(registryUrl, agentId, 'chain_end', { reason: r.body });
+      await postEvent(sidecarUrl, agentId, 'chain_end', { reason: r.body });
     } else {
       console.warn(`[chain-worker] spawn failed: ${r.status}`);
-      await postEvent(registryUrl, agentId, 'child_spawn_error', { status: r.status, body: r.body });
+      await postEvent(sidecarUrl, agentId, 'child_spawn_error', { status: r.status, body: r.body });
     }
   } catch (err) {
     console.error('[chain-worker] spawn child error:', err);
-    await postEvent(registryUrl, agentId, 'child_spawn_error', { error: String(err) });
+    await postEvent(sidecarUrl, agentId, 'child_spawn_error', { error: String(err) });
   }
 }
 
@@ -54,7 +53,7 @@ async function doWork(): Promise<void> {
   try {
     token = await tokens.getToken(scope);
   } catch (err) {
-    await postEvent(registryUrl, agentId, 'work_error', { phase: 'token', error: String(err) });
+    await postEvent(sidecarUrl, agentId, 'work_error', { phase: 'token', error: String(err) });
     return;
   }
   try {
@@ -64,19 +63,19 @@ async function doWork(): Promise<void> {
     });
     if (res.ok) {
       console.log(`[chain-worker] work -> ${res.status}`);
-      await postEvent(registryUrl, agentId, 'work_ok', { status: res.status });
+      await postEvent(sidecarUrl, agentId, 'work_ok', { status: res.status });
     } else {
       console.log(`[chain-worker] work DENIED -> ${res.status}`);
-      await postEvent(registryUrl, agentId, 'work_denied', { status: res.status });
+      await postEvent(sidecarUrl, agentId, 'work_denied', { status: res.status });
     }
   } catch (err) {
-    await postEvent(registryUrl, agentId, 'work_error', { phase: 'call', error: String(err) });
+    await postEvent(sidecarUrl, agentId, 'work_error', { phase: 'call', error: String(err) });
   }
 }
 
 async function main(): Promise<void> {
   console.log(`[chain-worker] ${agentId} starting (tenant=${tenantId ?? '-'}, parent=${parentId || 'root'})`);
-  await postEvent(registryUrl, agentId, 'started', { agentId, parentId });
+  await postEvent(sidecarUrl, agentId, 'started', { agentId, parentId });
 
   // Grow the chain once at startup (best-effort; the depth cap stops runaway growth).
   await spawnChild();
@@ -91,6 +90,6 @@ async function main(): Promise<void> {
 
 main().catch(async (err) => {
   console.error('[chain-worker] fatal:', err);
-  await postEvent(registryUrl, agentId, 'error', { error: String(err) });
+  await postEvent(sidecarUrl, agentId, 'error', { error: String(err) });
   process.exit(1);
 });

@@ -18,7 +18,6 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 // single travel-tools MCP tool MCP_TOOL. The provider keys live in the MCP server,
 // never here — this agent only ever holds a scope-limited Spawnly token.
 const agentId = process.env.AGENT_ID ?? "unknown";
-const registryUrl = process.env.REGISTRY_URL ?? "http://registry:8080";
 const sidecarUrl = process.env.SIDECAR_URL ?? "http://localhost:8089";
 const mcpUrl = process.env.MCP_URL ?? "http://travel-tools/mcp";
 const mcpTool = process.env.MCP_TOOL ?? ""; // e.g. search_flights
@@ -97,7 +96,7 @@ class SpecialistExecutor implements AgentExecutor {
     try {
       const params = extractParams(requestContext.userMessage);
       const result = await callMcpTool(params);
-      await postEvent(registryUrl, agentId, "tool_result", { tool: mcpTool, result });
+      await postEvent(sidecarUrl, agentId, "tool_result", { tool: mcpTool, result });
 
       eventBus.publish({
         kind: "message",
@@ -111,7 +110,7 @@ class SpecialistExecutor implements AgentExecutor {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[travel-specialist:${mcpTool}] error:`, msg);
-      await postEvent(registryUrl, agentId, "agent_error", { error: msg });
+      await postEvent(sidecarUrl, agentId, "agent_error", { error: msg });
       eventBus.publish({
         kind: "message",
         messageId: uuidv4(),

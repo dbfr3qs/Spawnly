@@ -11,7 +11,10 @@ import { postEvent, instrumentFlue, promptTimeoutSignal } from "@spawnly/sdk";
 export const triggers = { webhook: true };
 
 const agentId        = process.env.AGENT_ID        ?? "unknown";
-const registryUrl    = process.env.REGISTRY_URL    ?? "http://registry:8080";
+// Events post to the SIDECAR (identity-blind agent): the sidecar attaches this
+// agent's SVID and forwards to the auth-gated registry. Never post to the
+// registry directly — those posts carry no credential and now 401.
+const sidecarUrl     = process.env.SIDECAR_URL     ?? "http://localhost:8089";
 const aiProvider     = process.env.AI_PROVIDER     ?? "openai";
 const aiApiKey       = process.env.AI_API_KEY      ?? "";
 const aiModel        = process.env.AI_MODEL        ?? "openai/gpt-4o";
@@ -37,7 +40,7 @@ console.log(`[weather-monitor] chat agent ${agentId} using ${aiProvider} (${aiMo
 // Long-lived liveness signal: the HTTP server stays up until the pod is killed,
 // and this loop posts a periodic event so the dashboard shows the agent running.
 async function beat(): Promise<void> {
-  await postEvent(registryUrl, agentId, "heartbeat", {
+  await postEvent(sidecarUrl, agentId, "heartbeat", {
     status: "running",
     timestamp: new Date().toISOString(),
   });
@@ -349,7 +352,7 @@ function getSession(sessionId: string): Promise<FlueSession> {
       createDefaultEnv: async () => local().createSessionEnv({ id: agentId, cwd: process.cwd() }),
       defaultStore: new InMemorySessionStore(),
     });
-    instrumentFlue(ctx, registryUrl, agentId);
+    instrumentFlue(ctx, sidecarUrl, agentId);
     const harness = await ctx.init({ model: aiModel, tools: [getWeather, getForecast], sandbox: local() });
     return harness.session();
   })();
@@ -384,7 +387,7 @@ export default async function ({ payload }: { payload: ChatPayload }) {
     // potentially wedged one.
     sessions.delete(sessionId);
     const detail = err instanceof Error ? err.message : String(err);
-    await postEvent(registryUrl, agentId, "agent_error", { error: detail });
+    await postEvent(sidecarUrl, agentId, "agent_error", { error: detail });
     return {
       response: `Sorry — something went wrong handling that: ${detail}`,
       agentId,
