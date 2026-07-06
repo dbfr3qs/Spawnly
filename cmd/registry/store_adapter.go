@@ -74,15 +74,9 @@ func (s *store) DeleteTemplate(_ context.Context, agentType string) (bool, error
 	return s.deleteTemplate(agentType), nil
 }
 
-func (s *store) ValidateTemplate(t registry.AgentTemplate) error {
-	return s.validateTemplate(t)
-}
-
-func (s *store) Schema() (text, version, source string) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.schemaText, s.schemaVersion, s.schemaSource
-}
+// ValidateTemplate and Schema are promoted from the embedded registry.SchemaState
+// (the active-schema config both Store impls share), so the in-memory store needs
+// no wrappers for them — the compile-time registry.Store assertion below covers it.
 
 func (s *store) RegisterAgent(_ context.Context, r registry.AgentRecord) error {
 	s.registerAgent(r)

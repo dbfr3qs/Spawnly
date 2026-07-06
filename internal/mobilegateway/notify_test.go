@@ -15,6 +15,13 @@ import (
 	"github.com/spawnly/platform/internal/tokenvalidator"
 )
 
+// dev builds a valid iOS device for tests in this package. (The DeviceStore
+// behavioural suite lives in package storetest and the in-memory runner in the
+// external store_test.go; this local helper keeps the notify tests self-contained.)
+func dev(id, user, token string) Device {
+	return Device{ID: id, UserID: user, Platform: PlatformIOS, PushToken: token, CreatedAt: time.Now()}
+}
+
 func TestHub_PerUserIsolation(t *testing.T) {
 	h := NewHub()
 	alice, ca, okA := h.Subscribe("alice")

@@ -50,6 +50,14 @@ jobs:
       - name: make test (root unit tests)
         run: make test
 
+      # DynamoDB Store/DeviceStore conformance suites against dynamodb-local.
+      # dynamodb-local needs no secrets (dummy creds satisfy the SDK signer), so
+      # this stays in the fork-safe lane 1. `make test-dynamodb` owns the
+      # container lifecycle (start, wait, run the DYNAMODB_TEST_ENDPOINT-gated
+      # tests, tear down).
+      - name: make test-dynamodb (dynamodb-local)
+        run: make test-dynamodb
+
       # go.work lists two modules; `go test ./...` only covers the module in
       # cwd, so the other one is built/tested explicitly.
       - name: go test (sdks/go)

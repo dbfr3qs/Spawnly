@@ -1,3 +1,9 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mobile-gateway
+  namespace: default
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,6 +19,12 @@ spec:
       labels:
         app: mobile-gateway
     spec:
+      # Dedicated SA (mirrors agent-operator/agent-orchestrator). It carries no
+      # RBAC — the gateway never touches the k8s API — it exists so the AWS
+      # deploy can bind a least-privilege IAM role to it via an EKS Pod Identity
+      # association (Phase 5, DynamoDB access for DEVICE_STORE=dynamodb).
+      # Harmless on kind: the SA is created and the pod simply runs under it.
+      serviceAccountName: mobile-gateway
       containers:
         - name: mobile-gateway
           image: agent-mobile-gateway:latest

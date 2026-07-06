@@ -16,9 +16,18 @@ import (
 	"github.com/spawnly/platform/internal/events"
 	"github.com/spawnly/platform/internal/registrant"
 	"github.com/spawnly/platform/internal/registry"
+	"github.com/spawnly/platform/internal/registry/storetest"
 	"github.com/spawnly/platform/internal/spicedb"
 	"github.com/spawnly/platform/internal/spiffe"
 )
+
+// TestStoreSuite_InMemory runs the shared registry.Store conformance suite
+// against the in-memory store, so the same behavioural contract the DynamoDB
+// store is held to is proven for the default backend too. The HTTP-level tests
+// below are untouched — they cover the handlers, this covers the Store seam.
+func TestStoreSuite_InMemory(t *testing.T) {
+	storetest.Run(t, func(t *testing.T) registry.Store { return newStore() })
+}
 
 func workerTemplate() registry.AgentTemplate {
 	return registry.AgentTemplate{

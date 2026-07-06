@@ -152,7 +152,17 @@ FROM quay.io/keycloak/keycloak:26.4@sha256:9409c59bdfb65dbffa20b11e6f18b8abb9281
 # The provider JAR MUST be copied into /opt/keycloak/providers/ BEFORE
 # `kc.sh build` so the SPI is compiled into the optimized image (a JAR added
 # after an optimized build is ignored).
-ENV KC_DB=dev-file
+# The DB vendor is a BUILD-TIME option on an optimized image: `kc.sh build`
+# below freezes it into the server, so a runtime KC_DB is IGNORED — hence the
+# ARG (baked via ENV BEFORE `kc.sh build`). kind builds keep the dev-file
+# default (file-backed H2 under /opt/keycloak/data — ephemeral only because
+# the pod filesystem is); the AWS image build (spawnly-infra's push-images.sh,
+# wired in the aws-persistence Phase 5 infra change) passes
+# `--build-arg KC_DB=postgres` so the optimized image talks to RDS. The
+# postgres JDBC driver already ships in the base image, so switching vendor
+# needs no extra build flags.
+ARG KC_DB=dev-file
+ENV KC_DB=${KC_DB}
 COPY --from=build-keycloak-providers /src/target/spawnly-keycloak-providers.jar /opt/keycloak/providers/
 # --spi-ciba-auth-channel-provider-default: select the custom Spawnly CIBA
 # authentication-channel provider as the realm's decoupled channel (Phase 4).

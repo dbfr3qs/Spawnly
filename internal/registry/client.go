@@ -113,6 +113,12 @@ func (c *HTTPClient) patchStatus(ctx context.Context, agentID, status string) er
 		return err
 	}
 	defer resp.Body.Close()
+	// A non-2xx response (401 bad bearer, 404 unknown agent, 5xx) means the
+	// transition did NOT happen — swallowing it would let callers (notably the
+	// stale sweep) log and audit a terminal cleanup that never occurred.
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("patch agent %s status to %q: status %d", agentID, status, resp.StatusCode)
+	}
 	return nil
 }
 
