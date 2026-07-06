@@ -4,6 +4,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -141,10 +142,25 @@ func (s *store) getAgent(id string) registry.AgentRecord {
 func (s *store) appendEvent(agentID string, e events.Event) events.Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e.ID = fmt.Sprintf("%d", time.Now().UnixNano())
-	e.Timestamp = time.Now()
+	now := time.Now()
+	e.ID = eventID(now.UnixNano())
+	e.Timestamp = now
 	s.events[agentID] = append(s.events[agentID], e)
 	return e
+}
+
+// eventID mints a genuinely-unique, ordering-stable event id shared by both Store
+// backends: a %020d zero-padded nanosecond so lexical id order == chronological
+// order, plus a random suffix so two appends in the SAME nanosecond still get
+// distinct ids. The DynamoDB store builds the SAME %020d-nano#suffix into its sort
+// key, so a consumer that keys off (or sorts by) the event id sees identical
+// ordering whichever backend served it. The dashboard's incremental renderer keys
+// on this id, so uniqueness is load-bearing — a bare UnixNano collided within a
+// nanosecond and could hide/duplicate a row.
+func eventID(nano int64) string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%020d-%s", nano, hex.EncodeToString(b))
 }
 
 func (s *store) getEvents(agentID string) []events.Event {
@@ -331,6 +347,29 @@ func (s *store) getConsentRequest(id string) (registry.ConsentRequest, bool) {
 	return cr, ok
 }
 
+// approvePendingConsentRequest flips a still-pending request to approved with NO
+// grant write — the status-only pivot the read-time backstop uses when a covering
+// grant already exists. Idempotent: an already-resolved request is returned
+// unchanged. It deliberately does NOT touch s.consents, so it can never un-revoke
+// or reshape the covering grant (see the Store interface doc).
+func (s *store) approvePendingConsentRequest(id string) (registry.ConsentRequest, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cr, ok := s.consentRequests[id]
+	if !ok {
+		return registry.ConsentRequest{}, false
+	}
+	if cr.Status != registry.ConsentPending {
+		return cr, true // already resolved — idempotent
+	}
+	now := time.Now()
+	cr.Status = registry.ConsentApproved
+	cr.ResolvedAt = &now
+	s.consentRequests[id] = cr
+	delete(s.openRequests, openRequestKey(cr.UserID, cr.ParentType, cr.ChildType, cr.AgentID))
+	return cr, true
+}
+
 // listConsentRequests returns brokered requests, optionally filtered by userID
 // and/or status (e.g. "pending"). Empty filters match all.
 func (s *store) listConsentRequests(userID, status string) []registry.ConsentRequest {
@@ -469,22 +508,40 @@ func subtree(ctx context.Context, s registry.Store, id string) ([]string, error)
 // agentOwnedBy reports whether the agent exists and is owned by userId. Ownership
 // is the agent record's UserID. An empty userId never owns anything (so a caller
 // that asserts no identity is denied), and an unknown id reports exists=false.
-func agentOwnedBy(ctx context.Context, s registry.Store, id, userId string) (owned, exists bool) {
-	rec, _ := s.GetAgent(ctx, id)
-	if rec.AgentID == "" {
-		return false, false
+//
+// A backend read error is PROPAGATED (not swallowed to exists=false): mapping a
+// transient DynamoDB read failure to "not found" would turn a retryable 5xx into
+// a misleading 404, and — on the revoke/resume paths this gates — could let a
+// caller believe an agent is gone when the store merely hiccupped. The handler
+// surfaces the error as a 5xx via storeErr, matching the subtree/revokeNode fix.
+func agentOwnedBy(ctx context.Context, s registry.Store, id, userId string) (owned, exists bool, err error) {
+	rec, err := s.GetAgent(ctx, id)
+	if err != nil {
+		return false, false, err
 	}
-	return userId != "" && rec.UserID == userId, true
+	if rec.AgentID == "" {
+		return false, false, nil
+	}
+	return userId != "" && rec.UserID == userId, true, nil
 }
 
 // depth returns how many agents are in the lineage from id up to the root,
 // counting id itself: a top-level agent is depth 1, its child depth 2, and so
 // on. Used to enforce a template's maxDepth at spawn time. Unknown ids are 0.
-func depth(ctx context.Context, s registry.Store, id string) int {
+//
+// A backend read error is PROPAGATED rather than swallowed: this is FAIL-OPEN if
+// ignored — a read failure part-way up the lineage would UNDERCOUNT the depth,
+// and the caller's maxDepth gate would then admit a spawn it should have rejected.
+// So a per-hop read error aborts the walk and the spawn-policy handler fails the
+// request (5xx) instead of ruling on a truncated lineage.
+func depth(ctx context.Context, s registry.Store, id string) (int, error) {
 	d := 0
 	seen := map[string]bool{}
 	for cur := id; cur != "" && !seen[cur]; {
-		rec, _ := s.GetAgent(ctx, cur)
+		rec, err := s.GetAgent(ctx, cur)
+		if err != nil {
+			return 0, err
+		}
 		if rec.AgentID == "" {
 			break
 		}
@@ -492,7 +549,50 @@ func depth(ctx context.Context, s registry.Store, id string) int {
 		d++
 		cur = rec.ParentID
 	}
-	return d
+	return d, nil
+}
+
+// backstopPendingConsentRequest is the read-time correctness net for the
+// approve-sweep's residual GSI-lag miss. On a durable (DynamoDB) backend the
+// approve-sweep reads an EVENTUALLY-consistent index, so a sibling pending
+// request committed microseconds before an approve can be skipped by the sweep
+// and stay pending until CIBA expiry/renewal. Whenever a pending request is READ
+// back (the poller's GET /v1/consent-requests/{id}), re-check it against the
+// STRONGLY-consistent FindConsent + EvaluateConsent — the SAME covered-grant
+// logic the create-path short-circuit uses — and, if a covering unexpired grant
+// already exists, resolve it approved right here.
+//
+// It lives at the handler (neutral-contract) level so BOTH stores get it: on the
+// in-memory store the sweep is deterministic so this is a cheap no-op-ish check;
+// on DynamoDB it closes the lag window without the handler knowing the backend.
+//
+// It resolves via the STATUS-ONLY ApprovePendingConsentRequest — it flips only the
+// request, never the grant. The grant is the precondition (we just confirmed it
+// covers the request), so touching it would be wrong and would open real races: a
+// grant-rewriting resolve could un-revoke a grant killed between our FindConsent
+// and the flip, clobber a concurrent broader re-grant, or (if the template TTL was
+// since removed) re-stamp an expiring grant as permanent. The status-only flip
+// eliminates all three: it is conditional (approve iff still pending), idempotent,
+// and grant-blind.
+func backstopPendingConsentRequest(ctx context.Context, s registry.Store, cr registry.ConsentRequest) (registry.ConsentRequest, error) {
+	if cr.Status != registry.ConsentPending {
+		return cr, nil
+	}
+	rec, ok, err := s.FindConsent(ctx, cr.UserID, cr.ParentType, cr.ChildType)
+	if err != nil {
+		return cr, err
+	}
+	if !ok || !registry.EvaluateConsent(rec, cr.Scopes, time.Now()).Granted {
+		return cr, nil // no covering grant — legitimately still pending
+	}
+	resolved, resolvedOK, err := s.ApprovePendingConsentRequest(ctx, cr.ID)
+	if err != nil {
+		return cr, err
+	}
+	if !resolvedOK {
+		return cr, nil // vanished between read and flip (not possible today) — return as-is
+	}
+	return resolved, nil
 }
 
 // storeErr writes a 500 for a Store error and reports whether it did, so a
@@ -655,12 +755,33 @@ func resumeNode(ctx context.Context, s registry.Store, sdb spicedb.Client, id st
 // how any upstream caller builds the query string.
 func rejectDuplicateUserID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if len(r.URL.Query()["userId"]) > 1 {
+		vals := r.URL.Query()["userId"]
+		if len(vals) > 1 {
 			http.Error(w, "duplicate userId query parameter", http.StatusBadRequest)
+			return
+		}
+		// Structural charset guard at the boundary: the single userId query value
+		// flows into store keys and begins_with prefix scoping, so a '|' or '#'
+		// would corrupt an edge key or widen a per-user query. Reject a malformed
+		// value here — for EVERY query-param userId route at once — rather than
+		// trusting subjects to be separator-free. Empty is allowed (unscoped).
+		if len(vals) == 1 && !rejectInvalidUserID(w, vals[0]) {
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// rejectInvalidUserID writes a 400 and returns false when userId is non-empty and
+// structurally invalid (see registry.ValidUserID); an empty userId is allowed
+// (the "unscoped"/"no identity" case every userId-scoped handler already treats
+// as denying ownership). Callers use `if !rejectInvalidUserID(w, id) { return }`.
+func rejectInvalidUserID(w http.ResponseWriter, userID string) bool {
+	if userID != "" && !registry.ValidUserID(userID) {
+		http.Error(w, "invalid userId", http.StatusBadRequest)
+		return false
+	}
+	return true
 }
 
 func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier, cpAuth controlplane.Authenticator) http.Handler {
@@ -806,10 +927,15 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		json.NewEncoder(w).Encode(t)
 	}))
 
-	// Internal pre-registration endpoint — no SVID required.
-	// Called by the orchestrator at spawn time so the agent appears in the UI
-	// immediately with "pending" status rather than waiting for the sidecar to start.
-	mux.HandleFunc("POST /v1/agents/preregister", func(w http.ResponseWriter, r *http.Request) {
+	// Internal pre-registration endpoint. Called by the orchestrator at spawn time
+	// so the agent appears in the UI immediately with "pending" status rather than
+	// waiting for the sidecar to start. Its ONLY caller is the orchestrator, which
+	// holds the control-plane bearer, so it sits behind cpAuth (was unauthenticated
+	// — a hole: it set the record's ParentID, which the events gate trusts to
+	// authorize child->parent audit posts, so any caller could plant a forged
+	// lineage before an agent self-registered). Under CONTROL_PLANE_AUTH=none this
+	// runs open, so kind is unaffected.
+	handleCP("POST /v1/agents/preregister", func(w http.ResponseWriter, r *http.Request) {
 		var rec registry.AgentRecord
 		if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -817,6 +943,12 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		}
 		if rec.AgentID == "" {
 			http.Error(w, "agentId required", http.StatusBadRequest)
+			return
+		}
+		// The preregistered userId (set by the orchestrator from the spawner's
+		// token sub) becomes the agent record's owner and feeds ownership scoping —
+		// validate its charset at ingest.
+		if !rejectInvalidUserID(w, rec.UserID) {
 			return
 		}
 		rec.Status = "pending"
@@ -866,6 +998,11 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// userId (token-derived by the orchestrator, or empty for a global agent)
+		// is stored as the record owner — validate its charset at ingest.
+		if !rejectInvalidUserID(w, req.UserID) {
+			return
+		}
 
 		tpl, ok, err := s.GetTemplate(ctx, req.AgentType)
 		if storeErr(w, err) {
@@ -884,6 +1021,14 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		if storeErr(w, err) {
 			return
 		}
+		// ParentID is IMMUTABLE once the record exists. A self-registering sidecar
+		// only proves its OWN agentID (SVID-pinned above), not its lineage, so it
+		// must not be able to (re)point ParentID from the request body — the events
+		// gate authorizes a child->parent audit post off the stored ParentID, so a
+		// forgeable parent would let any agent plant parentId=victim and post events
+		// onto the victim. The trusted set-once happens at preregister (cpAuth) or,
+		// for an un-preregistered brand-new self-register, this first write.
+		parentID := req.ParentID
 		if existing.AgentID != "" {
 			switch existing.Status {
 			case "completed", "failed", "revoked":
@@ -891,6 +1036,7 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 					http.StatusConflict)
 				return
 			}
+			parentID = existing.ParentID // preserve the lineage set at preregister/first-register
 		}
 
 		rec := registry.AgentRecord{
@@ -901,7 +1047,7 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			Status:       "active",
 			Lifecycle:    tpl.Runtime.Lifecycle,
 			SupportsChat: tpl.Runtime.SupportsChat,
-			ParentID:     req.ParentID,
+			ParentID:     parentID,
 		}
 		if storeErr(w, s.RegisterAgent(ctx, rec)) {
 			return
@@ -964,8 +1110,37 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		json.NewEncoder(w).Encode(agents)
 	})
 
+	// Appending an event is an audit write, so it is authenticated with the SAME
+	// dual model as the PATCH-status endpoint above: a control-plane caller (the
+	// operator's reconciler/sweep and the orchestrator) may post to ANY agent;
+	// otherwise the agent's OWN sidecar, proven by its SVID, may post to its own id
+	// or its DIRECT parent's (the consent_denied breadcrumb the sidecar posts up to
+	// its parent — the one legitimate cross-agent SVID write, discovered by
+	// auditing every caller). An unauthenticated caller is rejected — this is what
+	// stops any in-cluster process forging audit events. Under the AllowAll (demo/
+	// kind) tier cpAuth passes for everyone, so the endpoint stays open and the
+	// SVID branch is never reached — kind behaviour is unchanged.
 	mux.HandleFunc("POST /v1/agents/{id}/events", func(w http.ResponseWriter, r *http.Request) {
 		agentID := r.PathValue("id")
+		if _, err := cpAuth.Authenticate(r.Context(), r); err != nil {
+			id, verr := verifier.Verify(r.Context(), r)
+			if verr != nil {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if id.AgentID != agentID {
+				// Not itself — allow only a child posting to its DIRECT parent. The
+				// caller's own record names its parent; any other target is rejected.
+				caller, err := s.GetAgent(r.Context(), id.AgentID)
+				if storeErr(w, err) {
+					return
+				}
+				if caller.ParentID != agentID {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+			}
+		}
 		var e events.Event
 		if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1053,9 +1228,22 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			// template relations (resource types derived per Phase 1) and the
 			// agent's `enabled` status tuple. This is the irreversible
 			// counterpart to revoke, which only toggles `enabled`.
-			rec, _ := s.GetAgent(ctx, agentID)
+			//
+			// Propagate a read error (5xx) rather than swallowing it: a failed
+			// GetAgent/GetTemplate would leave rec.AgentType empty → the WRONG
+			// (empty) resTypes → DeleteAgentRelationships would miss the agent's
+			// tuples, leaving stale SpiceDB authority behind. The status is already
+			// flipped, so a 5xx lets the caller retry the idempotent cleanup.
+			rec, err := s.GetAgent(ctx, agentID)
+			if storeErr(w, err) {
+				return
+			}
 			var resTypes []string
-			if tpl, ok, _ := s.GetTemplate(ctx, rec.AgentType); ok {
+			tpl, ok, err := s.GetTemplate(ctx, rec.AgentType)
+			if storeErr(w, err) {
+				return
+			}
+			if ok {
 				resTypes = relationResourceTypes(tpl, rec.TenantID != "")
 			}
 			if err := sdb.DeleteAgentRelationships(ctx, agentID, resTypes); err != nil {
@@ -1071,7 +1259,10 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	mux.HandleFunc("POST /v1/agents/{id}/dismiss", func(w http.ResponseWriter, r *http.Request) {
 		agentID := r.PathValue("id")
 		userId := r.URL.Query().Get("userId")
-		owned, exists := agentOwnedBy(r.Context(), s, agentID, userId)
+		owned, exists, err := agentOwnedBy(r.Context(), s, agentID, userId)
+		if storeErr(w, err) {
+			return
+		}
 		if !exists || !owned {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -1098,7 +1289,10 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	mux.HandleFunc("POST /v1/agents/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		userId := r.URL.Query().Get("userId")
-		owned, exists := agentOwnedBy(r.Context(), s, id, userId)
+		owned, exists, err := agentOwnedBy(r.Context(), s, id, userId)
+		if storeErr(w, err) {
+			return
+		}
 		if !exists || !owned {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -1137,7 +1331,10 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	mux.HandleFunc("POST /v1/agents/{id}/resume", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		userId := r.URL.Query().Get("userId")
-		owned, exists := agentOwnedBy(r.Context(), s, id, userId)
+		owned, exists, err := agentOwnedBy(r.Context(), s, id, userId)
+		if storeErr(w, err) {
+			return
+		}
 		if !exists || !owned {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -1174,7 +1371,10 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	mux.HandleFunc("GET /v1/agents/{id}/subtree", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		userId := r.URL.Query().Get("userId")
-		owned, exists := agentOwnedBy(r.Context(), s, id, userId)
+		owned, exists, err := agentOwnedBy(r.Context(), s, id, userId)
+		if storeErr(w, err) {
+			return
+		}
 		if !exists || !owned {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -1272,7 +1472,12 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			// positive maxDepth bounds total chain length (maxDepth == 0 means
 			// unset / no limit, matching the delegation-policy default).
 			if max := tpl.Delegation.MaxDepth; max > 0 {
-				if childDepth := depth(ctx, s, parentID) + 1; childDepth > max {
+				parentDepth, err := depth(ctx, s, parentID)
+				if storeErr(w, err) {
+					return
+				}
+				// The child would sit one level below the parent.
+				if childDepth := parentDepth + 1; childDepth > max {
 					resp.Allowed = false
 					resp.Reason = fmt.Sprintf("max delegation depth %d reached", max)
 				}
@@ -1307,6 +1512,10 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		}
 		if req.UserID == "" || req.ParentType == "" || req.ChildType == "" {
 			http.Error(w, "userId, parentType and childType are required", http.StatusBadRequest)
+			return
+		}
+		// userId keys the consent edge — validate its charset before it reaches store keys.
+		if !rejectInvalidUserID(w, req.UserID) {
 			return
 		}
 		if req.Scopes == nil {
@@ -1405,6 +1614,10 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			http.Error(w, "userId, parentType and childType are required", http.StatusBadRequest)
 			return
 		}
+		// userId keys the consent edge + the open-request marker — validate its charset.
+		if !rejectInvalidUserID(w, req.UserID) {
+			return
+		}
 		cr := registry.ConsentRequest{
 			UserID: req.UserID, ParentType: req.ParentType, ChildType: req.ChildType,
 			AgentID: req.AgentID, Scopes: req.Scopes, BindingMessage: req.BindingMessage, ExternalRef: req.ExternalRef,
@@ -1460,6 +1673,15 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		}
 		if !ok {
 			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		// Read-time backstop: if this request is still pending only because the
+		// approve-sweep's eventually-consistent index lagged, resolve it now
+		// against the strongly-consistent grant so the poller sees "approved"
+		// instead of waiting out CIBA expiry. No-op when genuinely pending or
+		// already resolved (see backstopPendingConsentRequest).
+		cr, err = backstopPendingConsentRequest(r.Context(), s, cr)
+		if storeErr(w, err) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

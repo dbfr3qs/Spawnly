@@ -3,8 +3,28 @@ package registry
 
 import (
 	"fmt"
+	"regexp"
 	"time"
 )
+
+// userIDPattern constrains a userId before it is used to build store keys and
+// prefix queries. Consent edge keys serialise as "userId|parentType|childType"
+// and the per-user request/consent lists scope with begins_with(userId+"|") /
+// begins_with(userId+"#"), so a '|' or '#' inside a userId would silently corrupt
+// an edge key or widen a per-user query into another user's rows. The allowed set
+// mirrors validAgentID but adds the ':' , '@' and '.' a real identity subject can
+// carry, so UUIDs, "user:"-prefixed and email-style usernames all pass, while the
+// reserved separators (and '/' + whitespace) are rejected.
+var userIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:@-]+$`)
+
+// ValidUserID reports whether userID is structurally safe to use in the store's
+// consent edge keys and per-user prefix scoping (see userIDPattern). An EMPTY
+// userID is NOT valid here — callers that treat "" as "unscoped"/"no identity"
+// must special-case it before calling. It is the single source of truth so the
+// registry handlers and any token-deriving caller (the orchestrator) agree.
+func ValidUserID(userID string) bool {
+	return userIDPattern.MatchString(userID)
+}
 
 // ConsentRecord captures a user's CIBA-granted approval of one spawn edge:
 // user U allows parent agent-type P to spawn child agent-type C with the

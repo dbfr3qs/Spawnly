@@ -45,7 +45,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -184,6 +183,29 @@ func isTxnCondFailed(err error) bool { return txnCancelHas(err, "ConditionalChec
 // should retry — not surface it as a hard error (dynamodb-local never emits it,
 // so this path rests on code-level reasoning).
 func isTxnConflict(err error) bool { return txnCancelHas(err, "TransactionConflict") }
+
+// txnConflictBudget bounds how many times a TransactWriteItems is retried on a
+// transient TransactionConflict before the last error is surfaced.
+const txnConflictBudget = 5
+
+// retryOnTxnConflict runs fn, retrying ONLY on a transient TransactionConflict
+// cancellation with the same bounded, incremental backoff the create path uses.
+// Any other error — including a ConditionalCheckFailed the caller must interpret
+// itself — and success return immediately. On budget exhaustion it returns fn's
+// last (still-conflict) error, so the caller behaves exactly as before this
+// retry existed. Extracted so the approve path reuses the create path's conflict
+// handling instead of being the one transaction with no retry at all.
+func retryOnTxnConflict(fn func() error) error {
+	var err error
+	for attempt := 0; attempt < txnConflictBudget; attempt++ {
+		err = fn()
+		if err == nil || !isTxnConflict(err) {
+			return err
+		}
+		time.Sleep(time.Duration(attempt+1) * 20 * time.Millisecond)
+	}
+	return err
+}
 
 // ---- item shapes ------------------------------------------------------------
 
@@ -471,25 +493,27 @@ func (s *Store) ListChildren(ctx context.Context, parentID string) ([]registry.A
 
 // ---- events -----------------------------------------------------------------
 
-// AppendEvent stamps the event's ID (UnixNano string, as in-memory) + Timestamp
-// and stores it under an SK that sorts by append order. Returns the stored copy.
+// AppendEvent stamps the event's ID + Timestamp and stores it under an SK that
+// sorts by append order. Returns the stored copy.
 //
 // Ordering contract (shared with the in-memory store, and what GetEvents
-// guarantees): events are returned oldest-first. The event ID is a UnixNano
-// timestamp and is NOT guaranteed unique — two appends in the same nanosecond
-// share an ID (here the SK's random suffix still keeps them as distinct items and
-// preserves a stable order; the in-memory store keeps slice order). Any consumer
-// that keys off the event ID must treat it as a sortable timestamp, not a unique
-// id. (The dashboard's append-only renderer assuming ID uniqueness is a known
-// pre-existing item, out of scope for this phase — flagged as a follow-up.)
+// guarantees): events are returned oldest-first. The event ID is
+// %020d-nano-plus-random-suffix — genuinely unique (the suffix disambiguates two
+// appends in the same nanosecond) AND ordering-stable (the zero-padded nano sorts
+// chronologically). Critically, the ID reuses the SAME nano + suffix baked into
+// the sort key, so a consumer that sorts by ID and the SK-ordered GetEvents agree
+// on order, and matches the in-memory store's eventID() format byte-for-byte. The
+// dashboard's incremental renderer keys off this id, so uniqueness is load-bearing.
 func (s *Store) AppendEvent(ctx context.Context, agentID string, e events.Event) (events.Event, error) {
 	now := time.Now()
 	nano := now.UnixNano()
-	e.ID = strconv.FormatInt(nano, 10)
+	// One suffix, used in BOTH the id and the SK, so id order == SK order.
+	suffix := randHex(4)
+	e.ID = fmt.Sprintf("%020d-%s", nano, suffix)
 	e.Timestamp = now
 	// %020d zero-pads the nanosecond so lexical SK order == chronological order;
-	// the random suffix disambiguates two appends in the same nanosecond.
-	sk := fmt.Sprintf("EV#%020d#%s", nano, randHex(4))
+	// the shared random suffix disambiguates two appends in the same nanosecond.
+	sk := fmt.Sprintf("EV#%020d#%s", nano, suffix)
 	item, err := marshal(eventItem{PK: agPK(agentID), SK: sk, Event: e})
 	if err != nil {
 		return events.Event{}, err
@@ -757,11 +781,12 @@ func creqItem(cr registry.ConsentRequest) (map[string]types.AttributeValue, erro
 // (existing, false), the same idempotent re-notify the in-memory store gives.
 func (s *Store) CreateConsentRequest(ctx context.Context, req registry.ConsentRequest) (registry.ConsentRequest, bool, error) {
 	key := openRequestKey(req.UserID, req.ParentType, req.ChildType, req.AgentID)
-	// A small retry budget: each iteration either wins, dedupes to an existing
-	// pending request, cleans one stale marker and retries, or backs off a
-	// TransactionConflict and retries. A handful of attempts covers real
+	// A small retry budget (shared txnConflictBudget, so the create and approve
+	// paths retry conflicts to the same depth): each iteration either wins, dedupes
+	// to an existing pending request, cleans one stale marker and retries, or backs
+	// off a TransactionConflict and retries. A handful of attempts covers real
 	// contention without spinning.
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt := 0; attempt < txnConflictBudget; attempt++ {
 		fresh := req
 		if fresh.Scopes == nil {
 			fresh.Scopes = []string{}
@@ -1080,24 +1105,32 @@ func (s *Store) ResolveConsentRequest(ctx context.Context, id, userID string, ap
 	if err != nil {
 		return registry.ConsentRequest{}, false, err
 	}
-	_, err = s.db.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
-		TransactItems: []types.TransactWriteItem{
-			{Update: &types.Update{
-				TableName:                 &s.table,
-				Key:                       keyOf(creqPK(id), skMeta),
-				UpdateExpression:          aws.String(pivotUpdate),
-				ConditionExpression:       aws.String(pivotCond),
-				ExpressionAttributeNames:  pivotNames,
-				ExpressionAttributeValues: pivotVals,
-			}},
-			{Update: &types.Update{
-				TableName:                 &s.table,
-				Key:                       keyOf(conPK(gEdge), skMeta),
-				UpdateExpression:          aws.String(gExpr),
-				ExpressionAttributeNames:  gNames,
-				ExpressionAttributeValues: gVals,
-			}},
-		},
+	// Wrapped in the shared TransactionConflict retry (parity with the create
+	// path): a concurrent write on the request or grant item can cancel this
+	// transaction with a transient TransactionConflict the SDK won't auto-retry.
+	// A ConditionalCheckFailed (already-resolved) still falls straight through to
+	// the idempotent recovery below.
+	err = retryOnTxnConflict(func() error {
+		_, e := s.db.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+			TransactItems: []types.TransactWriteItem{
+				{Update: &types.Update{
+					TableName:                 &s.table,
+					Key:                       keyOf(creqPK(id), skMeta),
+					UpdateExpression:          aws.String(pivotUpdate),
+					ConditionExpression:       aws.String(pivotCond),
+					ExpressionAttributeNames:  pivotNames,
+					ExpressionAttributeValues: pivotVals,
+				}},
+				{Update: &types.Update{
+					TableName:                 &s.table,
+					Key:                       keyOf(conPK(gEdge), skMeta),
+					UpdateExpression:          aws.String(gExpr),
+					ExpressionAttributeNames:  gNames,
+					ExpressionAttributeValues: gVals,
+				}},
+			},
+		})
+		return e
 	})
 	if err != nil {
 		// A failed pivot condition (already resolved) is the idempotent path.
@@ -1121,12 +1154,59 @@ func (s *Store) ResolveConsentRequest(ctx context.Context, id, userID string, ap
 	// The approve-sweep queries GSI2 (always eventually consistent), so a sibling
 	// pending request committed microseconds earlier can be missed here and stay
 	// pending — the documented best-effort boundary matching the in-memory sweep.
-	// It is bounded, not permanent: the waiting child re-runs CIBA on request
-	// expiry/renewal, and that fresh CreateConsentRequest is short-circuited to
-	// approved against the now-strongly-consistent grant (see the create handler's
-	// FindConsent check). A read-time re-evaluation backstop is a possible future
-	// tightening (recorded as a follow-up), not needed for correctness here.
+	// It is bounded, not permanent, and two backstops close it WITHOUT relying on
+	// this GSI read: (1) the waiting child's next CIBA CreateConsentRequest is
+	// short-circuited to approved against the now-strongly-consistent grant (the
+	// create handler's FindConsent check), and (2) any read of a still-pending
+	// request re-evaluates it against that same grant and resolves it in place —
+	// the handler-level backstopPendingConsentRequest in cmd/registry, which runs
+	// for both stores so the sweep miss self-heals on the very next poll.
 	s.sweep(ctx, id, granted, now)
+	return updated, true, nil
+}
+
+// ApprovePendingConsentRequest flips a still-pending request to approved with NO
+// grant write — the status-only pivot the read-time backstop uses when a covering
+// grant already exists. It is the SAME conditional flip the approve-sweep applies
+// per sibling (SET status=approved iff still pending), so it can never un-revoke,
+// scope-clobber, or re-stamp the TTL of the covering grant. Idempotent: a failed
+// condition means the request was already resolved, recovered via a strong re-read.
+func (s *Store) ApprovePendingConsentRequest(ctx context.Context, id string) (registry.ConsentRequest, bool, error) {
+	cr, ok, err := s.GetConsentRequest(ctx, id)
+	if err != nil {
+		return registry.ConsentRequest{}, false, err
+	}
+	if !ok {
+		return registry.ConsentRequest{}, false, nil
+	}
+	if cr.Status != registry.ConsentPending {
+		return cr, true, nil // already resolved — idempotent
+	}
+	now := time.Now()
+	_, err = s.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName:                &s.table,
+		Key:                      keyOf(creqPK(id), skMeta),
+		UpdateExpression:         aws.String("SET #s = :app, resolvedAt = :now"),
+		ConditionExpression:      aws.String("#s = :pending"),
+		ExpressionAttributeNames: map[string]string{"#s": "status"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":app":     strAV(string(registry.ConsentApproved)),
+			":pending": strAV(string(registry.ConsentPending)),
+			":now":     timeAV(now),
+		},
+	})
+	if err != nil {
+		// A concurrent resolver flipped it first: recover the resolved state.
+		if isCondFailed(err) {
+			return s.resolveRecover(ctx, id)
+		}
+		return registry.ConsentRequest{}, false, err
+	}
+	// Free the open marker, id-guarded, exactly as the sweep does after a flip.
+	s.freeOpenMarker(ctx, openRequestKey(cr.UserID, cr.ParentType, cr.ChildType, cr.AgentID), id)
+	updated := cr
+	updated.Status = registry.ConsentApproved
+	updated.ResolvedAt = &now
 	return updated, true, nil
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,10 +72,80 @@ func selfRegister(ctx context.Context, cfg config, svid string) (string, error) 
 	return rec.AgentID, nil
 }
 
-func postEvent(ctx context.Context, registryURL, agentID string, e events.Event) {
-	if err := events.New(registryURL).PostEvent(ctx, agentID, e); err != nil {
+func postEvent(ctx context.Context, client events.Client, agentID string, e events.Event) {
+	if err := client.PostEvent(ctx, agentID, e); err != nil {
 		log.Printf("warn: post event %s: %v", e.Type, err)
 	}
+}
+
+// svidBearer supplies the sidecar's registry-audience JWT-SVID as the bearer on
+// event posts, re-fetching a fresh one before the cached copy nears expiry. The
+// registry's events endpoint is now authenticated; the registry's SVID verifier
+// validates this token and derives THIS agent's id, so the sidecar can post
+// events about itself (and its direct parent) without ever holding the
+// control-plane secret. Under CONTROL_PLANE_AUTH=none the registry ignores the
+// header, so kind behaviour is unchanged.
+type svidBearer struct {
+	source attestor.Source
+	mu     sync.Mutex
+	token  string
+	exp    time.Time
+}
+
+// get returns a cached SVID, refetching when empty or near expiry. Best-effort:
+// a fetch failure returns "" (no header), so a post to a gated registry fails
+// closed — which postEvent already tolerates (audit posts are never on the
+// request critical path). It reuses the same attestor.Source the sidecar uses to
+// self-register, so no new credential plumbing is introduced.
+func (b *svidBearer) get() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.token != "" && time.Now().Before(b.exp) {
+		return b.token
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cred, err := b.source.Fetch(ctx, "registry")
+	if err != nil {
+		log.Printf("warn: fetch SVID for event auth: %v", err)
+		return ""
+	}
+	b.token = cred.Value
+	// Refresh 30s BEFORE the token's own exp, not on a fixed window: JWT-SVIDs
+	// default to a SHORT TTL (~5min) and spire-agent serves cached tokens past
+	// their half-life, so a fixed 5min window could hand out a token in its stale
+	// tail and 401 on a gated tier — dropping the audit event. svidExpiry reads the
+	// exp claim locally (no verification; we only use it to time a refetch).
+	b.exp = svidRefreshAt(cred.Value, time.Now())
+	return b.token
+}
+
+// svidRefreshAt returns when to refetch the SVID: 30s before its exp claim, so a
+// post never carries a token in its stale tail. The token is decoded WITHOUT
+// signature verification — the exp is used only to schedule a refetch, never to
+// trust the token (the registry verifies it). Falls back to a conservative 1min
+// window if the exp can't be read.
+func svidRefreshAt(token string, now time.Time) time.Time {
+	fallback := now.Add(time.Minute)
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return fallback
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return fallback
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == 0 {
+		return fallback
+	}
+	refresh := time.Unix(claims.Exp, 0).Add(-30 * time.Second)
+	if !refresh.After(now) {
+		return fallback // already near/at exp — refetch soon rather than immediately hot-loop
+	}
+	return refresh
 }
 
 func mustMarshal(v any) json.RawMessage {
@@ -251,6 +322,11 @@ func clientCredentialsToken(ctx context.Context, cfg config, scope, audience str
 }
 
 func run(ctx context.Context, cfg config) error {
+	// Authenticated events client: posts carry the sidecar's registry-audience
+	// SVID so the now-gated events endpoint accepts them (no-op header under the
+	// local auth=none tier). Built once and threaded to every postEvent call.
+	evtClient := events.NewWithToken(cfg.registryURL, (&svidBearer{source: cfg.source}).get)
+
 	// 1. Fetch the attestation credential for registry self-registration.
 	regCred, err := cfg.source.Fetch(ctx, "registry")
 	if err != nil {
@@ -279,12 +355,12 @@ func run(ctx context.Context, cfg config) error {
 	}
 
 	// 3. Post lifecycle events
-	postEvent(ctx, cfg.registryURL, agentID, events.Event{
+	postEvent(ctx, evtClient, agentID, events.Event{
 		Source:  events.SourceAgent,
 		Type:    "started",
 		Payload: mustMarshal(map[string]string{"agentId": agentID}),
 	})
-	postEvent(ctx, cfg.registryURL, agentID, events.Event{
+	postEvent(ctx, evtClient, agentID, events.Event{
 		Source:  events.SourceAgent,
 		Type:    "svid_fetched",
 		Payload: mustMarshal(map[string]string{"svid": regSVID}),
@@ -316,11 +392,11 @@ func run(ctx context.Context, cfg config) error {
 				payload := mustMarshal(map[string]string{
 					"agentId": agentID, "childType": cfg.agentType, "reason": reason,
 				})
-				postEvent(ctx, cfg.registryURL, agentID, events.Event{
+				postEvent(ctx, evtClient, agentID, events.Event{
 					Source: events.SourceAgent, Type: "consent_denied", Payload: payload,
 				})
 				if cfg.parentID != "" {
-					postEvent(ctx, cfg.registryURL, cfg.parentID, events.Event{
+					postEvent(ctx, evtClient, cfg.parentID, events.Event{
 						Source: events.SourceAgent, Type: "consent_denied", Payload: payload,
 					})
 				}
@@ -333,7 +409,7 @@ func run(ctx context.Context, cfg config) error {
 		if err := updateStatus(ctx, cfg, agentID, "awaiting-consent"); err != nil {
 			log.Printf("warn: set awaiting-consent: %v", err)
 		}
-		postEvent(ctx, cfg.registryURL, agentID, events.Event{
+		postEvent(ctx, evtClient, agentID, events.Event{
 			Source: events.SourceAgent,
 			Type:   "consent_requested",
 			Payload: mustMarshal(map[string]string{
@@ -351,7 +427,7 @@ func run(ctx context.Context, cfg config) error {
 			if err := updateStatus(ctx, cfg, agentID, "active"); err != nil {
 				log.Printf("warn: set active: %v", err)
 			}
-			postEvent(ctx, cfg.registryURL, agentID, events.Event{
+			postEvent(ctx, evtClient, agentID, events.Event{
 				Source: events.SourceAgent,
 				Type:   "consent_granted",
 				Payload: mustMarshal(map[string]string{
@@ -433,7 +509,7 @@ func run(ctx context.Context, cfg config) error {
 		if subjectToken != "" {
 			eventType = "token_exchanged"
 		}
-		postEvent(r.Context(), cfg.registryURL, agentID, events.Event{
+		postEvent(r.Context(), evtClient, agentID, events.Event{
 			Source: events.SourceAgent,
 			Type:   eventType,
 			Payload: mustMarshal(map[string]any{
@@ -462,7 +538,7 @@ func run(ctx context.Context, cfg config) error {
 		<-ctx.Done()
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		postEvent(shutCtx, cfg.registryURL, agentID, events.Event{
+		postEvent(shutCtx, evtClient, agentID, events.Event{
 			Source:  events.SourceAgent,
 			Type:    "stopping",
 			Payload: mustMarshal(map[string]string{"agentId": agentID}),

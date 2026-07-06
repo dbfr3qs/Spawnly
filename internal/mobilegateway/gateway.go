@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spawnly/platform/internal/controlplane"
+	"github.com/spawnly/platform/internal/registry"
 	"github.com/spawnly/platform/internal/tokenvalidator"
 )
 
@@ -73,6 +74,14 @@ func requireToken(v tokenvalidator.TokenValidator, audience, scope string, next 
 		}
 		userID := strings.TrimPrefix(claims.User, "user:")
 		if userID == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		// Charset guard at the token-subject boundary: userID keys the devices
+		// table (USER#<sub>) and scopes every /me query, so a separator-bearing
+		// subject must be rejected here rather than trusted to be a clean UUID.
+		// Same single source of truth as the registry ingest (registry.ValidUserID).
+		if !registry.ValidUserID(userID) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

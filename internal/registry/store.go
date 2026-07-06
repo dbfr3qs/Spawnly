@@ -80,4 +80,13 @@ type Store interface {
 	// upserts the ConsentRecord and sweeps other covered pending requests. A
 	// non-empty userID scopes the resolve to that user's own request.
 	ResolveConsentRequest(ctx context.Context, id, userID string, approve bool, scopes []string) (ConsentRequest, bool, error)
+	// ApprovePendingConsentRequest flips a still-pending request to approved
+	// WITHOUT writing or touching any consent grant — the status-only pivot the
+	// read-time backstop uses when a covering grant is already known to exist. It
+	// is a conditional flip (approve iff still pending), idempotent on an
+	// already-resolved request, and MUST NOT mutate the grant, so it can never
+	// un-revoke, scope-clobber, or re-stamp the TTL of the grant that covers it —
+	// exactly what the approve-sweep does per sibling. Returns the resolved
+	// request and whether it was found.
+	ApprovePendingConsentRequest(ctx context.Context, id string) (ConsentRequest, bool, error)
 }

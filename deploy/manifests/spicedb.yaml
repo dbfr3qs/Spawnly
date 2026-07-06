@@ -15,7 +15,14 @@ spec:
     spec:
       containers:
         - name: spicedb
-          image: authzed/spicedb:latest
+          # Pinned to a specific release + digest rather than the mutable
+          # `:latest` tag: a floating tag can silently pull a new SpiceDB build on
+          # any pod restart, drifting the datastore/schema behaviour under the
+          # platform without a code change. v1.54.0 is the current release; the
+          # digest makes the pull reproducible even if the tag is later re-pushed.
+          # The spawnly-infra AWS overlay's migrate initContainer + serve args must
+          # mirror THIS exact tag@digest (they share the image) — see the infra PR.
+          image: authzed/spicedb:v1.54.0@sha256:830527f85ac4cb40aaf3d3e8e3fe0b84cdace5ee81ceb43f905b3822ee580b82
           args:
             - serve
             - --grpc-preshared-key=poc-secret
