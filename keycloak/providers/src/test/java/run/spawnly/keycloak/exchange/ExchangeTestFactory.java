@@ -50,6 +50,30 @@ final class ExchangeTestFactory {
         return subjectToken(sub, scope, act, ISSUER, new Date(System.currentTimeMillis() + 300_000));
     }
 
+    /**
+     * A realm-issued subject_token additionally carrying an {@code organization}
+     * claim in the frozen array-of-aliases shape ({@code ["acme"]}) — used by the
+     * cross-org mismatch tests.
+     */
+    String subjectTokenWithOrg(String sub, String scope, Map<String, Object> act, java.util.List<String> orgs)
+            throws Exception {
+        JWTClaimsSet.Builder claims = new JWTClaimsSet.Builder()
+                .subject(sub)
+                .issuer(ISSUER)
+                .claim("scope", scope)
+                .claim("organization", orgs)
+                .issueTime(new Date(System.currentTimeMillis() - 60_000))
+                .expirationTime(new Date(System.currentTimeMillis() + 300_000));
+        if (act != null) {
+            claims.claim("act", act);
+        }
+        SignedJWT jwt = new SignedJWT(
+                new JWSHeader.Builder(JWSAlgorithm.RS256).keyID(kid).build(),
+                claims.build());
+        jwt.sign(new RSASSASigner(key));
+        return jwt.serialize();
+    }
+
     /** Variant with an explicit issuer (for the foreign-issuer test) and expiry. */
     String subjectToken(String sub, String scope, Map<String, Object> act, String issuer, Date exp)
             throws Exception {

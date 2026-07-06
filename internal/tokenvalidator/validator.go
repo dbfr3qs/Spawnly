@@ -28,6 +28,10 @@ import (
 //   - Roles are the user's role claims (parsed from `role`, string or array).
 //     Used to gate admin-only operations (e.g. template management).
 //   - TokenUse is the optional `token_use` claim.
+//   - OrgID is the single active organization (the multi-tenancy `organization`
+//     claim), or "" when the token names no org (org-less / global). It is
+//     parsed fail-closed: a token that names zero or MORE THAN ONE org yields
+//     "" (see parseOrgID). Nothing enforces it yet — Phase 2 only surfaces it.
 type Claims struct {
 	User            string
 	ActingAgent     string
@@ -37,6 +41,7 @@ type Claims struct {
 	Audience        []string
 	Roles           []string
 	TokenUse        string
+	OrgID           string
 }
 
 // HasScope reports whether the given scope was granted.
@@ -145,6 +150,12 @@ func claimsFromToken(tok jwt.Token) Claims {
 		c.Roles = parseStringOrArray(v)
 	}
 
+	// Single active organization (multi-tenancy). Fail-closed: only a token
+	// naming EXACTLY one org yields a non-empty OrgID (see parseOrgID).
+	if v, ok := tok.Get("organization"); ok {
+		c.OrgID = parseOrgID(v)
+	}
+
 	// Walk the nested `act` chain, outermost first.
 	if v, ok := tok.Get("act"); ok {
 		c.Chain = parseActChain(v)
@@ -181,6 +192,45 @@ func parseActChain(v any) []string {
 		v = next
 	}
 	return chain
+}
+
+// parseOrgID extracts the single active organization from Keycloak's
+// `organization` claim, defensively. Keycloak's org membership mapper emits the
+// claim in one of these shapes depending on its config:
+//
+//   - an ARRAY of org aliases — ["acme"] — the shape frozen from a live 26.4
+//     realm (organization:<alias> scope, default membership mapper);
+//   - a MAP keyed by alias — {"acme": {...}} — when the mapper is configured to
+//     include per-org attributes;
+//   - a bare string alias — "acme" — a single-valued mapper.
+//
+// A single-org token names EXACTLY one org (the point of the
+// `organization:<alias>` scope). Any other shape — zero orgs, MULTIPLE orgs, or
+// an unrecognized structure — yields "" so callers fail closed: an ambiguous or
+// unparsable org claim is treated as no active org, never a guessed one. This is
+// the fail-closed contract the (future) authorization flip relies on.
+func parseOrgID(v any) string {
+	switch t := v.(type) {
+	case []string:
+		if len(t) == 1 {
+			return t[0]
+		}
+	case []any:
+		if len(t) == 1 {
+			if s, ok := t[0].(string); ok {
+				return s
+			}
+		}
+	case map[string]any:
+		if len(t) == 1 {
+			for k := range t {
+				return k
+			}
+		}
+	case string:
+		return t
+	}
+	return ""
 }
 
 // parseSpaceOrArray handles a claim that may be a space-delimited string,

@@ -23,8 +23,13 @@ package run.spawnly.keycloak.identity;
  * @param userId  the human the agent acts for (→ {@code sub=user:<userId>})
  * @param subject the verified SPIFFE URI (→ {@code act.sub})
  * @param agentId the registry agent id (the SVID's last path segment)
+ * @param orgId   the agent's organization from its registry record (→ the
+ *                {@code organization} claim), or {@code null}/empty when the
+ *                agent is org-less (global) — the mapper then emits no org claim.
+ *                Registry-bound: the authenticator threads {@code agent.orgId()}
+ *                here, so an agent can never mint a token claiming another org.
  */
-public record VerifiedAgent(String userId, String subject, String agentId) {
+public record VerifiedAgent(String userId, String subject, String agentId, String orgId) {
 
     /**
      * Key under which the authenticator stashes the {@link VerifiedAgent} in the

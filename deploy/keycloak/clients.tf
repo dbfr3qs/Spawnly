@@ -48,6 +48,14 @@ resource "keycloak_openid_client_optional_scopes" "dashboard" {
   realm_id  = keycloak_realm.spawnly.id
   client_id = keycloak_openid_client.dashboard.id
 
+  # The built-in `organization` scope below is provisioned by Keycloak as a SIDE
+  # EFFECT of the realm's organizations_enabled=true (realm.tf). Terraform's graph
+  # only sees resource references, not that side effect, so make the ordering
+  # explicit: attach optional scopes only AFTER the realm (and its organization
+  # scope) exists, or a clean apply can race to "client scope not found". (The
+  # client→realm reference already implies this edge; this states it explicitly.)
+  depends_on = [keycloak_realm.spawnly]
+
   # NOTE: only `profile` is a Keycloak DEFAULT default-client-scope that must
   # NOT be listed here (the provider errors "already attached as a default
   # scope"). `offline_access` is a default-OPTIONAL scope, so it MUST be listed
@@ -57,6 +65,12 @@ resource "keycloak_openid_client_optional_scopes" "dashboard" {
   # session). See finding #3.
   optional_scopes = [
     "offline_access",
+    # Built-in scope Keycloak provisions when organizations_enabled=true
+    # (realm.tf). Requesting `organization` (or `organization:<alias>` for a
+    # single active org) makes the org membership mapper stamp the `organization`
+    # claim into the token — the source of the single-org token the dashboard
+    # mints. OPTIONAL so today's org-less logins are byte-identical.
+    "organization",
     keycloak_openid_client_scope.roles.name,
     keycloak_openid_client_scope.api["orchestrator:read"].name,
     keycloak_openid_client_scope.api["orchestrator:write"].name,
@@ -114,12 +128,20 @@ resource "keycloak_openid_client_optional_scopes" "mobile" {
   realm_id  = keycloak_realm.spawnly.id
   client_id = keycloak_openid_client.mobile.id
 
+  # See the dashboard optional-scopes note: the built-in `organization` scope is
+  # provisioned by the realm's organizations_enabled flip, so order this attach
+  # after the realm exists to avoid a clean-apply "client scope not found" race.
+  depends_on = [keycloak_realm.spawnly]
+
   # Only `profile` is a default default-scope (do not list it). `offline_access`
   # is a default-OPTIONAL scope and MUST be listed here or this authoritative
   # resource detaches it, killing the mobile long-lived session. See finding #3
   # and the dashboard note above.
   optional_scopes = [
     "offline_access",
+    # Built-in organization scope for parity with the dashboard (see the note on
+    # the dashboard client above). Lets the mobile app mint single-org tokens too.
+    "organization",
     keycloak_openid_client_scope.roles.name,
     keycloak_openid_client_scope.api["orchestrator:read"].name,
     keycloak_openid_client_scope.api["orchestrator:write"].name,

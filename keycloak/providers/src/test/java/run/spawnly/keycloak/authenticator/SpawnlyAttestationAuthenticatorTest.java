@@ -82,10 +82,16 @@ class SpawnlyAttestationAuthenticatorTest {
         return v;
     }
 
-    /** Registry returns an ACTIVE agent whose agentType matches the client_id. */
+    /** Registry returns an ACTIVE org-less agent whose agentType matches the client_id. */
     private void registryReturnsActive(String clientId) {
         when(registry.getAgent("agent-abc"))
                 .thenReturn(new AgentRecord("agent-abc", "active", "alice", clientId, null));
+    }
+
+    /** Registry returns an ACTIVE agent belonging to org {@code orgId}. */
+    private void registryReturnsActiveInOrg(String clientId, String orgId) {
+        when(registry.getAgent("agent-abc"))
+                .thenReturn(new AgentRecord("agent-abc", "active", "alice", clientId, null, orgId));
     }
 
     @Test
@@ -102,9 +108,10 @@ class SpawnlyAttestationAuthenticatorTest {
         verify(ctx).setClient(client);
         verify(ctx).success();
         // The reliable channel to the Phase 2 mappers: the verified, registry-
-        // confirmed identity in the request-scoped session attribute bag.
+        // confirmed identity in the request-scoped session attribute bag. Org-less
+        // record ⇒ orgId=null on the VerifiedAgent.
         verify(session).setAttribute(VerifiedAgent.SESSION_ATTR,
-                new VerifiedAgent("alice", SPIFFE, "agent-abc"));
+                new VerifiedAgent("alice", SPIFFE, "agent-abc", null));
         // Client notes still set (harmless where they don't propagate; used by CIBA).
         verify(authSession).setClientNote(SpawnlyAttestationAuthenticator.NOTE_AGENT_SUBJECT, SPIFFE);
         verify(authSession).setClientNote(SpawnlyAttestationAuthenticator.NOTE_AGENT_ID, "agent-abc");
@@ -308,7 +315,25 @@ class SpawnlyAttestationAuthenticatorTest {
 
         verify(ctx).success();
         verify(session).setAttribute(VerifiedAgent.SESSION_ATTR,
-                new VerifiedAgent("alice", SPIFFE, "agent-abc"));
+                new VerifiedAgent("alice", SPIFFE, "agent-abc", null));
+    }
+
+    @Test
+    void orgAgent_orgIdThreadedFromRegistryRecord() {
+        // Multi-tenancy: the registry record's orgId is threaded into the
+        // VerifiedAgent (→ the token's organization claim), registry-bound so an
+        // agent can never claim an org other than the one recorded at spawn.
+        form.putSingle("client_assertion_type", SpawnlyAttestationAuthenticator.JWT_BEARER_ASSERTION_TYPE);
+        form.putSingle("client_assertion", "the-svid");
+        form.putSingle("client_id", "weather-monitor");
+        when(realm.getClientByClientId("weather-monitor")).thenReturn(mock(ClientModel.class));
+        registryReturnsActiveInOrg("weather-monitor", "acme");
+
+        authWithVerifier(alwaysOk()).authenticateClient(ctx);
+
+        verify(ctx).success();
+        verify(session).setAttribute(VerifiedAgent.SESSION_ATTR,
+                new VerifiedAgent("alice", SPIFFE, "agent-abc", "acme"));
     }
 
     @Test

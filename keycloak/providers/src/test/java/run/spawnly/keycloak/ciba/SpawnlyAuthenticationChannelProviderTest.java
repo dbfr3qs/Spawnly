@@ -61,7 +61,7 @@ class SpawnlyAuthenticationChannelProviderTest {
 
     private void verifiedAgentPresent() {
         when(session.getAttribute(VerifiedAgent.SESSION_ATTR, VerifiedAgent.class))
-                .thenReturn(new VerifiedAgent("alice", SPIFFE, "agent-child"));
+                .thenReturn(new VerifiedAgent("alice", SPIFFE, "agent-child", null));
     }
 
     private CIBAAuthenticationRequest request() {

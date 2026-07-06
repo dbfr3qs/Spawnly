@@ -166,12 +166,22 @@ class SpawnlyTokenExchangeProviderTest {
     private static final String ACCESS = "urn:ietf:params:oauth:token-type:access_token";
     private static final String JWT = "urn:ietf:params:oauth:token-type:jwt";
 
-    /** A registry primed with an allowed travel-planner→flight-search edge. */
+    /** A registry primed with an allowed travel-planner→flight-search edge (org-less). */
     private void allowedEdge(List<String> grantable, int maxDepth, String... activeIds) {
         when(registry.getAgent("parent-1"))
                 .thenReturn(new AgentRecord("parent-1", "active", "alice", "travel-planner", null));
         when(registry.getAgent("child-1"))
                 .thenReturn(new AgentRecord("child-1", "active", "alice", "flight-search", "parent-1"));
+        when(registry.getDelegationPolicy("travel-planner", "flight-search"))
+                .thenReturn(new DelegationPolicy(true, grantable, maxDepth));
+    }
+
+    /** Same allowed edge but the CHILD record belongs to org {@code childOrg}. */
+    private void allowedEdgeChildOrg(List<String> grantable, int maxDepth, String childOrg) {
+        when(registry.getAgent("parent-1"))
+                .thenReturn(new AgentRecord("parent-1", "active", "alice", "travel-planner", null));
+        when(registry.getAgent("child-1"))
+                .thenReturn(new AgentRecord("child-1", "active", "alice", "flight-search", "parent-1", childOrg));
         when(registry.getDelegationPolicy("travel-planner", "flight-search"))
                 .thenReturn(new DelegationPolicy(true, grantable, maxDepth));
     }
@@ -216,6 +226,64 @@ class SpawnlyTokenExchangeProviderTest {
         assertEquals("delegation", minted.getOtherClaims().get("token_use"));
         // No resource audience on a delegation-only token.
         assertNull(minted.getAudience());
+    }
+
+    // ── organization propagation (multi-tenancy) ─────────────────────────────────
+
+    @Test
+    void orgChild_stampsOrganizationFromChildRecord() throws Exception {
+        // The exchanged token's org claim comes from the CHILD's registry record,
+        // in the same array-of-aliases shape as user/agent tokens. Subject is in
+        // the same org (the legitimate same-org delegation).
+        allowedEdgeChildOrg(List.of("flights:read"), 0, "acme");
+        String subject = tf.subjectTokenWithOrg("user:alice", "flights:read",
+                ExchangeTestFactory.act(PARENT_SPIFFE, null), List.of("acme"));
+        TokenExchangeContext c = ctx(subject, "flights:read", null, ACCESS, "actor-svid", JWT);
+
+        Response resp = provider(actorVerifier(CHILD_SPIFFE, "child-1")).exchange(c);
+        assertEquals(200, resp.getStatus());
+        assertEquals(List.of("acme"), minted.getOtherClaims().get("organization"));
+    }
+
+    @Test
+    void orgLessChild_noOrganizationClaim() throws Exception {
+        // Org-less child + org-less subject ⇒ the exchanged token carries no org
+        // claim (global chain, today's behaviour).
+        allowedEdge(List.of("flights:read"), 0);
+        String subject = tf.subjectToken("user:alice", "flights:read",
+                ExchangeTestFactory.act(PARENT_SPIFFE, null));
+        TokenExchangeContext c = ctx(subject, "flights:read", null, ACCESS, "actor-svid", JWT);
+
+        Response resp = provider(actorVerifier(CHILD_SPIFFE, "child-1")).exchange(c);
+        assertEquals(200, resp.getStatus());
+        assertNull(minted.getOtherClaims().get("organization"));
+    }
+
+    @Test
+    void crossOrgDelegation_isInvalidGrant() throws Exception {
+        // Subject token names org acme, but the child record belongs to globex —
+        // a cross-org delegation. Rejected with invalid_grant; nothing minted.
+        allowedEdgeChildOrg(List.of("flights:read"), 0, "globex");
+        String subject = tf.subjectTokenWithOrg("user:alice", "flights:read",
+                ExchangeTestFactory.act(PARENT_SPIFFE, null), List.of("acme"));
+        TokenExchangeContext c = ctx(subject, "flights:read", null, ACCESS, "actor-svid", JWT);
+
+        assertError(c, actorVerifier(CHILD_SPIFFE, "child-1"), OAuthErrorException.INVALID_GRANT);
+    }
+
+    @Test
+    void orgLessSubject_orgChild_passesAndStampsChildOrg() throws Exception {
+        // An org-less subject token (realm-admin/global chain) carries no org
+        // constraint, so it passes; the exchanged token is stamped from the
+        // child's org.
+        allowedEdgeChildOrg(List.of("flights:read"), 0, "acme");
+        String subject = tf.subjectToken("user:alice", "flights:read",
+                ExchangeTestFactory.act(PARENT_SPIFFE, null));
+        TokenExchangeContext c = ctx(subject, "flights:read", null, ACCESS, "actor-svid", JWT);
+
+        Response resp = provider(actorVerifier(CHILD_SPIFFE, "child-1")).exchange(c);
+        assertEquals(200, resp.getStatus());
+        assertEquals(List.of("acme"), minted.getOtherClaims().get("organization"));
     }
 
     // ── policy rejections ───────────────────────────────────────────────────────

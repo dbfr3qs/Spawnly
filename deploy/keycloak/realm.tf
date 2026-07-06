@@ -7,6 +7,16 @@ resource "keycloak_realm" "spawnly" {
 
   display_name = "Spawnly"
 
+  # Multi-tenancy (organizations) — turn on Keycloak Organizations for the single
+  # `spawnly` realm. GA in the pinned 26.4 image, so no server feature flag is
+  # needed; this realm switch is all that's required. Enabling it makes Keycloak
+  # provision the built-in `organization` client scope (attached as an OPTIONAL
+  # scope to the human clients below), whose membership mapper stamps the
+  # `organization` claim when a login requests `organization` / `organization:<alias>`.
+  # Additive: no org exists until the Phase-3 onboarding API creates one, and no
+  # resource server reads the claim yet. The tenant primitive is untouched.
+  organizations_enabled = true
+
   # Spawnly-branded login pages. The `spawnly` theme directory ships in the
   # Keycloak image (root Dockerfile copies keycloak/themes/spawnly into
   # /opt/keycloak/themes/) — it MUST exist there or Keycloak falls back/errors

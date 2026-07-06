@@ -69,6 +69,25 @@ class AgentRegistryClientTest {
         assertEquals("active", rec.status());
         assertEquals("alice", rec.userId());
         assertEquals("weather-monitor", rec.agentType());
+        // Org-less record (no orgId field over the wire) ⇒ orgId is null. This is
+        // the forward-compat path: a pre-org registry record parses cleanly.
+        assertNull(rec.orgId());
+    }
+
+    @Test
+    void getAgent_parsesOrgId() {
+        // Multi-tenancy hinges on the org coming from the registry RECORD over the
+        // wire (the IdP never trusts a request token for it), so pin that the
+        // JSON `orgId` field deserializes onto AgentRecord.orgId().
+        wm.stubFor(get(urlEqualTo("/v1/agents/agent-org")).willReturn(aResponse()
+                .withHeader("Content-Type", "application/json")
+                .withBody("{\"agentId\":\"agent-org\",\"status\":\"active\",\"userId\":\"alice\","
+                        + "\"agentType\":\"weather-monitor\",\"parentId\":null,\"orgId\":\"acme\"}")));
+
+        AgentRecord rec = client(() -> "").getAgent("agent-org");
+
+        assertNotNull(rec);
+        assertEquals("acme", rec.orgId());
     }
 
     @Test

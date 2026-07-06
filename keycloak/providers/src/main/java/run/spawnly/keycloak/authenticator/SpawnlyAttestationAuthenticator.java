@@ -201,9 +201,12 @@ public class SpawnlyAttestationAuthenticator extends AbstractClientAuthenticator
         // Thread the registry-confirmed identity to the Phase 2 mappers via the
         // per-request KeycloakSession attribute bag — the RELIABLE channel on the
         // client_credentials grant (see VerifiedAgent for why client notes don't
-        // survive that grant). sub=user:<userId> + act.sub=<spiffe> are derived
-        // from THIS object, so they can never be client-supplied.
-        VerifiedAgent verified = new VerifiedAgent(agent.userId(), identity.subject(), identity.agentId());
+        // survive that grant). sub=user:<userId> + act.sub=<spiffe> + the
+        // organization claim are derived from THIS object, so they can never be
+        // client-supplied. orgId is the REGISTRY record's org (multi-tenancy),
+        // binding the token's org claim to what was recorded at spawn.
+        VerifiedAgent verified = new VerifiedAgent(
+                agent.userId(), identity.subject(), identity.agentId(), agent.orgId());
         context.getSession().setAttribute(VerifiedAgent.SESSION_ATTR, verified);
 
         // Also keep the client notes for callers/paths that DO reuse the auth
