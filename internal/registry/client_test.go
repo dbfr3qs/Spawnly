@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/spawnly/platform/internal/events"
 	"github.com/spawnly/platform/internal/registry"
 )
 
@@ -219,6 +221,79 @@ func TestHTTPClientSubtree(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatalf("Subtree(ghost): expected nil, got %v", got)
+	}
+}
+
+// TestHTTPClientEscapesCraftedID asserts every method that puts an agent id in
+// the URL path PathEscape's it, so a crafted id (containing "?" or "/") becomes a
+// SINGLE literal path segment instead of smuggling a query or extra path segments
+// into the downstream registry request. This is the fix for the crafted-id delete
+// returning 502 instead of 404: an unescaped "victim?userId=attacker" corrupted
+// the URL and tripped the registry's userId charset guard (400 → 502).
+func TestHTTPClientEscapesCraftedID(t *testing.T) {
+	const crafted = "victim?userId=attacker/../evil"
+
+	type capture struct {
+		escapedPath string
+		rawQuery    string
+		userIdVals  []string
+	}
+	var got capture
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.escapedPath = r.URL.EscapedPath()
+		got.rawQuery = r.URL.RawQuery
+		got.userIdVals = r.URL.Query()["userId"]
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/events"):
+			w.WriteHeader(http.StatusCreated)
+		case strings.HasSuffix(r.URL.Path, "/subtree"):
+			json.NewEncoder(w).Encode(map[string][]string{"subtree": {}})
+		default:
+			// GetAgent: return a record so the call itself succeeds.
+			json.NewEncoder(w).Encode(registry.AgentRecord{AgentID: crafted})
+		}
+	}))
+	defer srv.Close()
+
+	client := registry.New(srv.URL)
+
+	// The "?" in the crafted id must be percent-encoded into the path so it never
+	// starts a query string; the "/" must be %2F so it stays one segment.
+	assertEscaped := func(t *testing.T, whichSuffix string) {
+		t.Helper()
+		if got.rawQuery != "" && whichSuffix != "/subtree" {
+			t.Errorf("crafted id leaked a query string: RawQuery=%q (the id must stay in the path)", got.rawQuery)
+		}
+		wantSeg := "victim%3FuserId=attacker%2F..%2Fevil"
+		if !strings.Contains(got.escapedPath, wantSeg) {
+			t.Errorf("EscapedPath=%q, want it to contain the fully-escaped id segment %q", got.escapedPath, wantSeg)
+		}
+	}
+
+	// GetAgent
+	got = capture{}
+	if _, err := client.GetAgent(context.Background(), crafted); err != nil {
+		t.Fatalf("GetAgent(crafted): %v", err)
+	}
+	assertEscaped(t, "")
+
+	// PostEvent
+	got = capture{}
+	if err := client.PostEvent(context.Background(), crafted, events.Event{Type: "x"}); err != nil {
+		t.Fatalf("PostEvent(crafted): %v", err)
+	}
+	assertEscaped(t, "/events")
+
+	// Subtree: the id is escaped into the path AND a legitimate userId is the ONLY
+	// query value — the crafted id's fake "userId=attacker" must not appear.
+	got = capture{}
+	if _, err := client.Subtree(context.Background(), crafted, "alice"); err != nil {
+		t.Fatalf("Subtree(crafted): %v", err)
+	}
+	assertEscaped(t, "/subtree")
+	if len(got.userIdVals) != 1 || got.userIdVals[0] != "alice" {
+		t.Errorf("Subtree userId query = %v, want exactly [alice] (crafted userId=attacker must not smuggle in)", got.userIdVals)
 	}
 }
 

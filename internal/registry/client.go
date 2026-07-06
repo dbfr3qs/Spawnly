@@ -106,7 +106,7 @@ func (c *HTTPClient) GetTemplate(ctx context.Context, agentType string) (AgentTe
 
 func (c *HTTPClient) patchStatus(ctx context.Context, agentID, status string) error {
 	body, _ := json.Marshal(map[string]string{"status": status})
-	req, _ := http.NewRequestWithContext(ctx, "PATCH", c.base+"/v1/agents/"+agentID, bytes.NewReader(body))
+	req, _ := http.NewRequestWithContext(ctx, "PATCH", c.base+"/v1/agents/"+url.PathEscape(agentID), bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -145,7 +145,7 @@ func (c *HTTPClient) ListAgents(ctx context.Context) ([]AgentRecord, error) {
 }
 
 func (c *HTTPClient) GetAgent(ctx context.Context, id string) (AgentRecord, error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", c.base+"/v1/agents/"+id, nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.base+"/v1/agents/"+url.PathEscape(id), nil)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return AgentRecord{}, err
@@ -162,7 +162,7 @@ func (c *HTTPClient) GetAgent(ctx context.Context, id string) (AgentRecord, erro
 }
 
 func (c *HTTPClient) ListEvents(ctx context.Context, agentID string) ([]events.Event, error) {
-	req, _ := http.NewRequestWithContext(ctx, "GET", c.base+"/v1/agents/"+agentID+"/events", nil)
+	req, _ := http.NewRequestWithContext(ctx, "GET", c.base+"/v1/agents/"+url.PathEscape(agentID)+"/events", nil)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, err
@@ -178,7 +178,7 @@ func (c *HTTPClient) ListEvents(ctx context.Context, agentID string) ([]events.E
 func (c *HTTPClient) PostEvent(ctx context.Context, agentID string, e events.Event) error {
 	body, _ := json.Marshal(e)
 	req, _ := http.NewRequestWithContext(ctx, "POST",
-		c.base+"/v1/agents/"+agentID+"/events", bytes.NewReader(body))
+		c.base+"/v1/agents/"+url.PathEscape(agentID)+"/events", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -240,7 +240,7 @@ func (c *HTTPClient) CheckSpawnPolicy(ctx context.Context, parentID, childType s
 // caller can distinguish "registry never heard of this id" (first-pass-empty →
 // 404) from a transport/registry error.
 func (c *HTTPClient) Subtree(ctx context.Context, id, userId string) ([]string, error) {
-	u := c.base + "/v1/agents/" + id + "/subtree"
+	u := c.base + "/v1/agents/" + url.PathEscape(id) + "/subtree"
 	if userId != "" {
 		u += "?userId=" + url.QueryEscape(userId)
 	}
@@ -269,8 +269,9 @@ func (c *HTTPClient) DismissAgent(ctx context.Context, agentID, userID string) e
 	// The registry scopes dismiss by owner (?userId=); the caller passes the
 	// record's owner. Empty userID (a global agent with no owner) is sent as-is
 	// and the registry rejects it — global orphans aren't reapable this way, but
-	// they're harmless (a pending record with no pod and no SVID).
-	u := c.base + "/v1/agents/" + agentID + "/dismiss"
+	// they're harmless (a pending record with no pod and no SVID). PathEscape the
+	// id so a crafted id can't smuggle a second path/query segment.
+	u := c.base + "/v1/agents/" + url.PathEscape(agentID) + "/dismiss"
 	if userID != "" {
 		u += "?userId=" + url.QueryEscape(userID)
 	}

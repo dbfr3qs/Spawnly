@@ -172,14 +172,24 @@ export function createAuthenticatedFetch(
   };
 }
 
+/**
+ * Post a lifecycle/activity event for this agent.
+ *
+ * `sidecarUrl` MUST be the per-agent SIDECAR base (e.g. http://localhost:8089),
+ * NOT the registry. Agents are identity-blind by design — the SVID lives in the
+ * sidecar, never in the agent process — so the agent never authenticates to the
+ * registry directly. The sidecar exposes the same `/v1/agents/{id}/events` path
+ * and forwards the post to the (auth-gated) registry with its own SVID attached.
+ * Best-effort: a failure is logged and swallowed, never thrown.
+ */
 export async function postEvent(
-  registryUrl: string,
+  sidecarUrl: string,
   agentId: string,
   type: string,
   payload: unknown
 ): Promise<void> {
   try {
-    await fetch(`${registryUrl}/v1/agents/${agentId}/events`, {
+    await fetch(`${sidecarUrl}/v1/agents/${agentId}/events`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ source: 'agent', type, payload }),
@@ -247,10 +257,14 @@ function truncate(v: unknown): string {
  * framework-agnostic event vocabulary into the platform's event pipeline via
  * postEvent. Never throws from the subscription callback. Returns the
  * unsubscribe function from subscribeEvent.
+ *
+ * `sidecarUrl` MUST be the per-agent SIDECAR base (identity-blind: the agent
+ * never posts to the registry directly; the sidecar attaches its SVID and
+ * forwards), matching postEvent.
  */
 export function instrumentFlue(
   ctx: EventSubscribable,
-  registryUrl: string,
+  sidecarUrl: string,
   agentId: string
 ): () => void {
   return ctx.subscribeEvent((event: any) => {
@@ -267,20 +281,20 @@ export function instrumentFlue(
 
       switch (type) {
         case 'run_start':
-          void postEvent(registryUrl, agentId, 'run_start', {
+          void postEvent(sidecarUrl, agentId, 'run_start', {
             agentName: event.agentName,
             startedAt: event.startedAt,
           });
           return;
         case 'run_end':
-          void postEvent(registryUrl, agentId, 'run_end', {
+          void postEvent(sidecarUrl, agentId, 'run_end', {
             isError: event.isError,
             durationMs: event.durationMs,
             error: truncate(event.error),
           });
           return;
         case 'turn':
-          void postEvent(registryUrl, agentId, 'model_turn', {
+          void postEvent(sidecarUrl, agentId, 'model_turn', {
             model: event.model,
             stopReason: event.stopReason,
             durationMs: event.durationMs,
@@ -289,14 +303,14 @@ export function instrumentFlue(
           });
           return;
         case 'tool_start':
-          void postEvent(registryUrl, agentId, 'tool_start', {
+          void postEvent(sidecarUrl, agentId, 'tool_start', {
             toolName: event.toolName,
             toolCallId: event.toolCallId,
             args: truncate(event.args),
           });
           return;
         case 'tool_call':
-          void postEvent(registryUrl, agentId, 'tool_end', {
+          void postEvent(sidecarUrl, agentId, 'tool_end', {
             toolName: event.toolName,
             toolCallId: event.toolCallId,
             isError: event.isError,
@@ -305,33 +319,33 @@ export function instrumentFlue(
           });
           return;
         case 'thinking_start':
-          void postEvent(registryUrl, agentId, 'thinking', { phase: 'start' });
+          void postEvent(sidecarUrl, agentId, 'thinking', { phase: 'start' });
           return;
         case 'thinking_end':
-          void postEvent(registryUrl, agentId, 'thinking', { phase: 'end' });
+          void postEvent(sidecarUrl, agentId, 'thinking', { phase: 'end' });
           return;
         case 'compaction_start':
-          void postEvent(registryUrl, agentId, 'compaction', {
+          void postEvent(sidecarUrl, agentId, 'compaction', {
             phase: 'start',
             reason: event.reason,
             estimatedTokens: event.estimatedTokens,
           });
           return;
         case 'compaction':
-          void postEvent(registryUrl, agentId, 'compaction', {
+          void postEvent(sidecarUrl, agentId, 'compaction', {
             phase: 'end',
             durationMs: event.durationMs,
           });
           return;
         case 'internal_error':
         case 'gave_up':
-          void postEvent(registryUrl, agentId, 'error', {
+          void postEvent(sidecarUrl, agentId, 'error', {
             kind: type,
             detail: truncate(event),
           });
           return;
         case 'log':
-          void postEvent(registryUrl, agentId, 'log', {
+          void postEvent(sidecarUrl, agentId, 'log', {
             level: event.level,
             message: event.message,
           });
@@ -340,7 +354,7 @@ export function instrumentFlue(
           // Any other non-delta type (idle, operation_start, operation,
           // task_start, task, ...): the Flue type name is already a neutral
           // activity label, so forward it as-is with a small payload.
-          void postEvent(registryUrl, agentId, type, truncate(event));
+          void postEvent(sidecarUrl, agentId, type, truncate(event));
           return;
       }
     } catch (e: unknown) {

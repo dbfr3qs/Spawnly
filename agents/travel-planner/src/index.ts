@@ -7,7 +7,6 @@ import { postEvent, spawn, TokenClient } from "@spawnly/sdk";
 // edge, so the user gets three independent consent prompts that do NOT collapse.
 // Collects the real results and assembles an itinerary.
 const agentId = process.env.AGENT_ID ?? "unknown";
-const registryUrl = process.env.REGISTRY_URL ?? "http://registry:8080";
 const orchestratorUrl = process.env.ORCHESTRATOR_URL ?? "http://orchestrator:8080";
 const sidecarUrl = process.env.SIDECAR_URL ?? "http://localhost:8089";
 
@@ -83,7 +82,7 @@ async function killSpecialist(childId: string): Promise<void> {
 // One consent-gated specialist task: spawn → wait → call → kill.
 async function runSpecialist(agentType: string, params: Record<string, unknown>): Promise<unknown> {
   const childId = await spawnSpecialist(agentType);
-  await postEvent(registryUrl, agentId, "specialist_spawned", { agentType, childId });
+  await postEvent(sidecarUrl, agentId, "specialist_spawned", { agentType, childId });
   try {
     await waitReady(childId);
     return await callSpecialist(childId, params);
@@ -93,7 +92,7 @@ async function runSpecialist(agentType: string, params: Record<string, unknown>)
 }
 
 async function main(): Promise<void> {
-  await postEvent(registryUrl, agentId, "parent_started", {
+  await postEvent(sidecarUrl, agentId, "parent_started", {
     agentId,
     trip: { origin, destination, departDate, returnDate },
   });
@@ -143,12 +142,12 @@ async function main(): Promise<void> {
       : null,
   };
 
-  await postEvent(registryUrl, agentId, "parent_completed", { itinerary });
+  await postEvent(sidecarUrl, agentId, "parent_completed", { itinerary });
   console.log("[travel-planner] itinerary:", JSON.stringify(itinerary, null, 2));
 }
 
 main().catch(async (err) => {
   console.error("[travel-planner] fatal:", err);
-  await postEvent(registryUrl, agentId, "agent_error", { error: err instanceof Error ? err.message : String(err) });
+  await postEvent(sidecarUrl, agentId, "agent_error", { error: err instanceof Error ? err.message : String(err) });
   process.exit(1);
 });

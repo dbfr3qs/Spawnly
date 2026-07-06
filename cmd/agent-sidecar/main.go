@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -75,6 +76,55 @@ func selfRegister(ctx context.Context, cfg config, svid string) (string, error) 
 func postEvent(ctx context.Context, client events.Client, agentID string, e events.Event) {
 	if err := client.PostEvent(ctx, agentID, e); err != nil {
 		log.Printf("warn: post event %s: %v", e.Type, err)
+	}
+}
+
+// newEventProxyHandler builds the sidecar's agent-facing event proxy. Agents are
+// identity-blind by design — the SVID lives in this sidecar, never in the agent
+// process — so an agent's own event posts (work_ok, started, child_spawned, …)
+// carry no credential and the now-gated registry events endpoint would 401 them.
+// The SDK's postEvent therefore targets the sidecar (localhost:8089); this
+// handler forwards the body to the registry with the sidecar's OWN SVID as the
+// bearer (via the shared `bearer` closure), so the agent never holds a token.
+//
+// Security model: this endpoint binds pod-wide (:8089 on all interfaces),
+// exactly like the existing unauthenticated /token endpoint on the same server —
+// so it adds NO exposure beyond what /token already grants a co-resident pod that
+// knows the pod IP (agent pods are excluded from the NetworkPolicies). It is NOT
+// loopback-only; do not assume otherwise. The real enforcement point is the
+// REGISTRY's SVID gate: the proxy attaches only the sidecar's own SVID (never the
+// control-plane secret), and the registry's events gate accepts a post only when
+// that SVID resolves to the target id's own agent or its direct parent. So even
+// though this hop trusts {id} from the URL, any caller — including a co-resident
+// pod — can at most post as THIS agent (or its parent); it cannot forge events
+// onto an unrelated agent.
+func newEventProxyHandler(registryURL string, bearer func() string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read body", http.StatusBadRequest)
+			return
+		}
+		outURL := registryURL + "/v1/agents/" + url.PathEscape(id) + "/events"
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, outURL, bytes.NewReader(body))
+		if err != nil {
+			http.Error(w, "build request", http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if tok := bearer(); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			http.Error(w, "forward to registry", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		// Propagate the registry's status + body back to the agent verbatim.
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
 	}
 }
 
@@ -324,8 +374,11 @@ func clientCredentialsToken(ctx context.Context, cfg config, scope, audience str
 func run(ctx context.Context, cfg config) error {
 	// Authenticated events client: posts carry the sidecar's registry-audience
 	// SVID so the now-gated events endpoint accepts them (no-op header under the
-	// local auth=none tier). Built once and threaded to every postEvent call.
-	evtClient := events.NewWithToken(cfg.registryURL, (&svidBearer{source: cfg.source}).get)
+	// local auth=none tier). Built once and threaded to every postEvent call. The
+	// bearer instance is captured (not anonymous) so the same cached SVID is shared
+	// by both the sidecar's own posts and the agent-facing event proxy below.
+	bearer := &svidBearer{source: cfg.source}
+	evtClient := events.NewWithToken(cfg.registryURL, bearer.get)
 
 	// 1. Fetch the attestation credential for registry self-registration.
 	regCred, err := cfg.source.Fetch(ctx, "registry")
@@ -452,6 +505,13 @@ func run(ctx context.Context, cfg config) error {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, `{"status":"ok"}`)
 	})
+
+	// Event proxy: agents post their own lifecycle/work events here (the SDK's
+	// postEvent targets the sidecar, not the registry), and the sidecar forwards
+	// them to the now-gated registry events endpoint with its OWN registry-audience
+	// SVID as the bearer — the SAME svidBearer instance (bearer.get) the sidecar's
+	// own event client uses, so both share one cached SVID.
+	mux.HandleFunc("POST /v1/agents/{id}/events", newEventProxyHandler(cfg.registryURL, bearer.get))
 
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
