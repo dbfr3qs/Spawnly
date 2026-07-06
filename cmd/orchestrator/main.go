@@ -46,6 +46,16 @@ type SpawnRequest struct {
 	TenantID  string `json:"tenantId"`
 	Task      string `json:"task,omitempty"`
 	ParentID  string `json:"parentId,omitempty"`
+	// OrgID is INTERNAL: the org the agent is spawned into, derived server-side
+	// (agent path: inherited from the parent's registry record; human path: from
+	// the token's organization claim, Phase 4 — org-less until then). The spec
+	// binds org to the token/lineage, NEVER a request-body field, so it carries a
+	// `json:"-"` tag: unlike userId (always overwritten from the token sub),
+	// tenantId (a consumer primitive read from the body on the human path), and
+	// parentId (rejected-if-present on the human path), OrgID must be structurally
+	// impossible to set from the body — hence the tag rather than an after-decode
+	// clear.
+	OrgID string `json:"-"`
 }
 
 type SpawnResponse struct {
@@ -359,6 +369,10 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			req.UserID = userID
 			req.ParentID = parentID
 			req.TenantID = parent.TenantID
+			// A child inherits its parent's org (the SaaS-account boundary), just
+			// as it inherits the tenant primitive — both from the parent's trusted
+			// registry record, never the body. Empty when the parent is org-less.
+			req.OrgID = parent.OrgID
 		} else {
 			// Human path: the dashboard's delegated token, acting for the human.
 			if !claims.HasScope(writeScope) {
@@ -371,6 +385,9 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 				return
 			}
 			req.UserID = userID
+			// Human-path org derivation from the token's organization claim is
+			// Phase 4 (needs tokenvalidator.Claims.OrgID). Until then human spawns
+			// stay org-less (req.OrgID == "") — today's behaviour, unchanged.
 		}
 
 		if req.UserID == "" {
@@ -475,6 +492,9 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			Lifecycle:    lifecycle,
 			SupportsChat: tpl.Runtime.SupportsChat,
 			ParentID:     req.ParentID,
+			// Org recorded at spawn (server-derived), so the self-registering
+			// sidecar's OrgID comes from this trusted record — never its body.
+			OrgID: req.OrgID,
 		}); err != nil {
 			log.Printf("pre-register agent: %v", err)
 			http.Error(w, "failed to spawn agent", http.StatusInternalServerError)

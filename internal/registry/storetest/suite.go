@@ -40,6 +40,8 @@ func Run(t *testing.T, newStore func(t *testing.T) registry.Store) {
 
 	t.Run("Templates", func(t *testing.T) { testTemplates(t, ctx, s) })
 	t.Run("Agents", func(t *testing.T) { testAgents(t, ctx, s) })
+	t.Run("Orgs", func(t *testing.T) { testOrgs(t, ctx, s) })
+	t.Run("OrgIDRoundTrip", func(t *testing.T) { testOrgIDRoundTrip(t, ctx, s) })
 	t.Run("Events", func(t *testing.T) { testEvents(t, ctx, s) })
 	t.Run("Consents", func(t *testing.T) { testConsents(t, ctx, s) })
 	t.Run("ConsentExpiry", func(t *testing.T) { testConsentExpiry(t, ctx, s) })
@@ -277,6 +279,151 @@ func agentIDs(rs []registry.AgentRecord) []string {
 		out[i] = r.AgentID
 	}
 	return out
+}
+
+// testOrgs covers the Organization CRUD contract: upsert-replaces,
+// get-unknown → false, the anchor nil→set→pending→active round-trip, and
+// delete reporting found-ness.
+func testOrgs(t *testing.T, ctx context.Context, s registry.Store) {
+	// Get-unknown → (zero, false), no error.
+	if _, ok, err := s.GetOrg(ctx, "st-org-unknown"); ok || err != nil {
+		t.Fatalf("GetOrg(unknown): ok=%v err=%v, want false/nil", ok, err)
+	}
+
+	// Put then Get round-trips the record (no anchor yet).
+	created := time.Now().Truncate(time.Second)
+	org := registry.Organization{
+		OrgID: "st-org-acme", Name: "Acme", RemovalDisposition: registry.RemovalOrphanToAdmin, CreatedAt: created,
+	}
+	if err := s.PutOrg(ctx, org); err != nil {
+		t.Fatalf("PutOrg: %v", err)
+	}
+	got, ok, err := s.GetOrg(ctx, org.OrgID)
+	if err != nil || !ok {
+		t.Fatalf("GetOrg(acme): ok=%v err=%v", ok, err)
+	}
+	if got.Name != "Acme" || got.RemovalDisposition != registry.RemovalOrphanToAdmin {
+		t.Errorf("GetOrg round-trip = %+v, want Name=Acme disposition=orphan-to-admin", got)
+	}
+	if got.Anchor != nil {
+		t.Errorf("fresh org Anchor = %+v, want nil", got.Anchor)
+	}
+	if d := got.CreatedAt.Sub(created); d < -time.Second || d > time.Second {
+		t.Errorf("CreatedAt drifted by %v", d)
+	}
+
+	// Upsert REPLACES the whole record: attach a pending anchor, change the name.
+	org.Name = "Acme Corp"
+	org.Anchor = &registry.AttestationAnchor{
+		Type: "sts", AWSAccountID: "111122223333", RoleArnPattern: "arn:aws:iam::111122223333:role/spawnly-*",
+		Status: registry.AnchorPending,
+	}
+	if err := s.PutOrg(ctx, org); err != nil {
+		t.Fatalf("PutOrg(pending anchor): %v", err)
+	}
+	got, _, _ = s.GetOrg(ctx, org.OrgID)
+	if got.Name != "Acme Corp" {
+		t.Errorf("upsert did not replace name: %q", got.Name)
+	}
+	if got.Anchor == nil || got.Anchor.Status != registry.AnchorPending || got.Anchor.AWSAccountID != "111122223333" {
+		t.Fatalf("pending anchor round-trip = %+v, want pending 111122223333", got.Anchor)
+	}
+	if got.Anchor.ActivatedAt != nil {
+		t.Errorf("pending anchor ActivatedAt = %v, want nil", got.Anchor.ActivatedAt)
+	}
+
+	// Transition pending → active with an ActivatedAt timestamp.
+	activated := time.Now().Truncate(time.Second)
+	org.Anchor.Status = registry.AnchorActive
+	org.Anchor.ActivatedAt = &activated
+	if err := s.PutOrg(ctx, org); err != nil {
+		t.Fatalf("PutOrg(active anchor): %v", err)
+	}
+	got, _, _ = s.GetOrg(ctx, org.OrgID)
+	if got.Anchor == nil || got.Anchor.Status != registry.AnchorActive || got.Anchor.ActivatedAt == nil {
+		t.Fatalf("active anchor round-trip = %+v, want active+activatedAt", got.Anchor)
+	}
+	if d := got.Anchor.ActivatedAt.Sub(activated); d < -time.Second || d > time.Second {
+		t.Errorf("ActivatedAt drifted by %v", d)
+	}
+
+	// A second org so ListOrgs is a presence check (the store is shared).
+	other := registry.Organization{OrgID: "st-org-globex", Name: "Globex"}
+	if err := s.PutOrg(ctx, other); err != nil {
+		t.Fatalf("PutOrg(globex): %v", err)
+	}
+	orgs, err := s.ListOrgs(ctx)
+	if err != nil {
+		t.Fatalf("ListOrgs: %v", err)
+	}
+	if !hasOrg(orgs, org.OrgID) || !hasOrg(orgs, other.OrgID) {
+		t.Errorf("ListOrgs missing a seeded org: %v", orgIDs(orgs))
+	}
+
+	// Delete reports found-ness; a second delete of the same id → false.
+	del, err := s.DeleteOrg(ctx, other.OrgID)
+	if err != nil || !del {
+		t.Fatalf("DeleteOrg(existing): del=%v err=%v", del, err)
+	}
+	if del, _ := s.DeleteOrg(ctx, other.OrgID); del {
+		t.Errorf("DeleteOrg(gone) reported found")
+	}
+	if del, _ := s.DeleteOrg(ctx, "st-org-nope"); del {
+		t.Errorf("DeleteOrg(unknown) reported found")
+	}
+	if _, ok, _ := s.GetOrg(ctx, other.OrgID); ok {
+		t.Errorf("GetOrg(deleted) still reports found")
+	}
+}
+
+func hasOrg(os []registry.Organization, id string) bool {
+	for _, o := range os {
+		if o.OrgID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func orgIDs(os []registry.Organization) []string {
+	out := make([]string, len(os))
+	for i, o := range os {
+		out[i] = o.OrgID
+	}
+	return out
+}
+
+// testOrgIDRoundTrip proves the new OrgID field persists on both agent and
+// template records — the additive Phase-1 field must survive a store round-trip
+// (and stay absent when unset, so org-less records are unaffected).
+func testOrgIDRoundTrip(t *testing.T, ctx context.Context, s registry.Store) {
+	// Agent with an OrgID round-trips it; an org-less agent stays empty.
+	orgAgent := registry.AgentRecord{AgentID: "st-org-agent", AgentType: "worker", UserID: "st-org-u", Status: "active", OrgID: "st-org-acme"}
+	lessAgent := registry.AgentRecord{AgentID: "st-orgless-agent", AgentType: "worker", UserID: "st-org-u", Status: "active"}
+	for _, r := range []registry.AgentRecord{orgAgent, lessAgent} {
+		if err := s.RegisterAgent(ctx, r); err != nil {
+			t.Fatalf("RegisterAgent(%s): %v", r.AgentID, err)
+		}
+	}
+	if got, _ := s.GetAgent(ctx, orgAgent.AgentID); got.OrgID != "st-org-acme" {
+		t.Errorf("agent OrgID round-trip = %q, want st-org-acme", got.OrgID)
+	}
+	if got, _ := s.GetAgent(ctx, lessAgent.AgentID); got.OrgID != "" {
+		t.Errorf("org-less agent OrgID = %q, want empty", got.OrgID)
+	}
+
+	// Template with an OrgID round-trips it; a global template stays empty.
+	orgTpl := tpl("st-org-tpl")
+	orgTpl.OrgID = "st-org-acme"
+	mustPut(t, ctx, s, orgTpl)
+	globalTpl := tpl("st-global-tpl")
+	mustPut(t, ctx, s, globalTpl)
+	if got, ok, _ := s.GetTemplate(ctx, orgTpl.AgentType); !ok || got.OrgID != "st-org-acme" {
+		t.Errorf("template OrgID round-trip = %q ok=%v, want st-org-acme", got.OrgID, ok)
+	}
+	if got, _, _ := s.GetTemplate(ctx, globalTpl.AgentType); got.OrgID != "" {
+		t.Errorf("global template OrgID = %q, want empty", got.OrgID)
+	}
 }
 
 func testEvents(t *testing.T, ctx context.Context, s registry.Store) {

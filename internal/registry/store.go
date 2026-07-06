@@ -58,6 +58,16 @@ type Store interface {
 	// Graph primitive — direct children of parentID (traversal stays in app code).
 	ListChildren(ctx context.Context, parentID string) ([]AgentRecord, error)
 
+	// Organizations — point access keyed by OrgID. PutOrg is an upsert (replaces
+	// the whole record, mirroring the agent/template writes). GetOrg returns
+	// (zero, false, nil) for an unknown id; DeleteOrg reports whether one was
+	// found. Membership is NOT stored here (Keycloak + SpiceDB own that — see
+	// Organization); these persist only the org's own record.
+	PutOrg(ctx context.Context, org Organization) error
+	GetOrg(ctx context.Context, id string) (Organization, bool, error)
+	ListOrgs(ctx context.Context) ([]Organization, error)
+	DeleteOrg(ctx context.Context, id string) (bool, error)
+
 	// Events — append-only list keyed by agentID.
 	AppendEvent(ctx context.Context, agentID string, e events.Event) (events.Event, error)
 	GetEvents(ctx context.Context, agentID string) ([]events.Event, error)

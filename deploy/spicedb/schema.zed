@@ -4,8 +4,29 @@
 //
 // The `enabled` relation + `& agent->enabled` intersection are the Phase 5a
 // native-revoke mechanism: revoke/resume toggle the single enabled tuple.
+// A human principal (object id = userId). Referenced as the subject of
+// agent#owner and organization member/admin relations.
+definition user {}
+
+// The SaaS-account authorization boundary (the org primitive, distinct from
+// `tenant`). Membership is mirrored here from Keycloak.
+definition organization {
+    relation member: user
+    relation admin: user
+    permission view_agents = member + admin
+    permission admin_agents = admin
+}
+
 definition agent {
     relation enabled: agent
+
+    // Human lifecycle authority. view/manage deliberately omit `& agent->enabled`
+    // (resume must be checkable on a revoked agent); the enabled intersection is
+    // for agent-runtime permissions like tenant.work_on, not these.
+    relation owner: user
+    relation org: organization
+    permission view = owner + org->view_agents
+    permission manage = owner + org->admin_agents
 }
 
 definition tenant {

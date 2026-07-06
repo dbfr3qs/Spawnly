@@ -545,6 +545,175 @@ func TestRegister_NonTenantRelationAlwaysWritten(t *testing.T) {
 	}
 }
 
+// registerOrgWorker preregisters a record carrying orgId (the trusted,
+// control-plane preregister path the orchestrator uses) and then drives the
+// SVID self-registration, returning the recording mock so the caller can assert
+// the owner/org lifecycle tuples. An empty orgID skips the preregister so the
+// self-register creates a brand-new org-less record — the org-less baseline.
+func registerOrgWorker(t *testing.T, agentID, userID, orgID string) *spicedb.Mock {
+	t.Helper()
+	s := newStore()
+	s.putTemplate(workerTemplate())
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/" + agentID}
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+
+	if orgID != "" {
+		body, _ := json.Marshal(registry.AgentRecord{
+			AgentID: agentID, AgentType: "worker", UserID: userID, OrgID: orgID,
+		})
+		req := httptest.NewRequest("POST", "/v1/agents/preregister", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("preregister: got %d, want 201", rec.Code)
+		}
+	}
+
+	payload := map[string]string{"agentType": "worker", "userId": userID, "tenantId": "acme"}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest("POST", "/v1/agents", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-svid")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("self-register: got %d, want 201", rec.Code)
+	}
+	return sdb
+}
+
+// TestRegister_OrgTuplesWrittenForOrgAgent proves an org-preregistered agent
+// gets BOTH the owner and org lifecycle tuples (server-derived org from the
+// preregistered record), while an org-less agent gets the owner tuple only —
+// and never a malformed organization: tuple.
+func TestRegister_OrgTuplesWrittenForOrgAgent(t *testing.T) {
+	org := registerOrgWorker(t, "agent-org", "user-1", "acme-org")
+	if !org.HasRelationship("agent:agent-org", "owner", "user:user-1") {
+		t.Error("expected owner tuple for org agent")
+	}
+	if !org.HasRelationship("agent:agent-org", "org", "organization:acme-org") {
+		t.Error("expected org tuple for org-preregistered agent")
+	}
+}
+
+func TestRegister_OrgTupleSkippedForOrglessAgent(t *testing.T) {
+	less := registerOrgWorker(t, "agent-noorg", "user-1", "")
+	if !less.HasRelationship("agent:agent-noorg", "owner", "user:user-1") {
+		t.Error("expected owner tuple for org-less agent")
+	}
+	if less.HasRelationship("agent:agent-noorg", "org", "organization:") {
+		t.Error("org-less agent must not write a malformed organization: tuple")
+	}
+}
+
+// TestRegister_BodyUserIDCannotOverridePreregisteredOwner pins the set-once
+// owner invariant: a self-registering sidecar proves only its own agentId
+// (SVID-pinned), never its owner, so a body userId that differs from the
+// preregistered record's must be ignored — both on the stored record and in
+// the agent#owner tuple. Otherwise a compromised sidecar could repoint its
+// record's owner (and, once Phase 4 flips authz to these tuples, hand
+// lifecycle authority over itself) to an arbitrary user.
+func TestRegister_BodyUserIDCannotOverridePreregisteredOwner(t *testing.T) {
+	const agentID = "agent-owner-pin"
+	s := newStore()
+	s.putTemplate(workerTemplate())
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/" + agentID}
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+
+	// Trusted preregister (orchestrator path) records alice as owner.
+	preBody, _ := json.Marshal(registry.AgentRecord{AgentID: agentID, AgentType: "worker", UserID: "alice", OrgID: "acme-org"})
+	preReq := httptest.NewRequest("POST", "/v1/agents/preregister", bytes.NewReader(preBody))
+	preReq.Header.Set("Content-Type", "application/json")
+	preRec := httptest.NewRecorder()
+	mux.ServeHTTP(preRec, preReq)
+	if preRec.Code != http.StatusCreated {
+		t.Fatalf("preregister: got %d, want 201", preRec.Code)
+	}
+
+	// The sidecar self-registers claiming a DIFFERENT owner in the body.
+	regBody, _ := json.Marshal(map[string]string{"agentType": "worker", "userId": "mallory", "tenantId": "acme"})
+	regReq := httptest.NewRequest("POST", "/v1/agents", bytes.NewReader(regBody))
+	regReq.Header.Set("Authorization", "Bearer test-svid")
+	regReq.Header.Set("Content-Type", "application/json")
+	regRec := httptest.NewRecorder()
+	mux.ServeHTTP(regRec, regReq)
+	if regRec.Code != http.StatusCreated {
+		t.Fatalf("self-register: got %d, want 201", regRec.Code)
+	}
+
+	// The stored record and the owner tuple keep the preregistered owner.
+	got := s.getAgent(agentID)
+	if got.UserID != "alice" {
+		t.Errorf("stored UserID = %q, want the preregistered alice", got.UserID)
+	}
+	if got.OrgID != "acme-org" {
+		t.Errorf("stored OrgID = %q, want the preregistered acme-org", got.OrgID)
+	}
+	if !sdb.HasRelationship("agent:"+agentID, "owner", "user:alice") {
+		t.Error("expected owner tuple for the preregistered owner alice")
+	}
+	if sdb.HasRelationship("agent:"+agentID, "owner", "user:mallory") {
+		t.Error("body userId mallory must not produce an owner tuple")
+	}
+}
+
+// TestTerminalStatus_DeletesOwnerAndOrgTuples proves the owner+org lifecycle
+// tuples are cleaned up on a terminal (completed) status — the write/cleanup
+// symmetry that stops stale SpiceDB authority outliving the agent. The `enabled`
+// tuple is deleted too (pre-existing); owner/org join that cleanup here.
+func TestTerminalStatus_DeletesOwnerAndOrgTuples(t *testing.T) {
+	const agentID = "agent-term-org"
+	s := newStore()
+	s.putTemplate(workerTemplate())
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/" + agentID}
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+
+	// Preregister with an org, then self-register so owner+org tuples land.
+	preBody, _ := json.Marshal(registry.AgentRecord{AgentID: agentID, AgentType: "worker", UserID: "user-1", OrgID: "acme-org"})
+	preReq := httptest.NewRequest("POST", "/v1/agents/preregister", bytes.NewReader(preBody))
+	preReq.Header.Set("Content-Type", "application/json")
+	preRec := httptest.NewRecorder()
+	mux.ServeHTTP(preRec, preReq)
+	if preRec.Code != http.StatusCreated {
+		t.Fatalf("preregister: got %d, want 201", preRec.Code)
+	}
+	regBody, _ := json.Marshal(map[string]string{"agentType": "worker", "userId": "user-1", "tenantId": "acme"})
+	regReq := httptest.NewRequest("POST", "/v1/agents", bytes.NewReader(regBody))
+	regReq.Header.Set("Authorization", "Bearer test-svid")
+	regReq.Header.Set("Content-Type", "application/json")
+	regRec := httptest.NewRecorder()
+	mux.ServeHTTP(regRec, regReq)
+	if regRec.Code != http.StatusCreated {
+		t.Fatalf("self-register: got %d, want 201", regRec.Code)
+	}
+	if !sdb.HasRelationship("agent:"+agentID, "owner", "user:user-1") || !sdb.HasRelationship("agent:"+agentID, "org", "organization:acme-org") {
+		t.Fatal("precondition: owner+org tuples should exist after registration")
+	}
+
+	// Terminal status → cleanup deletes owner, org, and enabled tuples.
+	patchBody, _ := json.Marshal(map[string]string{"status": "completed"})
+	patchReq := httptest.NewRequest("PATCH", "/v1/agents/"+agentID, bytes.NewReader(patchBody))
+	patchReq.Header.Set("Content-Type", "application/json")
+	patchRec := httptest.NewRecorder()
+	mux.ServeHTTP(patchRec, patchReq)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("PATCH status: got %d, want 200", patchRec.Code)
+	}
+	if sdb.HasRelationship("agent:"+agentID, "owner", "user:user-1") {
+		t.Error("owner tuple not cleaned up on terminal status")
+	}
+	if sdb.HasRelationship("agent:"+agentID, "org", "organization:acme-org") {
+		t.Error("org tuple not cleaned up on terminal status")
+	}
+	if sdb.HasRelationship("agent:"+agentID, "enabled", "agent:"+agentID) {
+		t.Error("enabled tuple not cleaned up on terminal status")
+	}
+}
+
 func TestSpawnPolicy(t *testing.T) {
 	s := newStore()
 	s.putTemplate(registry.AgentTemplate{
@@ -810,7 +979,7 @@ func TestGetSchema(t *testing.T) {
 	}
 	var resp map[string]string
 	json.NewDecoder(rec.Body).Decode(&resp)
-	if resp["source"] != "default" || resp["version"] != "v1" {
+	if resp["source"] != "default" || resp["version"] != "v2" {
 		t.Fatalf("unexpected schema meta: %+v", resp)
 	}
 	if !strings.Contains(resp["schema"], "definition tenant") {

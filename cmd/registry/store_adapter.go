@@ -114,6 +114,24 @@ func (s *store) ListChildren(_ context.Context, parentID string) ([]registry.Age
 	return out, nil
 }
 
+func (s *store) PutOrg(_ context.Context, org registry.Organization) error {
+	s.putOrg(org)
+	return nil
+}
+
+func (s *store) GetOrg(_ context.Context, id string) (registry.Organization, bool, error) {
+	org, ok := s.getOrg(id)
+	return org, ok, nil
+}
+
+func (s *store) ListOrgs(_ context.Context) ([]registry.Organization, error) {
+	return s.listOrgs(), nil
+}
+
+func (s *store) DeleteOrg(_ context.Context, id string) (bool, error) {
+	return s.deleteOrg(id), nil
+}
+
 func (s *store) AppendEvent(_ context.Context, agentID string, e events.Event) (events.Event, error) {
 	return s.appendEvent(agentID, e), nil
 }

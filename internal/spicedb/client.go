@@ -151,6 +151,16 @@ func NewMock() *Mock { return &Mock{tuples: map[string]bool{}} }
 
 func (m *Mock) WriteSchema(_ context.Context, _ string) error { return nil }
 
+// HasRelationship reports whether an exact tuple (resource#relation@subject) is
+// present. Test-only helper: the mock stores tuples opaquely, and the new
+// owner/org lifecycle tuples (Phase 1) are read via `view`/`manage` permissions
+// the mock does not model, so tests assert their PRESENCE directly instead.
+func (m *Mock) HasRelationship(resource, relation, subject string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.tuples[resource+"#"+relation+"@"+subject]
+}
+
 func (m *Mock) WriteRelationship(_ context.Context, resource, relation, subject string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

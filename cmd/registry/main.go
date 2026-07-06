@@ -38,7 +38,11 @@ import (
 //go:embed schema.zed
 var defaultSchema string
 
-const defaultSchemaVersion = "v1"
+// Bumped to v2 when the embedded schema gained the org multi-tenancy
+// definitions (user/organization) and the agent owner/org relations +
+// view/manage permissions. The version is informational (GET /v1/schema + boot
+// log); WriteSchema is applied unconditionally on boot regardless of it.
+const defaultSchemaVersion = "v2"
 
 // validAgentID constrains the identifier a registrant.Verifier returns before it
 // is used to build SpiceDB tuple keys and as the AgentRecord primary key. The
@@ -54,6 +58,11 @@ type store struct {
 	// consents is keyed by the (user, parentType, childType) edge — one record
 	// per edge, replaced on each fresh grant. See consentKey.
 	consents map[string]registry.ConsentRecord
+
+	// orgs holds organization records keyed by OrgID. Membership is NOT here —
+	// Keycloak owns who's in an org, SpiceDB owns authorization; this stores only
+	// the org's own record (name, settings, optional attestation anchor).
+	orgs map[string]registry.Organization
 
 	// consentRequests holds brokered consent asks by ID (Phase 5b). openRequests
 	// indexes the single open (pending) request per edge by consentKey, so
@@ -79,6 +88,7 @@ func newStore() *store {
 		consents:        map[string]registry.ConsentRecord{},
 		consentRequests: map[string]registry.ConsentRequest{},
 		openRequests:    map[string]string{},
+		orgs:            map[string]registry.Organization{},
 	}
 	s.SetSchema(defaultSchema, defaultSchemaVersion, "default")
 	return s
@@ -132,6 +142,44 @@ func (s *store) getAgent(id string) registry.AgentRecord {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.agents[id]
+}
+
+// putOrg upserts an organization record (replaces the whole record, matching
+// the agent/template write semantics).
+func (s *store) putOrg(org registry.Organization) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.orgs[org.OrgID] = org
+}
+
+// getOrg returns the org and whether it was found.
+func (s *store) getOrg(id string) (registry.Organization, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	org, ok := s.orgs[id]
+	return org, ok
+}
+
+// listOrgs returns all organization records.
+func (s *store) listOrgs() []registry.Organization {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]registry.Organization, 0, len(s.orgs))
+	for _, org := range s.orgs {
+		out = append(out, org)
+	}
+	return out
+}
+
+// deleteOrg removes an org, returning whether one was found.
+func (s *store) deleteOrg(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.orgs[id]; !ok {
+		return false
+	}
+	delete(s.orgs, id)
+	return true
 }
 
 // appendEvent stamps and stores an event, returning the stored copy. It returns
@@ -951,6 +999,15 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		if !rejectInvalidUserID(w, rec.UserID) {
 			return
 		}
+		// The preregistered orgId becomes a SpiceDB object id ("organization:"+id)
+		// on the agent's org tuple — constrain its charset at ingest exactly like
+		// agentId (this endpoint is the ONLY ingress that accepts orgId; the
+		// self-register path derives it from this record). Phase 3's org
+		// onboarding tightens org ids further to DNS labels.
+		if rec.OrgID != "" && !validAgentID.MatchString(rec.OrgID) {
+			http.Error(w, "invalid orgId", http.StatusBadRequest)
+			return
+		}
 		rec.Status = "pending"
 		if storeErr(w, s.RegisterAgent(r.Context(), rec)) {
 			return
@@ -1028,7 +1085,18 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		// forgeable parent would let any agent plant parentId=victim and post events
 		// onto the victim. The trusted set-once happens at preregister (cpAuth) or,
 		// for an un-preregistered brand-new self-register, this first write.
+		// ParentID, UserID (owner), and OrgID are all set-once — at preregister
+		// (cpAuth, orchestrator-asserted) or, for an un-preregistered brand-new
+		// self-register, at this first write — and IMMUTABLE thereafter. A
+		// self-registering sidecar proves ONLY its own agentId (SVID-pinned),
+		// never its lineage, owner, or org, so none of the three may be
+		// (re)pointed from the request body once the record exists: a forgeable
+		// owner would let a sidecar rewrite the record's owner (and, from Phase 4
+		// on, the agent:<id>#owner authz tuple) to an arbitrary user; a forgeable
+		// org would let it claim another org's agents.
 		parentID := req.ParentID
+		userID := req.UserID
+		orgID := existing.OrgID
 		if existing.AgentID != "" {
 			switch existing.Status {
 			case "completed", "failed", "revoked":
@@ -1036,18 +1104,20 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 					http.StatusConflict)
 				return
 			}
-			parentID = existing.ParentID // preserve the lineage set at preregister/first-register
+			parentID = existing.ParentID
+			userID = existing.UserID
 		}
 
 		rec := registry.AgentRecord{
 			AgentID:      agentID,
 			AgentType:    req.AgentType,
 			TenantID:     req.TenantID,
-			UserID:       req.UserID,
+			UserID:       userID,
 			Status:       "active",
 			Lifecycle:    tpl.Runtime.Lifecycle,
 			SupportsChat: tpl.Runtime.SupportsChat,
 			ParentID:     parentID,
+			OrgID:        orgID,
 		}
 		if storeErr(w, s.RegisterAgent(ctx, rec)) {
 			return
@@ -1090,6 +1160,32 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			log.Printf("spicedb enabled-tuple write error for %s: %v", agentID, err)
 		}
 		tuples = append(tuples, relTuple{Resource: enabledRes, Relation: "enabled", Subject: enabledSub})
+
+		// Human lifecycle authority tuples (Phase 1, org multi-tenancy). Always
+		// write the owner tuple; when the record is org-scoped also write the org
+		// tuple so org admins/members inherit view/manage via `org->...`. These
+		// feed the agent `view`/`manage` permissions; nothing enforces them yet
+		// (the authz flip from userId-equality is Phase 4) — writing them now is
+		// additive and keeps the tuples present for when it lands.
+		//
+		// OrgID is the record's server-derived org (rec.OrgID == existing.OrgID),
+		// never a body value. The owner tuple is skipped for a user-less global
+		// agent so we never write a malformed `user:` (empty id) tuple — the same
+		// guard the tenant-relation skip applies above for a tenant-less agent.
+		if rec.UserID != "" {
+			ownerRes, ownerSub := "agent:"+agentID, "user:"+rec.UserID
+			if err := sdb.WriteRelationship(ctx, ownerRes, "owner", ownerSub); err != nil {
+				log.Printf("spicedb owner-tuple write error for %s: %v", agentID, err)
+			}
+			tuples = append(tuples, relTuple{Resource: ownerRes, Relation: "owner", Subject: ownerSub})
+		}
+		if rec.OrgID != "" {
+			orgRes, orgSub := "agent:"+agentID, "organization:"+rec.OrgID
+			if err := sdb.WriteRelationship(ctx, orgRes, "org", orgSub); err != nil {
+				log.Printf("spicedb org-tuple write error for %s: %v", agentID, err)
+			}
+			tuples = append(tuples, relTuple{Resource: orgRes, Relation: "org", Subject: orgSub})
+		}
 		s.AppendEvent(ctx, agentID, events.Event{
 			Source:  events.SourceRegistry,
 			Type:    "spicedb_relations_written",
@@ -1258,6 +1354,21 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			}
 			if err := sdb.DeleteRelationship(ctx, "agent:"+agentID, "enabled", "agent:"+agentID); err != nil {
 				log.Printf("spicedb enabled-tuple cleanup error for %s: %v", agentID, err)
+			}
+			// The owner/org lifecycle tuples (Phase 1) have "agent:<id>" as their
+			// RESOURCE, not subject, so DeleteAgentRelationships (a subject-only
+			// filter) does not reach them — delete each explicitly. Revoke/resume
+			// need no such cleanup: they only toggle the `enabled` tuple, leaving
+			// owner/org intact so a resumed agent keeps its authority.
+			if rec.UserID != "" {
+				if err := sdb.DeleteRelationship(ctx, "agent:"+agentID, "owner", "user:"+rec.UserID); err != nil {
+					log.Printf("spicedb owner-tuple cleanup error for %s: %v", agentID, err)
+				}
+			}
+			if rec.OrgID != "" {
+				if err := sdb.DeleteRelationship(ctx, "agent:"+agentID, "org", "organization:"+rec.OrgID); err != nil {
+					log.Printf("spicedb org-tuple cleanup error for %s: %v", agentID, err)
+				}
 			}
 		}
 		w.WriteHeader(http.StatusOK)
