@@ -456,15 +456,18 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			},
 		}
 
-		if err := k8s.Create(r.Context(), aw); err != nil {
-			log.Printf("create AgentWorkload: %v", err)
-			http.Error(w, "failed to spawn agent", http.StatusInternalServerError)
-			return
-		}
-
-		// Pre-register immediately so the agent appears in the UI with "pending"
-		// status before the pod starts. The sidecar will overwrite this to "active".
-		_ = regClient.PreRegisterAgent(r.Context(), registry.AgentRecord{
+		// Pre-register BEFORE creating the workload, and fail the spawn if it
+		// errors. Ordering is security-relevant: the registry record is the
+		// trusted source of the agent's ParentID (the events-auth gate lets an
+		// SVID caller post to its own id or its stored ParentID). Pre-registering
+		// here — control-plane-authenticated, over the orchestrator's bearer —
+		// sets ParentID from the validated actor chain, and the registry makes it
+		// immutable thereafter. If instead the pod's sidecar were the first to
+		// register (which it can only do for its own SVID-pinned id, never
+		// setting a lineage), a later cpAuth pre-register would be racing a record
+		// that already exists. Creating the record first closes that window; it
+		// also means the agent shows "pending" in the UI before the pod starts.
+		if err := regClient.PreRegisterAgent(r.Context(), registry.AgentRecord{
 			AgentID:      workloadName,
 			AgentType:    req.AgentType,
 			TenantID:     req.TenantID,
@@ -472,7 +475,28 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			Lifecycle:    lifecycle,
 			SupportsChat: tpl.Runtime.SupportsChat,
 			ParentID:     req.ParentID,
-		})
+		}); err != nil {
+			log.Printf("pre-register agent: %v", err)
+			http.Error(w, "failed to spawn agent", http.StatusInternalServerError)
+			return
+		}
+
+		if err := k8s.Create(r.Context(), aw); err != nil {
+			log.Printf("create AgentWorkload: %v", err)
+			// The record now exists but the workload doesn't. The operator's
+			// stale sweep deliberately skips "pending" (it races in-flight
+			// spawns), so nothing else would ever reap this orphan — dismiss it
+			// best-effort here so a failed spawn doesn't leave a phantom pending
+			// agent in the UI. Pass the owner (the record we just pre-registered
+			// carries req.UserID) so the registry's ownership gate admits the
+			// dismiss. WithoutCancel: if Create failed because the inbound request
+			// was canceled, the cleanup must still run on a live context.
+			if derr := regClient.DismissAgent(context.WithoutCancel(r.Context()), workloadName, req.UserID); derr != nil {
+				log.Printf("dismiss orphaned pre-registration %s: %v", workloadName, derr)
+			}
+			http.Error(w, "failed to spawn agent", http.StatusInternalServerError)
+			return
+		}
 
 		go func() {
 			_ = evtClient.PostEvent(context.Background(), workloadName, events.Event{

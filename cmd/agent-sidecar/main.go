@@ -360,10 +360,15 @@ func run(ctx context.Context, cfg config) error {
 		Type:    "started",
 		Payload: mustMarshal(map[string]string{"agentId": agentID}),
 	})
+	// Breadcrumb that attestation succeeded and the sidecar obtained its
+	// registry-audience SVID. Do NOT put the token itself in the payload: events
+	// are persisted and read back through the control-plane, and a JWT-SVID is a
+	// live bearer credential — logging it would let any timeline reader replay it
+	// as this agent for the token's lifetime. Record only that it happened.
 	postEvent(ctx, evtClient, agentID, events.Event{
 		Source:  events.SourceAgent,
 		Type:    "svid_fetched",
-		Payload: mustMarshal(map[string]string{"svid": regSVID}),
+		Payload: mustMarshal(map[string]string{"result": "ok"}),
 	})
 
 	// 4. Consent gate: a consent-gated agent flips to awaiting-consent and runs

@@ -188,6 +188,105 @@ func TestSpawnHumanPathCreatesAgentWorkload(t *testing.T) {
 	}
 }
 
+// stubTemplate writes a minimal active "worker" template — enough for the spawn
+// handler to get past template validation on the human path.
+func stubTemplate(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(registry.AgentTemplate{
+		AgentType: "worker",
+		Version:   "1.0.0",
+		Status:    "active",
+		Meta:      registry.TemplateMeta{DisplayName: "Worker", Description: "t"},
+		Runtime:   registry.RuntimeSpec{Image: "img:latest", EnvDefaults: map[string]string{}},
+		AuthZ:     registry.AuthZSpec{SpiceDBRelations: []registry.SpiceDBRelationTemplate{}},
+	})
+}
+
+// A failed pre-registration must abort the spawn (500) BEFORE the workload is
+// created — the trusted ParentID record has to exist first, so if it can't be
+// written we must not leave a running pod with no (or an untrusted) record.
+func TestSpawnPreregisterFailureAbortsSpawn(t *testing.T) {
+	mockReg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/agents/preregister":
+			w.WriteHeader(http.StatusInternalServerError)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/templates/"):
+			stubTemplate(w)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), spicedb.NewMock(), mockReg.URL,
+		fakeValidator{claims: humanClaims("user-1", "orchestrator:write")},
+		"orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
+
+	body, _ := json.Marshal(SpawnRequest{AgentType: "worker", TenantID: "tenant-1"})
+	req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer human-token")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("got %d, want 500 (body: %s)", rec.Code, rec.Body.String())
+	}
+	var list agentv1alpha1.AgentWorkloadList
+	fakeClient.List(context.Background(), &list)
+	if len(list.Items) != 0 {
+		t.Fatalf("workload must not be created when preregister fails, got %d", len(list.Items))
+	}
+}
+
+// If the workload create fails AFTER a successful pre-registration, the orphaned
+// pending record must be reaped — dismissed with its owner so the registry's
+// ownership gate admits it — rather than lingering (the operator sweep skips
+// pending).
+func TestSpawnCreateFailureReapsOrphan(t *testing.T) {
+	var dismissURL string
+	mockReg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/agents/preregister":
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/dismiss"):
+			dismissURL = r.URL.Path + "?" + r.URL.RawQuery
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/templates/"):
+			stubTemplate(w)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockReg.Close()
+
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(_ context.Context, _ client.WithWatch, _ client.Object, _ ...client.CreateOption) error {
+				return errors.New("apiserver rejected the create")
+			},
+		}).Build()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), spicedb.NewMock(), mockReg.URL,
+		fakeValidator{claims: humanClaims("user-1", "orchestrator:write")},
+		"orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
+
+	body, _ := json.Marshal(SpawnRequest{AgentType: "worker", TenantID: "tenant-1"})
+	req := httptest.NewRequest("POST", "/spawn", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer human-token")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("got %d, want 500 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(dismissURL, "/dismiss") {
+		t.Fatal("orphaned pre-registration was not dismissed")
+	}
+	if !strings.Contains(dismissURL, "userId=user-1") {
+		t.Fatalf("orphan dismiss must carry the owner so the registry admits it, got %q", dismissURL)
+	}
+}
+
 func TestSpawnWithAllowedParentSucceeds(t *testing.T) {
 	mockReg := defaultMockRegistry(t)
 	defer mockReg.Close()
@@ -527,6 +626,9 @@ func mockRegistryWithTemplate(t *testing.T, requiresTenant bool) *httptest.Serve
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/agents/preregister":
+			// Spawn pre-registers (and fails on error) before creating the workload.
+			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/events"):
 			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents":
@@ -658,6 +760,9 @@ func TestSpawnTenantPresenceGuard(t *testing.T) {
 func TestSpawnDisabledTemplateRejected(t *testing.T) {
 	mockReg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/agents/preregister":
+			// Spawn pre-registers (and fails on error) before creating the workload.
+			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/events"):
 			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents":
@@ -769,6 +874,9 @@ func TestSpawnWithTask(t *testing.T) {
 func TestListAgentsProxiesToRegistry(t *testing.T) {
 	mockReg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/agents/preregister":
+			// Spawn pre-registers (and fails on error) before creating the workload.
+			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/events"):
 			w.WriteHeader(http.StatusCreated)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents":
