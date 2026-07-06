@@ -1155,7 +1155,14 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		json.NewEncoder(w).Encode(stored)
 	})
 
-	mux.HandleFunc("GET /v1/agents/{id}/events", func(w http.ResponseWriter, r *http.Request) {
+	// Reading an agent's event timeline is control-plane gated (its POST sibling
+	// already is). The only legitimate reader is the orchestrator, whose
+	// regClient carries the control-plane bearer via bearerTransport; the public
+	// dashboard reaches this only through the orchestrator's own user-authorized,
+	// ownership-scoped proxy. Gating the read keeps a direct in-cluster caller
+	// from harvesting the timeline. Under CONTROL_PLANE_AUTH=none this is open,
+	// so kind is unaffected.
+	handleCP("GET /v1/agents/{id}/events", func(w http.ResponseWriter, r *http.Request) {
 		agentID := r.PathValue("id")
 		evts, err := s.GetEvents(r.Context(), agentID)
 		if storeErr(w, err) {

@@ -22,7 +22,7 @@ type Client interface {
 	ListEvents(ctx context.Context, agentID string) ([]events.Event, error)
 	PostEvent(ctx context.Context, agentID string, e events.Event) error
 	ListTemplates(ctx context.Context) ([]string, error)
-	DismissAgent(ctx context.Context, agentID string) error
+	DismissAgent(ctx context.Context, agentID, userID string) error
 	PreRegisterAgent(ctx context.Context, r AgentRecord) error
 	CheckSpawnPolicy(ctx context.Context, parentID, childType string) (SpawnDecision, error)
 	Subtree(ctx context.Context, id, userId string) ([]string, error)
@@ -265,8 +265,16 @@ func (c *HTTPClient) Subtree(ctx context.Context, id, userId string) ([]string, 
 	return out.Subtree, nil
 }
 
-func (c *HTTPClient) DismissAgent(ctx context.Context, agentID string) error {
-	req, _ := http.NewRequestWithContext(ctx, "POST", c.base+"/v1/agents/"+agentID+"/dismiss", nil)
+func (c *HTTPClient) DismissAgent(ctx context.Context, agentID, userID string) error {
+	// The registry scopes dismiss by owner (?userId=); the caller passes the
+	// record's owner. Empty userID (a global agent with no owner) is sent as-is
+	// and the registry rejects it — global orphans aren't reapable this way, but
+	// they're harmless (a pending record with no pod and no SVID).
+	u := c.base + "/v1/agents/" + agentID + "/dismiss"
+	if userID != "" {
+		u += "?userId=" + url.QueryEscape(userID)
+	}
+	req, _ := http.NewRequestWithContext(ctx, "POST", u, nil)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -283,6 +291,7 @@ type Mock struct {
 	Agents     []AgentRecord
 	Completed  []string
 	Failed     []string
+	Dismissed  []string
 	EventStore map[string][]events.Event
 	Subtrees   map[string][]string
 }
@@ -342,7 +351,8 @@ func (m *Mock) ListTemplates(_ context.Context) ([]string, error) {
 	return types, nil
 }
 
-func (m *Mock) DismissAgent(_ context.Context, agentID string) error {
+func (m *Mock) DismissAgent(_ context.Context, agentID, _ string) error {
+	m.Dismissed = append(m.Dismissed, agentID)
 	return nil
 }
 
