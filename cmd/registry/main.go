@@ -702,6 +702,52 @@ func validAgentType(w http.ResponseWriter, agentType string) bool {
 	return true
 }
 
+// templateInScope reports whether agentType exists AND belongs to scopeOrg
+// (Phase 6 org-scoped template management). It is the shared guard for the
+// org-admin-scoped PATCH path (DELETE checks the equivalent inline after its own
+// GetTemplate). On any failure it writes the response (500 on a store error, 404
+// when the template is unknown OR belongs to a different org — a single 404 so an
+// org admin can't distinguish "no such template" from "template exists in another
+// org", no cross-org existence oracle) and returns false; the caller returns.
+func templateInScope(w http.ResponseWriter, ctx context.Context, s registry.Store, agentType, scopeOrg string) bool {
+	t, ok, err := s.GetTemplate(ctx, agentType)
+	if storeErr(w, err) {
+		return false
+	}
+	if !ok || t.OrgID != scopeOrg {
+		http.Error(w, "not found", http.StatusNotFound)
+		return false
+	}
+	return true
+}
+
+// filterTemplatesVisible returns the templates SPAWNABLE by a caller whose active
+// org is org (Phase 6): every global template (OrgID == "", the seeded catalog)
+// plus templates scoped to org. An org-less caller (org == "") sees global only.
+// This is the "global + own org" visibility used by the spawn dropdown / bare list.
+func filterTemplatesVisible(tpls []registry.AgentTemplate, org string) []registry.AgentTemplate {
+	out := make([]registry.AgentTemplate, 0, len(tpls))
+	for _, t := range tpls {
+		if t.OrgID == "" || t.OrgID == org {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// filterTemplatesOwnOrg returns ONLY the templates scoped to org (excludes global)
+// — the org-admin Agent Types management view, which manages the org's own
+// catalog, never the global one.
+func filterTemplatesOwnOrg(tpls []registry.AgentTemplate, org string) []registry.AgentTemplate {
+	out := make([]registry.AgentTemplate, 0, len(tpls))
+	for _, t := range tpls {
+		if t.OrgID == org {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 func mustMarshal(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
@@ -827,6 +873,90 @@ func resumeNode(ctx context.Context, s registry.Store, sdb spicedb.Client, id st
 	return true, nil
 }
 
+// applyRemovalDisposition settles a removed member's running agents per the org's
+// removal-disposition setting (Phase 6). It runs AFTER the member's Keycloak
+// membership and SpiceDB membership tuples are gone (the DELETE members handler),
+// so the ex-member has ALREADY lost all access and can no longer mint into the org
+// — this only decides the fate of the agents they OWNED in the org:
+//
+// In BOTH dispositions the ex-member's OWNER tuple on each of their org agents is
+// dropped, so their lifecycle authority (view/manage via the owner term) dies with
+// their membership — the spec's "the ex-member loses ALL access" (a removed member
+// must not be able to keep reading/resuming an org agent just because they spawned
+// it). What differs is the fate of the agent itself:
+//
+//   - auto-revoke: additionally run the existing revoke cascade (subtree +
+//     revokeNode) over each owned ROOT (an owned agent whose parent is not itself
+//     owned), so the ex-member's agents and everything they spawned stop acting.
+//   - orphan-to-admin (default, non-destructive): the agent keeps running; the
+//     record keeps UserID for history; org admins retain manage via org->admin_agents.
+//
+// Owner-tuple drops + cascade roots are strictly the ex-member's OWN agents in
+// THIS org (OrgID == org && UserID == user). The auto-revoke cascade only ever
+// STARTS from an owned root, so it never revokes an unrelated agent — but, exactly
+// like a normal owner-initiated revoke, it does follow ParentID into descendants
+// the ex-member spawned even if a descendant is owned by another member (that is
+// the ex-member's delegation subtree, within their revoke authority). A backend
+// error is returned so the handler fails loud (the whole remove is retryable +
+// idempotent).
+func applyRemovalDisposition(ctx context.Context, s registry.Store, sdb spicedb.Client, org, user, disposition string) error {
+	agents, err := s.ListAgents(ctx)
+	if err != nil {
+		return err
+	}
+	var owned []registry.AgentRecord
+	ownedSet := map[string]bool{}
+	for _, a := range agents {
+		if a.OrgID == org && a.UserID == user {
+			owned = append(owned, a)
+			ownedSet[a.AgentID] = true
+		}
+	}
+	if len(owned) == 0 {
+		return nil
+	}
+	// Always sever the ex-member's ownership of their org agents (best-effort: the
+	// membership tuple is already gone, so a stray owner tuple only over-grants to a
+	// subject that can no longer authenticate; a retry re-runs this idempotently).
+	sub := "user:" + spicedb.EncodeObjectID(user)
+	for _, a := range owned {
+		if derr := sdb.DeleteRelationship(ctx, "agent:"+a.AgentID, "owner", sub); derr != nil {
+			log.Printf("removal disposition: drop owner tuple for %s: %v", a.AgentID, derr)
+		}
+	}
+	if disposition == registry.RemovalAutoRevoke {
+		for _, a := range owned {
+			// Roots only: an owned agent whose parent is also owned is already
+			// covered by the parent's cascade (revokeNode is idempotent regardless).
+			if a.ParentID != "" && ownedSet[a.ParentID] {
+				continue
+			}
+			nodes, err := subtree(ctx, s, a.AgentID)
+			if err != nil {
+				return err
+			}
+			for _, id := range nodes {
+				if _, err := revokeNode(ctx, s, sdb, id); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	// orphan-to-admin: audit each orphaned agent (revokeNode emits its own event on
+	// the auto-revoke path).
+	for _, a := range owned {
+		if _, aerr := s.AppendEvent(ctx, a.AgentID, events.Event{
+			Source:  events.SourceRegistry,
+			Type:    "agent_orphaned",
+			Payload: mustMarshal(map[string]string{"agentId": a.AgentID, "orgId": org, "formerOwner": user}),
+		}); aerr != nil {
+			log.Printf("removal disposition orphan: append event for %s: %v", a.AgentID, aerr)
+		}
+	}
+	return nil
+}
+
 // rejectDuplicateUserID is a defense-in-depth guard for every userId-scoped
 // ownership/consent check in the registry. Those handlers read userId with
 // url.Values.Get, which returns only the FIRST value, so a request carrying
@@ -905,6 +1035,39 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// Org scope (Phase 6) is stamped from the TRUSTED ?orgId= the orchestrator
+		// derives from the caller's token claim (the withTemplateOrg pattern),
+		// NEVER from the request body — a dashboard-created template is bound to the
+		// org it was created in, and a body OrgID must not be able to forge that.
+		// Empty (realm-admin create, or terraform) = a global template. Validate the
+		// charset so it stays a safe SpiceDB/DNS-label object id like every other org id.
+		t.OrgID = r.URL.Query().Get("orgId")
+		if t.OrgID != "" && !validOrgID.MatchString(t.OrgID) {
+			http.Error(w, "invalid orgId", http.StatusBadRequest)
+			return
+		}
+		// Scope-integrity guard (Phase 6 security): templates share ONE global name
+		// namespace (keyed by AgentType) and PutTemplate is an unconditional upsert,
+		// so without this an org admin could re-POST an existing name and silently
+		// STEAL it into their org — hijacking the global catalog (OrgID "") or another
+		// org's template. On a name collision:
+		//   • org-scoped create (?orgId set): the existing template MUST already be in
+		//     the SAME org, else 409 — an org admin may only edit their own org's
+		//     template of that name, never a global or cross-org one.
+		//   • realm-admin create (no ?orgId, global authority): PRESERVE the existing
+		//     scope rather than de-scoping an org template into the global catalog (a
+		//     realm admin's edit of an org template keeps it org-scoped). A brand-new
+		//     name stays global as intended.
+		if existing, ok, err := s.GetTemplate(r.Context(), t.AgentType); storeErr(w, err) {
+			return
+		} else if ok {
+			if t.OrgID == "" {
+				t.OrgID = existing.OrgID
+			} else if existing.OrgID != t.OrgID {
+				http.Error(w, "agent type already exists", http.StatusConflict)
+				return
+			}
+		}
 		// Reject an unrecognized status at creation time so a template can't be
 		// born with a junk value. Empty (treated as active) and the tolerated
 		// legacy "deprecated" are both allowed; PATCH is stricter (active/disabled).
@@ -946,6 +1109,17 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			http.Error(w, "invalid status", http.StatusBadRequest)
 			return
 		}
+		// Org-scoped management (Phase 6): when the caller is org-scoped (the
+		// orchestrator forwarded ?orgId= for an org admin), the target template MUST
+		// belong to that org — an org admin can neither manage the global catalog
+		// (OrgID "") nor another org's templates. A realm admin forwards no orgId and
+		// bypasses this (global authority). A mismatch (or unknown) reads as the same
+		// 404 the update path returns, so there is no cross-org existence oracle.
+		if scopeOrg := r.URL.Query().Get("orgId"); scopeOrg != "" {
+			if !templateInScope(w, r.Context(), s, agentType, scopeOrg) {
+				return
+			}
+		}
 		t, found, err := s.UpdateTemplateStatus(r.Context(), agentType, body.Status)
 		if storeErr(w, err) {
 			return
@@ -970,6 +1144,14 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			return
 		}
 		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		// Org-scoped management (Phase 6): an org admin (?orgId= set) may delete only
+		// their own org's templates; realm admin (no orgId) may delete any. Mismatch
+		// reads as 404 (no cross-org oracle) — checked before the disabled-state 409
+		// so a wrong-org caller can't even learn the template's status.
+		if scopeOrg := r.URL.Query().Get("orgId"); scopeOrg != "" && t.OrgID != scopeOrg {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -1952,6 +2134,15 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			if storeErr(w, err) {
 				return
 			}
+			// Org-scoped full view (Phase 6): with ?orgId= (the orchestrator's
+			// org-admin Agent Types view) return ONLY that org's templates — an org
+			// admin manages their org's catalog, not the global one nor another
+			// org's. Without orgId (the realm-admin /v1/admin/templates view) return
+			// everything. Note this is the "own org ONLY" scope (excludes global),
+			// distinct from the spawn/list "global + own org" visibility below.
+			if org := r.URL.Query().Get("orgId"); org != "" {
+				tpls = filterTemplatesOwnOrg(tpls, org)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(tpls)
 			return
@@ -1960,12 +2151,15 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		// to decide tenant-ness: {agentType, requiresTenant}. Unlike detail=full
 		// it stays PUBLIC (no control-plane auth) — a non-admin user spawning an
 		// agent needs the flag, and it exposes nothing sensitive (active type
-		// names + a boolean, no authz config, no disabled types).
+		// names + a boolean, no authz config, no disabled types). Phase 6: with
+		// ?orgId= (the orchestrator forwards the caller's active org) the list is
+		// global + that-org templates; without it, global only.
 		if strings.EqualFold(r.URL.Query().Get("detail"), "spawn") {
 			tpls, err := s.ListTemplates(r.Context(), false)
 			if storeErr(w, err) {
 				return
 			}
+			tpls = filterTemplatesVisible(tpls, r.URL.Query().Get("orgId"))
 			out := make([]map[string]any, 0, len(tpls))
 			for _, t := range tpls {
 				out = append(out, map[string]any{
@@ -1977,9 +2171,18 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			json.NewEncoder(w).Encode(out)
 			return
 		}
-		types, err := s.ListTemplateTypes(r.Context())
+		// Bare list: active type names for the spawn dropdown. Phase 6: same
+		// global + caller's-org visibility filter as detail=spawn (was
+		// ListTemplateTypes; now ListTemplates(false) so OrgID is available to
+		// filter on before projecting to names).
+		tpls, err := s.ListTemplates(r.Context(), false)
 		if storeErr(w, err) {
 			return
+		}
+		tpls = filterTemplatesVisible(tpls, r.URL.Query().Get("orgId"))
+		types := make([]string, 0, len(tpls))
+		for _, t := range tpls {
+			types = append(types, t.AgentType)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(types)

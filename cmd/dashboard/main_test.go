@@ -327,14 +327,15 @@ func TestExpiredSessionRejected(t *testing.T) {
 	}
 }
 
-// TestTemplateRoutesRequireAdminAtBFF proves the dashboard BFF's template
-// POST/PATCH/DELETE routes are actually wired through auth.requireAdmin in
-// buildMux (not just the wrapper): a non-admin session gets 403 on each, AND
-// the upstream orchestrator is never hit (the proxy would forward if the gate
-// were bypassed). GET /api/templates stays on auth.require and is allowed for a
-// non-admin (the spawn dropdown is unchanged). This is the BFF-tier twin of the
-// orchestrator's TestTemplateManagementRequiresAdmin.
-func TestTemplateRoutesRequireAdminAtBFF(t *testing.T) {
+// TestTemplateRoutesSessionGatedAtBFF proves the dashboard BFF's template
+// POST/PATCH/DELETE routes are SESSION-gated (auth.require) as of Phase 6, not
+// realm-admin-gated: template management authz (realm admin OR org admin, scoped)
+// now lives at the orchestrator's requireTemplateManager, which the stateless BFF
+// cannot evaluate (no SpiceDB) — so a valid non-admin session is FORWARDED to the
+// orchestrator (which then 403s a non-manager), while an UNAUTHENTICATED request
+// is still rejected 401 before the proxy runs. GET /api/templates stays on
+// auth.require too (the spawn dropdown, unchanged).
+func TestTemplateRoutesSessionGatedAtBFF(t *testing.T) {
 	var upstreamHits int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHits++
@@ -365,23 +366,26 @@ func TestTemplateRoutesRequireAdminAtBFF(t *testing.T) {
 		{http.MethodDelete, "/api/templates/worker"},
 	}
 
-	// Non-admin: every template-mutate route is 403 AND the orchestrator is
-	// never reached (the requireAdmin gate returns before proxy runs).
+	// Non-admin WITH a valid session: forwarded to the orchestrator (the BFF is
+	// session-gated now; the orchestrator's requireTemplateManager is the real
+	// authz boundary — proven in cmd/orchestrator/phase6_test.go). The stub
+	// upstream returns 200; the point is that the proxy RAN (hit == 1).
 	for _, tc := range mutateCases {
 		upstreamHits = 0
 		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}"))
 		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "viewer-sid"})
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("non-admin %s: status = %d, want 403", tc.method, rec.Code)
+		if rec.Code != http.StatusOK {
+			t.Errorf("non-admin %s: status = %d, want 200 (session-gated forward)", tc.method, rec.Code)
 		}
-		if upstreamHits != 0 {
-			t.Errorf("non-admin %s: orchestrator hit %d times, want 0 (gate must run before proxy)", tc.method, upstreamHits)
+		if upstreamHits != 1 {
+			t.Errorf("non-admin %s: orchestrator hit %d times, want 1 (BFF forwards; authz is upstream)", tc.method, upstreamHits)
 		}
 	}
 
-	// Unauthenticated: admin routes are API-only → 401 (no login redirect).
+	// Unauthenticated: API routes are API-only → 401 (no login redirect), and the
+	// orchestrator is never reached.
 	for _, tc := range mutateCases {
 		upstreamHits = 0
 		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}"))

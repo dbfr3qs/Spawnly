@@ -278,17 +278,18 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	// before the orchestrator is reached.
 	mux.Handle("GET /api/admin/templates", auth.requireAdmin(proxy("GET", orchestratorURL+"/v1/admin/templates")))
 	// Template management — forward to the orchestrator (which forwards to the
-	// registry) and gate on admin at this BFF tier too (defense in depth with
-	// the orchestrator's admin gate). POST/PATCH carry a JSON body; the proxy
-	// helper forwards method and body verbatim. PATCH/DELETE build the target
-	// per-request from the {agentType} path param (Go 1.22 mux), mirroring the
-	// /api/agents/{id} routes. A non-admin session gets 403 here before the
-	// orchestrator is even reached.
-	mux.Handle("POST /api/templates", auth.requireAdmin(proxy("POST", orchestratorURL+"/v1/templates")))
-	mux.Handle("PATCH /api/templates/{agentType}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// registry). SESSION-gated only at this BFF tier (Phase 6): the real authz is
+	// the orchestrator's requireTemplateManager, which admits a REALM admin (global
+	// authority) OR an ORG admin (scoped to their org) and stamps the org from the
+	// token — neither of which the stateless BFF can evaluate (it has no SpiceDB),
+	// so gating on realm-admin here would wrongly lock out org admins. POST/PATCH
+	// carry a JSON body; the proxy helper forwards method and body verbatim.
+	// PATCH/DELETE build the target per-request from the {agentType} path param.
+	mux.Handle("POST /api/templates", auth.require(proxy("POST", orchestratorURL+"/v1/templates")))
+	mux.Handle("PATCH /api/templates/{agentType}", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxy("PATCH", orchestratorURL+"/v1/templates/"+url.PathEscape(r.PathValue("agentType")))(w, r)
 	})))
-	mux.Handle("DELETE /api/templates/{agentType}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("DELETE /api/templates/{agentType}", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxy("DELETE", orchestratorURL+"/v1/templates/"+url.PathEscape(r.PathValue("agentType")))(w, r)
 	})))
 
@@ -327,6 +328,59 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	mux.Handle("DELETE /api/admin/orgs/{id}/members/{user}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxy("DELETE", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id"))+"/members/"+url.PathEscape(r.PathValue("user")))(w, r)
 	})))
+
+	// Org SELF-SERVICE twins (multi-tenancy Phase 6). These are the ORG ADMIN's
+	// membership + settings surface for their OWN org — the org is taken from the
+	// SESSION's active org (never a client-supplied id), so the browser can only
+	// ever act on the org it is logged into. The orchestrator re-derives the org
+	// from the same token and enforces requireOrgAdmin/requireOrgMember (the real
+	// gate); this BFF layer is a session-gated convenience. An org-less session
+	// (no active org) gets 404 — nothing to self-manage. orgTarget builds the
+	// orchestrator path for the active org, or "" when there is none.
+	orgTarget := func(r *http.Request, suffix string) string {
+		org := auth.activeOrg(r)
+		if org == "" {
+			return ""
+		}
+		return orchestratorURL + "/v1/orgs/" + url.PathEscape(org) + suffix
+	}
+	orgProxy := func(method, suffix string) http.Handler {
+		return auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			target := orgTarget(r, suffix)
+			if target == "" {
+				http.Error(w, "no active organization", http.StatusNotFound)
+				return
+			}
+			proxy(method, target)(w, r)
+		}))
+	}
+	// Org record (name, removal disposition, anchor) — members may read; only
+	// admins may PATCH settings (the orchestrator enforces the split).
+	mux.Handle("GET /api/org", orgProxy("GET", ""))
+	mux.Handle("PATCH /api/org", orgProxy("PATCH", ""))
+	// Membership: list (member), add/remove/promote-demote (admin).
+	mux.Handle("GET /api/org/members", orgProxy("GET", "/members"))
+	mux.Handle("POST /api/org/members", orgProxy("POST", "/members"))
+	mux.Handle("PATCH /api/org/members/{user}", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target := orgTarget(r, "/members/"+url.PathEscape(r.PathValue("user")))
+		if target == "" {
+			http.Error(w, "no active organization", http.StatusNotFound)
+			return
+		}
+		proxy("PATCH", target)(w, r)
+	})))
+	mux.Handle("DELETE /api/org/members/{user}", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target := orgTarget(r, "/members/"+url.PathEscape(r.PathValue("user")))
+		if target == "" {
+			http.Error(w, "no active organization", http.StatusNotFound)
+			return
+		}
+		proxy("DELETE", target)(w, r)
+	})))
+	// Org-admin Agent Types view: the org's own templates (detail=full, scoped to
+	// the active org at the orchestrator). The orchestrator derives the org from the
+	// token, so no path param is needed here.
+	mux.Handle("GET /api/org/templates", auth.require(proxy("GET", orchestratorURL+"/v1/org/templates")))
 
 	// Stored spawn consents (management view). Scoped at the orchestrator to the
 	// token's user — the browser cannot list or revoke another user's grants.

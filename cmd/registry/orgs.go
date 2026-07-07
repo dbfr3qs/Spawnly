@@ -299,7 +299,30 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 			http.Error(w, "member list failed", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, members)
+		// Enrich each member with their role, which is SpiceDB-authoritative (Phase 3:
+		// Keycloak has no native member/admin concept). admin_agents holds iff the
+		// member has the `admin` relation; otherwise they are a plain member. A
+		// SpiceDB hiccup degrades a single row to "member" (never spuriously grants
+		// admin) rather than failing the whole list.
+		enc := spicedb.EncodeObjectID
+		type memberView struct {
+			UserID   string `json:"userId"`
+			Username string `json:"username"`
+			Email    string `json:"email,omitempty"`
+			Role     string `json:"role"`
+		}
+		out := make([]memberView, 0, len(members))
+		for _, m := range members {
+			role := orgdirectory.RoleMember
+			isAdmin, cerr := sdb.CheckPermission(ctx, "organization:"+enc(id), "admin_agents", "user:"+enc(m.UserID))
+			if cerr != nil {
+				log.Printf("org list members %s: role check for %s failed (defaulting member): %v", id, m.UserID, cerr)
+			} else if isAdmin {
+				role = orgdirectory.RoleAdmin
+			}
+			out = append(out, memberView{UserID: m.UserID, Username: m.Username, Email: m.Email, Role: role})
+		}
+		writeJSON(w, out)
 	}))
 
 	// POST /v1/orgs/{id}/members — add a member. Dual-write: Keycloak membership
@@ -434,6 +457,24 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 		}
 		if err := dir.RemoveMember(ctx, id, user); err != nil {
 			log.Printf("org remove member %s/%s: keycloak RemoveMember: %v", id, user, err)
+			http.Error(w, "remove member failed", http.StatusInternalServerError)
+			return
+		}
+		// Removed-member disposition (Phase 6): the ex-member has now lost all
+		// access (membership tuples + Keycloak membership gone above). Settle the
+		// agents they OWNED in this org per the org's per-org setting — auto-revoke
+		// the cascade, or orphan-to-admin (default). A store hiccup fails loud (the
+		// whole remove is retryable and every step idempotent).
+		disposition := registry.RemovalOrphanToAdmin
+		if org, ok, gerr := s.GetOrg(ctx, id); gerr != nil {
+			log.Printf("org remove member %s/%s: load org for disposition: %v", id, user, gerr)
+			http.Error(w, "remove member failed", http.StatusInternalServerError)
+			return
+		} else if ok && org.RemovalDisposition != "" {
+			disposition = org.RemovalDisposition
+		}
+		if err := applyRemovalDisposition(ctx, s, sdb, id, user, disposition); err != nil {
+			log.Printf("org remove member %s/%s: apply disposition %s: %v", id, user, disposition, err)
 			http.Error(w, "remove member failed", http.StatusInternalServerError)
 			return
 		}

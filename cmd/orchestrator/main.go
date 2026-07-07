@@ -202,6 +202,36 @@ func orgMemberCheck(ctx context.Context, sdb spicedb.Client, org, userId string)
 	return ok
 }
 
+// orgAdminCheck reports whether userId holds admin_agents on org (org admin) per
+// SpiceDB, encoded the same way as every other membership check. It is the single
+// fail-closed chokepoint for the Phase-6 org-admin gates (requireOrgAdmin,
+// requireTemplateManager, GET /v1/org/templates): a SpiceDB error or a genuine
+// non-admin both return false.
+func orgAdminCheck(ctx context.Context, sdb spicedb.Client, org, userId string) bool {
+	ok, err := sdb.CheckPermission(ctx,
+		"organization:"+spicedb.EncodeObjectID(org), "admin_agents", "user:"+spicedb.EncodeObjectID(userId))
+	if err != nil {
+		log.Printf("orgAdminCheck: spicedb admin_agents check for org %s user %s failed (fail-closed deny): %v", org, userId, err)
+		return false
+	}
+	return ok
+}
+
+// appendOrgID appends a trusted, token-derived org id to a registry path as the
+// ?orgId= query the registry stamps/filters on (Phase 6). Empty org → path
+// unchanged. The org is ALWAYS server-derived (a token claim or ctxTemplateOrg),
+// never a client value, so this can't widen a caller's org scope.
+func appendOrgID(path, org string) string {
+	if org == "" {
+		return path
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + "orgId=" + url.QueryEscape(org)
+}
+
 // ctxKey is the private type for orchestrator request-context values.
 type ctxKey int
 
@@ -209,7 +239,21 @@ const (
 	ctxUserID ctxKey = iota
 	ctxRoles
 	ctxOrgID
+	// ctxTemplateOrg carries the template-management authority scope set by the
+	// requireTemplateManager gate (Phase 6): "" for a realm admin (global
+	// authority — may create global templates and manage any org's), or the
+	// caller's org id for an org admin (scoped to that org's templates only). The
+	// path builder turns a non-empty value into the trusted ?orgId= the registry
+	// stamps/filters on — never a client-supplied body/query value.
+	ctxTemplateOrg
 )
+
+// templateOrgFrom returns the template-management scope stashed by
+// requireTemplateManager. "" means global authority (realm admin).
+func templateOrgFrom(ctx context.Context) string {
+	s, _ := ctx.Value(ctxTemplateOrg).(string)
+	return s
+}
 
 // userIDFrom returns the authenticated user id placed in the context by
 // requireToken (the dashboard token's sub). Empty if the request was not
@@ -303,6 +347,61 @@ func requireAdmin(v tokenvalidator.TokenValidator, audience, scope string, next 
 			// (the token sub) so a deny is investigable in logs.
 			log.Printf("admin auth: user %s missing admin role (have %v)", userIDFrom(r.Context()), rolesFrom(r.Context()))
 			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	})
+}
+
+// requireOrgAdmin gates an org self-service route (Phase 6) behind org-admin
+// authority over the {id} org in the path. On top of requireToken's checks it
+// requires EITHER the realm `admin` role (a platform admin bypasses for ANY org,
+// matching the platform-admin /v1/admin/orgs family) OR that the caller is
+// acting inside org {id} (their single-org token's claim.OrgID == {id}) AND holds
+// SpiceDB `admin_agents` on it. Every denial is a 404 (never 403), so a caller
+// can neither learn that org {id} exists nor that they lack admin on it —
+// cross-org and non-admin are indistinguishable from "no such route/org". The
+// SpiceDB subject is the token sub, encoded exactly like every other membership
+// check (orgMemberCheck / the list handler); a SpiceDB error fails closed (404).
+func requireOrgAdmin(v tokenvalidator.TokenValidator, audience, scope string, sdb spicedb.Client, next http.HandlerFunc) http.HandlerFunc {
+	return requireToken(v, audience, scope, func(w http.ResponseWriter, r *http.Request) {
+		if hasRole(r.Context(), "admin") {
+			next(w, r)
+			return
+		}
+		id := r.PathValue("id")
+		// The token must be scoped to THIS org (single-org tokens): a claim naming
+		// a different org (or none) can never manage org {id}. This is checked before
+		// SpiceDB so a stale/cross-org token is rejected without a round-trip.
+		if id == "" || orgIDFrom(r.Context()) != id {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if !orgAdminCheck(r.Context(), sdb, id, userIDFrom(r.Context())) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		next(w, r)
+	})
+}
+
+// requireOrgMember is requireOrgAdmin's read-only sibling: it admits an org
+// MEMBER (or admin — admin ⊇ member) of org {id} in addition to a realm admin.
+// Used for the members list an ordinary member may read. Same fail-closed 404 on
+// cross-org / non-member / SpiceDB error, so it leaks no org existence.
+func requireOrgMember(v tokenvalidator.TokenValidator, audience, scope string, sdb spicedb.Client, next http.HandlerFunc) http.HandlerFunc {
+	return requireToken(v, audience, scope, func(w http.ResponseWriter, r *http.Request) {
+		if hasRole(r.Context(), "admin") {
+			next(w, r)
+			return
+		}
+		id := r.PathValue("id")
+		if id == "" || orgIDFrom(r.Context()) != id {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if !orgMemberCheck(r.Context(), sdb, id, userIDFrom(r.Context())) {
+			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 		next(w, r)
@@ -488,6 +587,19 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		tpl, err := regClient.GetTemplate(r.Context(), req.AgentType)
 		if err != nil {
 			log.Printf("get template %s: %v", req.AgentType, err)
+			http.Error(w, "unknown agent type", http.StatusBadRequest)
+			return
+		}
+		// Org-scoped template gate (Phase 6): a template stamped with an OrgID is
+		// spawnable ONLY in that org; a global (OrgID == "") template is spawnable
+		// everywhere (the seeded catalog). req.OrgID is the server-derived org (the
+		// human token's claim, or the parent record for an agent spawn) — never the
+		// body. A mismatch reads as the SAME "unknown agent type" 400 that a missing
+		// template yields, so a caller in org B cannot distinguish "acme has a
+		// private template X" from "X does not exist" (no cross-org existence
+		// oracle). requiresTenant is untouched and evaluated below as before.
+		if tpl.OrgID != "" && tpl.OrgID != req.OrgID {
+			log.Printf("spawn: template %s is org-scoped to %q, not visible to org %q", req.AgentType, tpl.OrgID, req.OrgID)
 			http.Error(w, "unknown agent type", http.StatusBadRequest)
 			return
 		}
@@ -1008,17 +1120,58 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		return withUserID("/v1/agents/"+r.PathValue("id")+"/resume", r)
 	}))))
 
-	mux.HandleFunc("GET /v1/templates", requireToken(validator, audience, readScope, forwardToRegistry("GET", func(*http.Request) string {
-		return "/v1/templates"
+	// withCallerOrg appends the caller's active org (the token's organization
+	// claim, server-derived) as the trusted ?orgId= the registry filters template
+	// lists on (Phase 6). An org-less caller (realm admin global, or no active org)
+	// gets no param → the registry returns only global templates. The org is NEVER
+	// read from the client's query/body — only from the validated token — so a
+	// caller can't widen their template visibility to another org.
+	withCallerOrg := func(path string, r *http.Request) string {
+		return appendOrgID(path, orgIDFrom(r.Context()))
+	}
+	// withTemplateOrg appends the template-management scope (ctxTemplateOrg) set by
+	// requireTemplateManager: empty for a realm admin (registry: global authority),
+	// the org id for an org admin (registry: stamp/scope to that org). Same
+	// token-derived, never-client-supplied guarantee as withCallerOrg.
+	withTemplateOrg := func(path string, r *http.Request) string {
+		return appendOrgID(path, templateOrgFrom(r.Context()))
+	}
+	// requireTemplateManager gates template create/disable/delete for BOTH a realm
+	// admin (global authority: may manage global + any org's templates) and an org
+	// admin (scoped to their OWN org's templates). It stashes ctxTemplateOrg — ""
+	// for the realm admin, the caller's org for an org admin — which the path
+	// builder turns into the trusted ?orgId= the registry stamps on create and
+	// enforces on disable/delete (an org admin can never touch a global or
+	// other-org template: the registry 404s the mismatch). A non-admin, non-org-admin
+	// caller gets 403.
+	requireTemplateManager := func(next http.HandlerFunc) http.HandlerFunc {
+		return requireToken(validator, audience, writeScope, func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			if hasRole(ctx, "admin") {
+				next(w, r.WithContext(context.WithValue(ctx, ctxTemplateOrg, "")))
+				return
+			}
+			org := orgIDFrom(ctx)
+			if org == "" || !orgAdminCheck(ctx, sdb, org, userIDFrom(ctx)) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			next(w, r.WithContext(context.WithValue(ctx, ctxTemplateOrg, org)))
+		})
+	}
+
+	mux.HandleFunc("GET /v1/templates", requireToken(validator, audience, readScope, forwardToRegistry("GET", func(r *http.Request) string {
+		return withCallerOrg("/v1/templates", r)
 	})))
 	// Non-admin spawn list: active types plus their requiresTenant flag, for the
 	// spawn modal to decide whether to show the Tenant field. Same read scope as
 	// the thin GET /v1/templates above (NOT admin) — the registry's detail=spawn
 	// route is public, so forwarding the control-plane bearer here is harmless.
 	// The downstream query is HARDCODED to detail=spawn so no client can coax this
-	// read-scope route into the admin-only detail=full path.
-	mux.HandleFunc("GET /v1/templates/spawn", requireToken(validator, audience, readScope, forwardToRegistry("GET", func(*http.Request) string {
-		return "/v1/templates?detail=spawn"
+	// read-scope route into the admin-only detail=full path; withCallerOrg adds the
+	// caller's org so the dropdown shows global + own-org types only (Phase 6).
+	mux.HandleFunc("GET /v1/templates/spawn", requireToken(validator, audience, readScope, forwardToRegistry("GET", func(r *http.Request) string {
+		return withCallerOrg("/v1/templates?detail=spawn", r)
 	})))
 	// Admin full-detail template list (incl. disabled) for the dashboard's Agent
 	// Types admin view. Admin-gated (role=admin on top of read scope) at the
@@ -1026,25 +1179,43 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	// requireAdmin too (defense in depth). forwardToRegistry carries the
 	// orchestrator's control-plane bearer, so the registry's detail=full route
 	// (control-plane gated) authorizes — the caller's admin role is checked
-	// here, not relied on at the registry.
+	// here, not relied on at the registry. No orgId → the registry returns ALL
+	// templates (global + every org's), the realm-admin full view.
 	mux.HandleFunc("GET /v1/admin/templates", requireAdmin(validator, audience, readScope, forwardToRegistry("GET", func(*http.Request) string {
 		return "/v1/templates?detail=full"
 	})))
-	// Template management (control-plane-auth'd at the registry, admin-gated at
-	// both the orchestrator and the dashboard BFF): create, update status, and
-	// delete. requireAdmin requires role=admin on top of the write scope, so a
-	// valid orchestrator:write token without the admin role gets 403. The thin
-	// GET /v1/templates above stays on readScope (the spawn dropdown).
-	// forwardToRegistry streams the body through, so the body-carrying
-	// create/update and the bodyless delete all use it.
-	mux.HandleFunc("POST /v1/templates", requireAdmin(validator, audience, writeScope, forwardToRegistry("POST", func(*http.Request) string {
-		return "/v1/templates"
+	// Org-admin full-detail template list (Phase 6): the org admin's Agent Types
+	// view — scoped to THEIR org's templates only (detail=full + orgId). The realm
+	// admin uses /v1/admin/templates instead; here we require org-admin of the
+	// active org, so a member (or cross-org token) gets 403 and no other org's
+	// templates ever leak.
+	mux.HandleFunc("GET /v1/org/templates", requireToken(validator, audience, readScope, func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		org := orgIDFrom(ctx)
+		if org == "" || !orgAdminCheck(ctx, sdb, org, userIDFrom(ctx)) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		forwardToRegistry("GET", func(*http.Request) string {
+			return "/v1/templates?detail=full&orgId=" + url.QueryEscape(org)
+		})(w, r)
+	}))
+	// Template management (control-plane-auth'd at the registry, authz'd at both
+	// the orchestrator and the dashboard BFF): create, update status, and delete.
+	// requireTemplateManager admits a realm admin (global authority) or an org
+	// admin (scoped to their org) on top of the write scope; a plain
+	// orchestrator:write token without either gets 403. withTemplateOrg carries the
+	// trusted scope to the registry, which stamps it on create and enforces it on
+	// disable/delete. forwardToRegistry streams the body through, so the
+	// body-carrying create/update and the bodyless delete all use it.
+	mux.HandleFunc("POST /v1/templates", requireTemplateManager(forwardToRegistry("POST", func(r *http.Request) string {
+		return withTemplateOrg("/v1/templates", r)
 	})))
-	mux.HandleFunc("PATCH /v1/templates/{agentType}", requireAdmin(validator, audience, writeScope, forwardToRegistry("PATCH", func(r *http.Request) string {
-		return "/v1/templates/" + r.PathValue("agentType")
+	mux.HandleFunc("PATCH /v1/templates/{agentType}", requireTemplateManager(forwardToRegistry("PATCH", func(r *http.Request) string {
+		return withTemplateOrg("/v1/templates/"+url.PathEscape(r.PathValue("agentType")), r)
 	})))
-	mux.HandleFunc("DELETE /v1/templates/{agentType}", requireAdmin(validator, audience, writeScope, forwardToRegistry("DELETE", func(r *http.Request) string {
-		return "/v1/templates/" + r.PathValue("agentType")
+	mux.HandleFunc("DELETE /v1/templates/{agentType}", requireTemplateManager(forwardToRegistry("DELETE", func(r *http.Request) string {
+		return withTemplateOrg("/v1/templates/"+url.PathEscape(r.PathValue("agentType")), r)
 	})))
 
 	// Org onboarding + membership admin API (multi-tenancy Phase 3). PLATFORM-ADMIN
@@ -1083,6 +1254,33 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members/" + url.PathEscape(r.PathValue("user"))
 	})))
 	mux.HandleFunc("DELETE /v1/admin/orgs/{id}/members/{user}", requireAdmin(validator, audience, writeScope, forwardToRegistry("DELETE", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members/" + url.PathEscape(r.PathValue("user"))
+	})))
+
+	// Org SELF-SERVICE membership + settings API (multi-tenancy Phase 6). Unlike
+	// the /v1/admin/orgs family above (realm-admin only), these let an ORG ADMIN
+	// manage their OWN org — gated by requireOrgAdmin ({id} must equal the token's
+	// active org + SpiceDB admin_agents; realm admin bypasses for any org). Members
+	// get the read-only GET members via requireOrgMember. Every cross-org / non-admin
+	// denial is a 404, so no org existence leaks. forwardToRegistry carries the cp
+	// bearer to the same single dual-write choke point (Keycloak + SpiceDB) the
+	// admin routes use; the registry also wires the removed-member disposition.
+	mux.HandleFunc("GET /v1/orgs/{id}", requireOrgMember(validator, audience, readScope, sdb, forwardToRegistry("GET", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id"))
+	})))
+	mux.HandleFunc("PATCH /v1/orgs/{id}", requireOrgAdmin(validator, audience, writeScope, sdb, forwardToRegistry("PATCH", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id"))
+	})))
+	mux.HandleFunc("GET /v1/orgs/{id}/members", requireOrgMember(validator, audience, readScope, sdb, forwardToRegistry("GET", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members"
+	})))
+	mux.HandleFunc("POST /v1/orgs/{id}/members", requireOrgAdmin(validator, audience, writeScope, sdb, forwardToRegistry("POST", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members"
+	})))
+	mux.HandleFunc("PATCH /v1/orgs/{id}/members/{user}", requireOrgAdmin(validator, audience, writeScope, sdb, forwardToRegistry("PATCH", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members/" + url.PathEscape(r.PathValue("user"))
+	})))
+	mux.HandleFunc("DELETE /v1/orgs/{id}/members/{user}", requireOrgAdmin(validator, audience, writeScope, sdb, forwardToRegistry("DELETE", func(r *http.Request) string {
 		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members/" + url.PathEscape(r.PathValue("user"))
 	})))
 

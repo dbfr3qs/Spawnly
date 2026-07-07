@@ -1047,6 +1047,24 @@
 
     .badge-disabled { background: rgba(93,109,126,.15); color: #95a5a6; border-color: rgba(93,109,126,.35); }
     :root[data-theme="light"] .badge-disabled { background: rgba(107,114,128,.1); color: #4b5563; border-color: rgba(107,114,128,.25); }
+    .badge-role-admin { background: rgba(52,152,219,.15); color: #3498db; border-color: rgba(52,152,219,.35); }
+    .badge-role-member { background: rgba(93,109,126,.15); color: #95a5a6; border-color: rgba(93,109,126,.35); }
+
+    /* Members view (Phase 6) */
+    .add-member-bar { display: flex; gap: 8px; margin: 4px 0 12px; flex-wrap: wrap; }
+    .add-member-bar input { flex: 1 1 220px; padding: 7px 10px; }
+    .add-member-bar select { padding: 7px 10px; }
+    .members-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .members-table th, .members-table td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    .members-table th { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-dim); font-weight: 700; }
+    .members-table td.user-cell { font-family: var(--mono, ui-monospace, monospace); font-weight: 600; }
+    .org-settings { margin-top: 22px; border-top: 1px solid var(--border); padding-top: 16px; }
+    .org-settings h3 { font-size: 15px; margin: 0 0 12px; }
+    .setting-row { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
+    .setting-label { min-width: 180px; font-weight: 600; font-size: 13px; }
+    .setting-label .hint { display: block; font-weight: 400; color: var(--text-dim); font-size: 11px; margin-top: 3px; }
+    .setting-control { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+    .setting-control label { display: flex; gap: 6px; align-items: center; }
 
     .tmpl-detail { background: rgba(255,255,255,.02); border: 1px solid var(--border); border-radius: 8px; margin: 4px 0 10px; }
     .tmpl-detail[hidden] { display: none; }
@@ -1100,6 +1118,10 @@
     <!-- Admin-only (shown when /api/me reports isAdmin). Server-side gates
          are the real boundary; this nav button is cosmetic convenience. -->
     <button class="btn btn-ghost" id="open-agent-types-btn" hidden>Agent Types</button>
+    <!-- Org self-service (multi-tenancy Phase 6): shown when /api/me reports the
+         caller is this org's admin. The orchestrator's requireOrgAdmin is the real
+         gate; this button is cosmetic convenience. -->
+    <button class="btn btn-ghost" id="open-members-btn" data-testid="open-members" hidden>Members</button>
     <!-- href is overwritten from /api/config on load (local docs by default,
          the public docs origin in prod); the default keeps the link working in
          local dev even if that fetch fails. -->
@@ -1178,6 +1200,45 @@
     from git will not carry UI changes unless you commit them.
   </div>
   <div id="agent-types-table-wrap">Loading…</div>
+</section>
+
+<!-- Org admin: Members view (multi-tenancy Phase 6; hidden until /api/me isOrgAdmin) -->
+<section class="admin-view" id="members-view" hidden data-testid="members-view">
+  <div class="admin-toolbar">
+    <span class="admin-title">Members</span>
+    <button class="btn btn-ghost" id="members-back-btn">← Back to Agents</button>
+  </div>
+  <!-- Add member -->
+  <div class="add-member-bar">
+    <input id="member-add-input" type="text" autocomplete="off" spellcheck="false"
+           placeholder="email or username" data-testid="member-add-input" />
+    <select id="member-add-role" data-testid="member-add-role">
+      <option value="member">Member</option>
+      <option value="admin">Admin</option>
+    </select>
+    <button class="btn btn-primary" id="member-add-btn" data-testid="member-add-btn">Add member</button>
+  </div>
+  <div class="caveat-note">
+    Adding an unknown email/username creates a Keycloak account with a
+    <strong>required password reset</strong> — the person sets their password on
+    first sign-in (no invitation email is sent). Never edit org membership
+    directly in the Keycloak admin console.
+  </div>
+  <div id="members-table-wrap">Loading…</div>
+
+  <!-- Org settings -->
+  <div class="org-settings" data-testid="org-settings">
+    <h3>Organization settings</h3>
+    <div class="setting-row">
+      <div class="setting-label">Removed-member agents
+        <span class="hint">what happens to a removed member's running agents</span></div>
+      <div class="setting-control">
+        <label><input type="radio" name="removal-disposition" value="orphan-to-admin" data-testid="disp-orphan" /> Keep running, hand to admins (orphan-to-admin)</label>
+        <label><input type="radio" name="removal-disposition" value="auto-revoke" data-testid="disp-revoke" /> Revoke them (auto-revoke)</label>
+        <button class="btn btn-ghost" id="save-disposition-btn" data-testid="save-disposition">Save</button>
+      </div>
+    </div>
+  </div>
 </section>
 
 <!-- Admin: Create / edit template modal -->
@@ -1527,8 +1588,17 @@
   // orchestrator). The nav button is shown only when /api/me isAdmin, but the
   // gate is enforced regardless of the client. Denied calls (e.g. a tampered
   // non-admin client) surface as 403 and are shown as a toast/inline error.
+  // ME holds the /api/me identity flags used to scope the admin surfaces by role
+  // (Phase 6): a REALM admin manages the GLOBAL catalog (/api/admin/templates); an
+  // ORG admin manages only their org's templates (/api/org/templates). Server gates
+  // are authoritative — this only decides which endpoint the UI reads.
+  const ME = { isAdmin: false, isOrgAdmin: false, activeOrg: '' };
+
   async function fetchAdminTemplates() {
-    const r = await fetch('/api/admin/templates');
+    // Realm admin → global + every org's (full catalog). Org admin (non-realm) →
+    // their org's templates only.
+    const url = ME.isAdmin ? '/api/admin/templates' : '/api/org/templates';
+    const r = await fetch(url);
     if (!r.ok) throw new Error(`list templates: ${r.status}`);
     return r.json();
   }
@@ -1861,6 +1931,134 @@
   function closeAgentTypesView() {
     document.getElementById('agent-types-view').hidden = true;
     document.querySelector('main').hidden = false;
+  }
+
+  // ── Org admin: Members management (Phase 6) ────────────────────────────────
+  // Every mutation rides the /api/org/* BFF twins, which the orchestrator gates
+  // with requireOrgAdmin over the SESSION's active org — the org is never a client
+  // value. This UI is convenience; the server is the boundary.
+  function openMembersView() {
+    document.querySelector('main').hidden = true;
+    document.getElementById('members-view').hidden = false;
+    reloadMembers();
+    loadOrgSettings();
+  }
+  function closeMembersView() {
+    document.getElementById('members-view').hidden = true;
+    document.querySelector('main').hidden = false;
+  }
+
+  async function reloadMembers() {
+    const wrap = document.getElementById('members-table-wrap');
+    wrap.innerHTML = 'Loading…';
+    try {
+      const r = await fetch('/api/org/members');
+      if (!r.ok) throw new Error(`members: ${r.status}`);
+      renderMembersTable(await r.json());
+    } catch (e) {
+      wrap.innerHTML = `<div class="no-events">Couldn't load members (${escHtml(String(e.message || e))}).</div>`;
+    }
+  }
+
+  function roleBadge(role) {
+    const r = (role || 'member').toLowerCase();
+    const cls = r === 'admin' ? 'badge-role-admin' : 'badge-role-member';
+    return `<span class="badge ${cls}">${escHtml(r)}</span>`;
+  }
+
+  function renderMembersTable(members) {
+    const wrap = document.getElementById('members-table-wrap');
+    const list = Array.isArray(members) ? members : [];
+    if (!list.length) { wrap.innerHTML = '<div class="no-events">No members.</div>'; return; }
+    const sorted = [...list].sort((a, b) =>
+      (a.username || a.userId || '').localeCompare(b.username || b.userId || '', undefined, { sensitivity: 'base' }));
+    wrap.innerHTML = `
+      <table class="members-table">
+        <thead><tr><th>User</th><th>Email</th><th>Role</th><th style="text-align:right">Actions</th></tr></thead>
+        <tbody>${sorted.map(memberRow).join('')}</tbody>
+      </table>`;
+  }
+
+  function memberRow(m) {
+    const user = escHtml(m.username || m.userId || '');
+    const key = escHtml(m.userId || '');
+    const isAdmin = (m.role || '').toLowerCase() === 'admin';
+    const promote = isAdmin
+      ? `<button class="btn btn-ghost" data-act="demote" data-user="${key}">Demote</button>`
+      : `<button class="btn btn-ghost" data-act="promote" data-user="${key}">Promote</button>`;
+    return `
+      <tr data-user="${key}">
+        <td class="user-cell">${user}</td>
+        <td>${escHtml(m.email || '—')}</td>
+        <td>${roleBadge(m.role)}</td>
+        <td><div class="row-actions">
+          ${promote}
+          <button class="btn btn-danger" data-act="remove" data-user="${key}">Remove</button>
+        </div></td>
+      </tr>`;
+  }
+
+  async function addMember() {
+    const input = document.getElementById('member-add-input');
+    const user = (input.value || '').trim();
+    if (!user) return;
+    const role = document.getElementById('member-add-role').value;
+    try {
+      const r = await fetch('/api/org/members', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user, role }),
+      });
+      if (!r.ok) throw new Error(`add member: ${r.status}`);
+      input.value = '';
+      showToast(`Added ${user}. If new, they must reset their password on first sign-in.`);
+      reloadMembers();
+    } catch (e) { showToast(`Add member failed: ${e.message || e}`, true); }
+  }
+
+  async function handleMembersAction(e) {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const user = btn.getAttribute('data-user');
+    const act = btn.getAttribute('data-act');
+    try {
+      let r;
+      if (act === 'remove') {
+        if (!window.confirm(`Remove ${user} from the organization?`)) return;
+        r = await fetch(`/api/org/members/${encodeURIComponent(user)}`, { method: 'DELETE' });
+      } else {
+        const role = act === 'promote' ? 'admin' : 'member';
+        r = await fetch(`/api/org/members/${encodeURIComponent(user)}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role }),
+        });
+      }
+      if (!r.ok) throw new Error(`${act}: ${r.status}`);
+      reloadMembers();
+    } catch (err) { showToast(`${act} failed: ${err.message || err}`, true); }
+  }
+
+  async function loadOrgSettings() {
+    try {
+      const r = await fetch('/api/org');
+      if (!r.ok) return;
+      const org = await r.json();
+      const disp = org.removalDisposition || 'orphan-to-admin';
+      const el = document.querySelector(`input[name="removal-disposition"][value="${disp}"]`);
+      if (el) el.checked = true;
+    } catch (_) {}
+  }
+
+  async function saveDisposition() {
+    const sel = document.querySelector('input[name="removal-disposition"]:checked');
+    if (!sel) return;
+    try {
+      const r = await fetch('/api/org', {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ removalDisposition: sel.value }),
+      });
+      if (!r.ok) throw new Error(`save: ${r.status}`);
+      showToast('Organization settings saved.');
+    } catch (e) { showToast(`Save failed: ${e.message || e}`, true); }
   }
 
   async function sendMessage(agentId, message) {
@@ -2663,6 +2861,14 @@
   document.getElementById('open-agent-types-btn').addEventListener('click', openAgentTypesView);
   document.getElementById('agent-types-back-btn').addEventListener('click', closeAgentTypesView);
   document.getElementById('new-agent-type-btn').addEventListener('click', () => openTemplateForm(null, { edit: false }));
+
+  // ── Org admin: Members view wiring (Phase 6) ───────────────────────────
+  document.getElementById('open-members-btn').addEventListener('click', openMembersView);
+  document.getElementById('members-back-btn').addEventListener('click', closeMembersView);
+  document.getElementById('member-add-btn').addEventListener('click', addMember);
+  document.getElementById('member-add-input').addEventListener('keydown', e => { if (e.key === 'Enter') addMember(); });
+  document.getElementById('members-table-wrap').addEventListener('click', handleMembersAction);
+  document.getElementById('save-disposition-btn').addEventListener('click', saveDisposition);
   document.getElementById('agent-types-table-wrap').addEventListener('click', handleTableAction);
   document.getElementById('tmpl-form-cancel').addEventListener('click', closeTemplateForm);
   document.getElementById('tmpl-form-save').addEventListener('click', saveTemplateForm);
@@ -2898,7 +3104,15 @@
     } catch (_) { showGate('error'); return; }
 
     if (me.user) document.getElementById('current-user').textContent = me.user;
-    if (me.isAdmin) document.getElementById('open-agent-types-btn').hidden = false;
+    // Scope the admin surfaces by role (Phase 6). A realm admin manages the global
+    // catalog; an org admin manages their org's templates + membership. Server
+    // gates are authoritative — these flags only decide button visibility + which
+    // endpoint fetchAdminTemplates reads.
+    ME.isAdmin = !!me.isAdmin;
+    ME.isOrgAdmin = !!me.isOrgAdmin;
+    ME.activeOrg = me.activeOrg || '';
+    if (me.isAdmin || me.isOrgAdmin) document.getElementById('open-agent-types-btn').hidden = false;
+    if (me.isOrgAdmin) document.getElementById('open-members-btn').hidden = false;
 
     // Couldn't reach the org backend — don't strand the user on a false no-org
     // screen; offer a reload instead.
