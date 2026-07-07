@@ -176,3 +176,22 @@ func TestValidateStsURL_TrustedEndpoint(t *testing.T) {
 		t.Error("default (no override) accepted fake endpoint, want reject")
 	}
 }
+
+// TestAppendFakeSession pins the e2e-only session affordance: a no-op with no
+// session (the real-STS path, URL returned unchanged), and an appended
+// X-Fake-Session param otherwise.
+func TestAppendFakeSession(t *testing.T) {
+	const withQuery = "https://sts.amazonaws.com/?Action=GetCallerIdentity"
+	if got := appendFakeSession(withQuery, ""); got != withQuery {
+		t.Errorf("empty session must be a no-op, got %q", got)
+	}
+	got := appendFakeSession(withQuery, "remote-abc123")
+	if !strings.Contains(got, "X-Fake-Session=remote-abc123") || !strings.HasPrefix(got, withQuery+"&") {
+		t.Errorf("appendFakeSession = %q, want the param appended with &", got)
+	}
+	// A URL with no query string uses '?'.
+	got = appendFakeSession("http://fake-sts:8080/", "s1")
+	if got != "http://fake-sts:8080/?X-Fake-Session=s1" {
+		t.Errorf("no-query append = %q", got)
+	}
+}

@@ -391,6 +391,11 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	mux.Handle("DELETE /api/org/anchor", orgProxy("DELETE", "/anchor"))
 	mux.Handle("POST /api/org/anchor/activate", orgProxy("POST", "/anchor/activate"))
 
+	// Register a consumer-hosted (remote) agent into the session's active org
+	// (multi-tenancy Phase 10). Any member may register (the orchestrator's
+	// requireOrgMember is the real gate); the registering member owns the agent.
+	mux.Handle("POST /api/org/agents", orgProxy("POST", "/agents"))
+
 	// Self-serve org creation (multi-tenancy Phase 7). The no-organization screen
 	// posts {orgId, name} here; the orchestrator makes the token sub the first
 	// admin and enforces the reserved-slug + one-org-per-user guards. Session-gated

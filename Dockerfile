@@ -47,6 +47,16 @@ FROM gcr.io/distroless/static-debian12 AS fake-sts
 COPY --from=build-fake-sts /bin/fake-sts /
 ENTRYPOINT ["/fake-sts"]
 
+# remote-demo — E2E-ONLY minimal consumer-hosted agent (multi-tenancy Phase 10).
+# It only mints from the sidecar on a loop and posts mint_ok/mint_failed events,
+# so the e2e can observe a remote agent's lifecycle parity. Not a real workload.
+FROM builder AS build-remote-demo
+RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/remote-demo ./cmd/remote-demo
+
+FROM gcr.io/distroless/static-debian12 AS remote-demo
+COPY --from=build-remote-demo /bin/remote-demo /
+ENTRYPOINT ["/remote-demo"]
+
 FROM builder AS build-dashboard
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/dashboard ./cmd/dashboard
 

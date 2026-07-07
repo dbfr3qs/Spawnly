@@ -1230,6 +1230,13 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			http.Error(w, "invalid orgId", http.StatusBadRequest)
 			return
 		}
+		// Placement (Phase 10) is trusted from this cp-gated body (the orchestrator's
+		// remote-registration path sets it), but constrain it to the known values so
+		// a typo can never yield a record that neither the sweep nor the UI expects.
+		if rec.Placement != "" && rec.Placement != registry.PlacementK8s && rec.Placement != registry.PlacementRemote {
+			http.Error(w, "invalid placement", http.StatusBadRequest)
+			return
+		}
 		rec.Status = "pending"
 		if storeErr(w, s.RegisterAgent(r.Context(), rec)) {
 			return
@@ -1319,6 +1326,13 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		parentID := req.ParentID
 		userID := req.UserID
 		orgID := existing.OrgID
+		// Placement is set-once at preregistration and immutable (like ParentID/
+		// UserID/OrgID): a self-registering sidecar proves only its SVID-pinned
+		// agentId, never where it runs, so it must NOT be able to declare itself
+		// remote (dodging the operator's stale sweep) or flip a remote record to
+		// k8s. It is never read from the request body — only carried from the
+		// preregistered record.
+		placement := existing.Placement
 		if existing.AgentID != "" {
 			switch existing.Status {
 			case "completed", "failed", "revoked":
@@ -1340,6 +1354,7 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			SupportsChat: tpl.Runtime.SupportsChat,
 			ParentID:     parentID,
 			OrgID:        orgID,
+			Placement:    placement,
 		}
 		if storeErr(w, s.RegisterAgent(ctx, rec)) {
 			return

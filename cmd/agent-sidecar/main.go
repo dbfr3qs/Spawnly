@@ -32,6 +32,13 @@ type config struct {
 	registryURL string
 	isTokenURL  string
 	socketPath  string
+	// placement is AGENT_PLACEMENT: "" / "k8s" for a platform-hosted agent (the
+	// default), or "remote" for a CONSUMER-hosted agent running on the consumer's
+	// own compute (multi-tenancy Phase 10). A remote agent has no operator to
+	// assign its id or SPIRE socket: it MUST carry an AGENT_ID (from the org-scoped
+	// registration API) and it attests via AWS STS (ATTESTOR=aws-sts), never the
+	// SPIFFE workload socket.
+	placement string
 	// source fetches the attestation credential the sidecar presents to
 	// Keycloak (a JWT-SVID under SPIFFE/SPIRE). Pluggable per ATTESTOR.
 	source attestor.Source
@@ -618,6 +625,47 @@ func run(ctx context.Context, cfg config) error {
 	return nil
 }
 
+// validateConfig checks the sidecar's required configuration and applies the
+// SPIFFE socket default. It mutates cfg in place (the socket default) and
+// returns an error rather than fataling so main's invariants are unit-testable.
+//
+// Remote (consumer-hosted) mode (AGENT_PLACEMENT=remote, Phase 10): there is no
+// operator to assign the id or mount a SPIRE socket, so the agent MUST carry an
+// AGENT_ID (from the org-scoped registration API — the id whose record was
+// preregistered remote+org-scoped) and it attests via AWS STS, so the SPIFFE
+// socket default is deliberately NOT applied. The consumer's ambient AWS
+// credentials presign the STS presentation; Spawnly never sees those credentials,
+// only the presigned presentation the sidecar forwards.
+func validateConfig(cfg *config) error {
+	// tenantID is optional: a global agent has no tenant. The empty value flows
+	// harmlessly through selfRegister's "tenantId" field, and the token path does
+	// not use it at all.
+	if cfg.registryURL == "" || cfg.isTokenURL == "" {
+		return fmt.Errorf("REGISTRY_URL and IS_TOKEN_URL are required")
+	}
+	if cfg.agentType == "" {
+		return fmt.Errorf("AGENT_TYPE is required (it is the OAuth client_id used to mint tokens)")
+	}
+	switch cfg.placement {
+	case "", registry.PlacementK8s:
+		// Platform-hosted: default the SPIFFE workload-API socket for the (default)
+		// spiffe attestor; a non-spiffe ATTESTOR simply ignores it.
+		if cfg.socketPath == "" {
+			cfg.socketPath = "unix:///spiffe-workload-api/spire-agent.sock"
+		}
+	case registry.PlacementRemote:
+		// Consumer-hosted: the id is not operator-assigned, so it must be supplied.
+		if cfg.agentID == "" {
+			return fmt.Errorf("AGENT_PLACEMENT=remote requires AGENT_ID (from the org-scoped registration API)")
+		}
+		// Do NOT default the SPIFFE socket: a remote agent has no SPIRE agent to
+		// talk to; it attests via ATTESTOR=aws-sts against the org's anchor.
+	default:
+		return fmt.Errorf("unknown AGENT_PLACEMENT %q (want %q or %q)", cfg.placement, registry.PlacementK8s, registry.PlacementRemote)
+	}
+	return nil
+}
+
 func main() {
 	cfg := config{
 		agentID:         os.Getenv("AGENT_ID"),
@@ -628,21 +676,13 @@ func main() {
 		registryURL:     os.Getenv("REGISTRY_URL"),
 		isTokenURL:      os.Getenv("IS_TOKEN_URL"),
 		socketPath:      os.Getenv("SPIFFE_ENDPOINT_SOCKET"),
+		placement:       os.Getenv("AGENT_PLACEMENT"),
 		consentRequired: os.Getenv("CONSENT_REQUIRED") == "true",
 		consentScopes:   os.Getenv("CONSENT_SCOPES"),
 	}
 
-	// tenantID is optional: a global agent has no tenant. The empty value
-	// flows harmlessly through selfRegister's "tenantId" field, and the token
-	// path does not use it at all.
-	if cfg.registryURL == "" || cfg.isTokenURL == "" {
-		log.Fatal("REGISTRY_URL and IS_TOKEN_URL are required")
-	}
-	if cfg.agentType == "" {
-		log.Fatal("AGENT_TYPE is required (it is the OAuth client_id used to mint tokens)")
-	}
-	if cfg.socketPath == "" {
-		cfg.socketPath = "unix:///spiffe-workload-api/spire-agent.sock"
+	if err := validateConfig(&cfg); err != nil {
+		log.Fatal(err)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

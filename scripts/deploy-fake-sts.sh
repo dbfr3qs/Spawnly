@@ -19,6 +19,10 @@ echo "==> Building + loading fake-sts image (e2e-only)..."
 docker build --target fake-sts -t agent-fake-sts:latest "$REPO_ROOT"
 kind load docker-image agent-fake-sts:latest --name "$CLUSTER"
 
+echo "==> Building + loading remote-demo image (e2e-only, Phase 10)..."
+docker build --target remote-demo -t agent-remote-demo:latest "$REPO_ROOT"
+kind load docker-image agent-remote-demo:latest --name "$CLUSTER"
+
 echo "==> Applying fake-sts manifest..."
 kubectl apply -f "$REPO_ROOT/deploy/manifests/fake-sts.yaml"
 kubectl rollout status deployment/fake-sts --timeout=120s
@@ -40,4 +44,22 @@ else
   echo "    already set; skipping registry roll + reseed."
 fi
 
-echo "Done. fake-sts is up and the registry trusts it (e2e only)."
+# Point KEYCLOAK at the fake STS too (Phase 10): the Java OrgAwareVerifier replays
+# a remote agent's STS credential when it MINTS a token, so it needs the same
+# trusted-endpoint override as the registry. On kind Keycloak uses the in-memory
+# dev-file DB, so this restart WIPES the realm — re-apply it via apply-realm.sh
+# (idempotent: users/clients/orgs are re-created from the cluster's secrets). Gated
+# on the value actually changing, so re-runs are no-ops. A real deploy never sets
+# STS_TRUSTED_ENDPOINT, so this whole block is e2e-only.
+echo "==> Pointing keycloak STS_TRUSTED_ENDPOINT at ${FAKE_STS_ENDPOINT}..."
+kc_current="$(kubectl get deploy/keycloak -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="STS_TRUSTED_ENDPOINT")].value}' 2>/dev/null || true)"
+if [ "$kc_current" != "$FAKE_STS_ENDPOINT" ]; then
+  kubectl set env deployment/keycloak "STS_TRUSTED_ENDPOINT=${FAKE_STS_ENDPOINT}"
+  kubectl rollout status deployment/keycloak --timeout=300s
+  echo "==> Re-applying the realm after the keycloak restart (dev-file DB was wiped)..."
+  "$REPO_ROOT/scripts/apply-realm.sh"
+else
+  echo "    already set; skipping keycloak roll + realm re-apply."
+fi
+
+echo "Done. fake-sts is up; the registry AND keycloak trust it (e2e only)."

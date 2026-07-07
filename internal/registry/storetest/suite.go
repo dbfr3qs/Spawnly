@@ -42,6 +42,7 @@ func Run(t *testing.T, newStore func(t *testing.T) registry.Store) {
 	t.Run("Agents", func(t *testing.T) { testAgents(t, ctx, s) })
 	t.Run("Orgs", func(t *testing.T) { testOrgs(t, ctx, s) })
 	t.Run("OrgIDRoundTrip", func(t *testing.T) { testOrgIDRoundTrip(t, ctx, s) })
+	t.Run("PlacementRoundTrip", func(t *testing.T) { testPlacementRoundTrip(t, ctx, s) })
 	t.Run("Events", func(t *testing.T) { testEvents(t, ctx, s) })
 	t.Run("Consents", func(t *testing.T) { testConsents(t, ctx, s) })
 	t.Run("ConsentExpiry", func(t *testing.T) { testConsentExpiry(t, ctx, s) })
@@ -423,6 +424,25 @@ func testOrgIDRoundTrip(t *testing.T, ctx context.Context, s registry.Store) {
 	}
 	if got, _, _ := s.GetTemplate(ctx, globalTpl.AgentType); got.OrgID != "" {
 		t.Errorf("global template OrgID = %q, want empty", got.OrgID)
+	}
+}
+
+// testPlacementRoundTrip proves the Phase-10 Placement field persists on agent
+// records (remote survives a store round-trip) and stays absent when unset, so
+// today's platform-hosted (k8s) records are unaffected.
+func testPlacementRoundTrip(t *testing.T, ctx context.Context, s registry.Store) {
+	remote := registry.AgentRecord{AgentID: "st-remote-agent", AgentType: "worker", UserID: "st-org-u", Status: "active", OrgID: "st-org-acme", Placement: registry.PlacementRemote}
+	k8s := registry.AgentRecord{AgentID: "st-k8s-agent", AgentType: "worker", UserID: "st-org-u", Status: "active"}
+	for _, r := range []registry.AgentRecord{remote, k8s} {
+		if err := s.RegisterAgent(ctx, r); err != nil {
+			t.Fatalf("RegisterAgent(%s): %v", r.AgentID, err)
+		}
+	}
+	if got, _ := s.GetAgent(ctx, remote.AgentID); got.Placement != registry.PlacementRemote {
+		t.Errorf("remote agent Placement round-trip = %q, want remote", got.Placement)
+	}
+	if got, _ := s.GetAgent(ctx, k8s.AgentID); got.Placement != "" {
+		t.Errorf("k8s agent Placement = %q, want empty", got.Placement)
 	}
 }
 

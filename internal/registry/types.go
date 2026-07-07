@@ -26,6 +26,21 @@ const (
 	RemovalOrphanToAdmin = "orphan-to-admin"
 )
 
+// Placement values for an AgentRecord (Phase 10). Empty (the zero value) and
+// PlacementK8s both mean a platform-hosted agent backed by an AgentWorkload CR
+// in Spawnly's own cluster — today's only kind. PlacementRemote marks a
+// CONSUMER-hosted agent that runs on the consumer's own compute via the
+// SDK/sidecar and authenticates with the org's anchored STS identity; such an
+// agent has NO AgentWorkload by design, so it MUST be excluded from the
+// operator's stale sweep (which fails every workload-less record). Placement is
+// set SERVER-SIDE (from the preregistered record), never from a sidecar's
+// self-register body — a client cannot promote a k8s agent to remote to dodge
+// the sweep.
+const (
+	PlacementK8s    = "k8s"
+	PlacementRemote = "remote"
+)
+
 // Organization is the SaaS business account — the NEW multi-tenancy primitive,
 // deliberately distinct from the existing per-consumer tenant primitive
 // (tenantId/requiresTenant). The OrgID is the single identifier threaded across
@@ -183,4 +198,12 @@ type AgentRecord struct {
 	// child agents from their parent's record. Absent = an org-less (global)
 	// agent, today's behaviour. Distinct from TenantID (the consumer primitive).
 	OrgID string `json:"orgId,omitempty"`
+	// Placement records WHERE the agent runs (Phase 10): "" / PlacementK8s is a
+	// platform-hosted agent backed by an AgentWorkload CR (the default, so it is
+	// omitempty); PlacementRemote is a consumer-hosted agent with no CR. Set
+	// server-side at preregistration and IMMUTABLE thereafter (a self-registering
+	// sidecar never sets it from its body) so it cannot be used to make a k8s
+	// agent immortal against the operator's stale sweep. Distinct from OrgID and
+	// TenantID.
+	Placement string `json:"placement,omitempty"`
 }

@@ -26,6 +26,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -33,6 +34,24 @@ import (
 type principal struct {
 	Account string `json:"account"`
 	Arn     string `json:"arn"`
+}
+
+// sessionParam is the E2E-ONLY query param the presign source appends (see
+// internal/attestor.fakeSessionParam) to carry the caller-chosen role-session-name
+// (the agentId). validSessionName bounds it to AWS's assumed-role session-name
+// charset so a crafted value can never smuggle path separators into the ARN.
+const sessionParam = "X-Fake-Session"
+
+var validSessionName = regexp.MustCompile(`^[A-Za-z0-9_.,=@-]{1,64}$`)
+
+// withSessionName replaces the session-name segment (the part after the last '/')
+// of an assumed-role ARN with sess. If arn has no '/', it is returned unchanged.
+func withSessionName(arn, sess string) string {
+	i := strings.LastIndex(arn, "/")
+	if i < 0 {
+		return arn
+	}
+	return arn[:i+1] + sess
 }
 
 func main() {
@@ -67,6 +86,15 @@ func main() {
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`<ErrorResponse><Error><Code>InvalidClientTokenId</Code></Error></ErrorResponse>`))
 			return
+		}
+		// X-Fake-Session (e2e only) overrides the session-name segment of the
+		// returned ARN, faithfully modelling AWS: the CALLER chooses the
+		// role-session-name (the agentId), while the account + role path stay
+		// anchor-fixed (the configured principal). The Phase-9 verifier derives the
+		// agentId from this session name, so a remote agent's dynamically-generated
+		// `remote-<shortID>` id can be reflected without reconfiguring the fake.
+		if sess := q.Get(sessionParam); sess != "" && validSessionName.MatchString(sess) {
+			p.Arn = withSessionName(p.Arn, sess)
 		}
 		writeIdentity(w, p)
 	})

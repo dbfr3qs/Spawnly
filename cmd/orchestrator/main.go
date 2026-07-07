@@ -408,6 +408,34 @@ func requireOrgMember(v tokenvalidator.TokenValidator, audience, scope string, s
 	})
 }
 
+// fetchOrg reads a single org record from the registry over the control-plane
+// bearer (the cp-gated GET /v1/orgs/{id}). Used by the remote-agent registration
+// path to check the org's anchor status server-side. A non-200 (including 404)
+// surfaces as an error, so an unknown org fails the registration rather than
+// silently registering an agent that could never authenticate.
+func fetchOrg(ctx context.Context, registryURL string, cpBearer func() string, orgID string) (registry.Organization, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", registryURL+"/v1/orgs/"+url.PathEscape(orgID), nil)
+	if err != nil {
+		return registry.Organization{}, err
+	}
+	if t := cpBearer(); t != "" {
+		req.Header.Set("Authorization", "Bearer "+t)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return registry.Organization{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return registry.Organization{}, fmt.Errorf("registry GET /v1/orgs/%s returned %d", orgID, resp.StatusCode)
+	}
+	var org registry.Organization
+	if err := json.NewDecoder(resp.Body).Decode(&org); err != nil {
+		return registry.Organization{}, err
+	}
+	return org, nil
+}
+
 // rolesFrom returns the role claims stashed in the request context by
 // requireToken (the dashboard token's `role` claim). Empty for a non-admin —
 // hasRole then denies by construction, so a token with no role claim can never
@@ -1302,6 +1330,110 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	mux.HandleFunc("POST /v1/orgs/{id}/anchor/activate", requireOrgAdmin(validator, audience, writeScope, sdb, forwardToRegistry("POST", func(r *http.Request) string {
 		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/anchor/activate"
 	})))
+
+	// POST /v1/orgs/{id}/agents — register a CONSUMER-HOSTED (remote) agent
+	// (multi-tenancy Phase 10). Gated by requireOrgMember: any member of org {id}
+	// (or a realm admin) may register a remote agent they will then own — the SAME
+	// auth model as a dashboard spawn (the registering member owns the agent, so
+	// ownership/consent semantics match platform-hosted agents). A member of a
+	// DIFFERENT org (or a non-member) gets the same 404 as any cross-org route.
+	//
+	// Unlike /spawn this creates NO AgentWorkload: it only PREREGISTERS a `pending`
+	// record with Placement=remote, OrgID={id} (the path, server-authoritative —
+	// never the body), UserID=<token sub>, and a generated `remote-<shortID>`
+	// agentId, returning {agentId}. The consumer then runs the sidecar+agent on
+	// their own compute; the sidecar self-registers through the Phase-9 Go
+	// OrgAwareVerifier (its STS credential → this record → the org anchor), flipping
+	// the record `active`. Spawnly NEVER sees the consumer's AWS credentials — only
+	// the presigned STS presentation the sidecar replays.
+	//
+	// The template is validated EXACTLY like /spawn (org/global visibility, the
+	// disabled gate, requiresTenant), and — because a remote agent can ONLY ever
+	// authenticate through an ACTIVE org anchor (the verifier refuses otherwise) —
+	// registration into an org with no active anchor is rejected up-front with a
+	// 409, rather than minting an agentId that could never mint a token.
+	mux.HandleFunc("POST /v1/orgs/{id}/agents", requireOrgMember(validator, audience, writeScope, sdb, func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		orgID := r.PathValue("id")
+		userID := userIDFrom(ctx)
+		if userID == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var body struct {
+			AgentType string `json:"agentType"`
+			Task      string `json:"task,omitempty"`
+			TenantID  string `json:"tenantId,omitempty"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if body.AgentType == "" {
+			http.Error(w, "agentType is required", http.StatusBadRequest)
+			return
+		}
+
+		// Template gates — identical to the /spawn human path. A template scoped to
+		// a DIFFERENT org (or missing) reads as the SAME "unknown agent type" 400, so
+		// a member of org {id} cannot probe another org's private templates.
+		tpl, err := regClient.GetTemplate(ctx, body.AgentType)
+		if err != nil {
+			log.Printf("register-remote: get template %s: %v", body.AgentType, err)
+			http.Error(w, "unknown agent type", http.StatusBadRequest)
+			return
+		}
+		if tpl.OrgID != "" && tpl.OrgID != orgID {
+			log.Printf("register-remote: template %s org-scoped to %q, not visible to org %q", body.AgentType, tpl.OrgID, orgID)
+			http.Error(w, "unknown agent type", http.StatusBadRequest)
+			return
+		}
+		if tpl.Status == registry.TemplateStatusDisabled {
+			http.Error(w, "agent type is disabled", http.StatusConflict)
+			return
+		}
+		if tpl.RequiresTenant && body.TenantID == "" {
+			http.Error(w, "tenantId is required for this agent type", http.StatusBadRequest)
+			return
+		}
+
+		// The org MUST have an ACTIVE STS anchor: a remote agent authenticates only
+		// via the org's anchor (the Phase-9 OrgAwareVerifier refuses an unanchored /
+		// pending org), so without one the generated agentId could never mint. Fetch
+		// the org record over the control-plane bearer and require an active anchor.
+		org, err := fetchOrg(ctx, registryURL, controlPlaneBearer, orgID)
+		if err != nil {
+			log.Printf("register-remote: fetch org %s: %v", orgID, err)
+			http.Error(w, "registry unavailable", http.StatusBadGateway)
+			return
+		}
+		if org.Anchor == nil || org.Anchor.Status != registry.AnchorActive {
+			http.Error(w, "org has no active anchor", http.StatusConflict)
+			return
+		}
+
+		agentID := "remote-" + shortID()
+		if err := regClient.PreRegisterAgent(ctx, registry.AgentRecord{
+			AgentID:   agentID,
+			AgentType: body.AgentType,
+			TenantID:  body.TenantID,
+			UserID:    userID,
+			Lifecycle: tpl.Runtime.Lifecycle,
+			// Org + placement recorded server-side (the path {id} and the remote
+			// marker) so the self-registering sidecar's OrgID/Placement come from this
+			// trusted record — never its body.
+			OrgID:     orgID,
+			Placement: registry.PlacementRemote,
+		}); err != nil {
+			log.Printf("register-remote: preregister %s: %v", agentID, err)
+			http.Error(w, "failed to register agent", http.StatusInternalServerError)
+			return
+		}
+		log.Printf("registered remote agent %s (org=%s type=%s owner=%s)", agentID, orgID, body.AgentType, userID)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"agentId": agentID})
+	}))
 
 	// GET /v1/my/orgs — the CALLER's OWN org memberships (session-gated, NOT
 	// admin-gated). Powers the dashboard org picker / no-organization screen. The
