@@ -54,17 +54,43 @@ public class StsCredentialVerifier implements AgentCredentialVerifier {
 
     private static final String ASSUMED_ROLE_MARKER = ":assumed-role/";
 
+    /** Env var naming the sole trusted STS endpoint override (e2e fake STS). */
+    public static final String STS_TRUSTED_ENDPOINT_ENV = "STS_TRUSTED_ENDPOINT";
+
     private final HttpClient http;
 
+    /**
+     * When set, the SOLE STS endpoint this verifier will replay against (scheme
+     * + host[:port] must match exactly). SSRF stance: it NEVER widens trust —
+     * unset (the production default, {@code null}/empty) keeps the hardcoded AWS
+     * {@link #STS_HOST} pattern over HTTPS; when set, ONLY that one endpoint is
+     * trusted (the AWS pattern no longer applies). It exists solely so an
+     * in-cluster FAKE STS can stand in for e2e (mirrors the Go
+     * {@code STS_TRUSTED_ENDPOINT} override); a real deploy leaves it unset, so no
+     * operator can be tricked into pointing the token endpoint at an attacker's
+     * host. Wired from {@link AttestorFactory#build} config.
+     */
+    private final String trustedEndpoint;
+
     public StsCredentialVerifier() {
+        this((String) null);
+    }
+
+    /** Production constructor: an optional STS_TRUSTED_ENDPOINT override. */
+    public StsCredentialVerifier(String trustedEndpoint) {
         this(HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
-                .build());
+                .build(), trustedEndpoint);
     }
 
     /** For tests: inject a client (e.g. pointed at WireMock over plain http). */
     StsCredentialVerifier(HttpClient http) {
+        this(http, null);
+    }
+
+    StsCredentialVerifier(HttpClient http, String trustedEndpoint) {
         this.http = http;
+        this.trustedEndpoint = (trustedEndpoint == null || trustedEndpoint.isEmpty()) ? null : trustedEndpoint;
     }
 
     @Override
@@ -79,7 +105,7 @@ public class StsCredentialVerifier implements AgentCredentialVerifier {
         // The verifier replays a caller-supplied URL, so it MUST confirm the URL
         // targets an STS endpoint over HTTPS and invokes GetCallerIdentity — else
         // a caller could point the control plane at an arbitrary URL (SSRF).
-        if (!validateStsUrl(pr.url)) {
+        if (!validateStsUrl(pr.url, trustedEndpoint)) {
             return null;
         }
 
@@ -176,21 +202,61 @@ public class StsCredentialVerifier implements AgentCredentialVerifier {
         return (v == null || v.isNull()) ? null : v.asText();
     }
 
+    /** Default (no override) — the hardcoded AWS STS host pattern over HTTPS. */
     static boolean validateStsUrl(String raw) {
+        return validateStsUrl(raw, null);
+    }
+
+    /**
+     * Validates the presigned replay target. When {@code trustedEndpoint} is
+     * non-empty it is the SOLE trusted endpoint (scheme + host + port must match
+     * exactly, and the AWS host pattern no longer applies — trust only ever
+     * NARROWS); otherwise the URL must be HTTPS to an AWS STS host. Either way it
+     * must invoke GetCallerIdentity. Mirrors Go {@code validateStsURLWith}.
+     */
+    static boolean validateStsUrl(String raw, String trustedEndpoint) {
         URI u;
         try {
             u = URI.create(raw);
         } catch (IllegalArgumentException e) {
             return false;
         }
+        if (!raw.contains("Action=GetCallerIdentity")) {
+            return false;
+        }
+        if (trustedEndpoint != null && !trustedEndpoint.isEmpty()) {
+            return matchesTrustedEndpoint(u, trustedEndpoint);
+        }
         if (u.getScheme() == null || !u.getScheme().equals("https")) {
             return false;
         }
         String host = u.getHost();
-        if (host == null || !STS_HOST.matcher(host).matches()) {
+        return host != null && STS_HOST.matcher(host).matches();
+    }
+
+    /**
+     * Requires u to share the trusted endpoint's scheme, host, and port. The
+     * trusted endpoint may be plain http (the in-cluster fake STS); that
+     * relaxation is scoped to exactly what the operator explicitly configured and
+     * is never inferred.
+     */
+    private static boolean matchesTrustedEndpoint(URI u, String trustedEndpoint) {
+        URI t;
+        try {
+            t = URI.create(trustedEndpoint);
+        } catch (IllegalArgumentException e) {
             return false;
         }
-        return raw.contains("Action=GetCallerIdentity");
+        if (t.getScheme() == null || t.getHost() == null) {
+            return false;
+        }
+        return t.getScheme().equalsIgnoreCase(nullToEmpty(u.getScheme()))
+                && t.getHost().equalsIgnoreCase(nullToEmpty(u.getHost()))
+                && t.getPort() == u.getPort();
+    }
+
+    private static String nullToEmpty(String s) {
+        return s == null ? "" : s;
     }
 
     /**

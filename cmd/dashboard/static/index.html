@@ -1272,6 +1272,34 @@
         <button class="btn btn-ghost" id="save-disposition-btn" data-testid="save-disposition">Save</button>
       </div>
     </div>
+
+    <!-- Attestation anchor (multi-tenancy Phase 8). Admins register/clear the
+         org's STS trust anchor and prove control from their AWS account; members
+         see it read-only (the editor is hidden for non-admins, and the server
+         gates every mutation regardless). -->
+    <div class="setting-row" data-testid="anchor-setting">
+      <div class="setting-label">Attestation anchor
+        <span class="hint">STS trust for consumer-hosted agents (optional)</span></div>
+      <div class="setting-control">
+        <div id="anchor-status" data-testid="anchor-status">Loading…</div>
+        <div id="anchor-editor" hidden>
+          <input id="anchor-account" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="AWS account id (12 digits)" data-testid="anchor-account" />
+          <input id="anchor-role" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="arn:aws:sts::&lt;account&gt;:assumed-role/&lt;role&gt;/*" data-testid="anchor-role" />
+          <div class="row-actions">
+            <button class="btn btn-primary" id="anchor-register-btn" data-testid="anchor-register">Register</button>
+            <button class="btn btn-ghost" id="anchor-clear-btn" data-testid="anchor-clear">Clear</button>
+          </div>
+          <div class="caveat-note">
+            Registering stores the anchor as <strong>pending</strong>. Prove control
+            of the AWS account from a shell holding its credentials:
+            <code>ORCHESTRATOR_URL=… ACCESS_TOKEN=… ./scripts/activate-anchor.sh &lt;org&gt;</code>
+            — the anchor activates only if the presented STS identity matches.
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -2017,18 +2045,19 @@
     const user = escHtml(m.username || m.userId || '');
     const key = escHtml(m.userId || '');
     const isAdmin = (m.role || '').toLowerCase() === 'admin';
-    const promote = isAdmin
-      ? `<button class="btn btn-ghost" data-act="demote" data-user="${key}">Demote</button>`
-      : `<button class="btn btn-ghost" data-act="promote" data-user="${key}">Promote</button>`;
+    // Non-admin members get a read-only roster: no promote/demote/remove.
+    const actions = !ME.isOrgAdmin ? '—' : `<div class="row-actions">
+          ${isAdmin
+            ? `<button class="btn btn-ghost" data-act="demote" data-user="${key}">Demote</button>`
+            : `<button class="btn btn-ghost" data-act="promote" data-user="${key}">Promote</button>`}
+          <button class="btn btn-danger" data-act="remove" data-user="${key}">Remove</button>
+        </div>`;
     return `
       <tr data-user="${key}">
         <td class="user-cell">${user}</td>
         <td>${escHtml(m.email || '—')}</td>
         <td>${roleBadge(m.role)}</td>
-        <td><div class="row-actions">
-          ${promote}
-          <button class="btn btn-danger" data-act="remove" data-user="${key}">Remove</button>
-        </div></td>
+        <td>${actions}</td>
       </tr>`;
   }
 
@@ -2072,6 +2101,16 @@
   }
 
   async function loadOrgSettings() {
+    // A plain member gets a read-only Organization view: hide every mutating
+    // control (the server also 404s their writes — this is cosmetic).
+    const admin = !!ME.isOrgAdmin;
+    const addBar = document.querySelector('.add-member-bar');
+    if (addBar) addBar.style.display = admin ? '' : 'none';
+    document.querySelectorAll('input[name="removal-disposition"]').forEach((el) => { el.disabled = !admin; });
+    const saveBtn = document.getElementById('save-disposition-btn');
+    if (saveBtn) saveBtn.style.display = admin ? '' : 'none';
+    const editor = document.getElementById('anchor-editor');
+    if (editor) editor.hidden = !admin;
     try {
       const r = await fetch('/api/org');
       if (!r.ok) return;
@@ -2079,7 +2118,53 @@
       const disp = org.removalDisposition || 'orphan-to-admin';
       const el = document.querySelector(`input[name="removal-disposition"][value="${disp}"]`);
       if (el) el.checked = true;
+      renderAnchor(org.anchor, admin);
     } catch (_) {}
+  }
+
+  // renderAnchor paints the anchor status (none / pending / active) and, for an
+  // admin, prefills the editor with the current account + role pattern.
+  function renderAnchor(anchor, admin) {
+    const status = document.getElementById('anchor-status');
+    if (!status) return;
+    if (!anchor) {
+      status.innerHTML = '<span class="badge">No anchor</span> agents attest via the platform default (SPIRE).';
+    } else {
+      const st = (anchor.status || 'pending').toLowerCase();
+      const cls = st === 'active' ? 'badge-role-admin' : 'badge-role-member';
+      status.innerHTML =
+        `<span class="badge ${cls}" data-testid="anchor-state">${escHtml(st)}</span> ` +
+        `account <code>${escHtml(anchor.awsAccountId || '')}</code> ` +
+        `role <code>${escHtml(anchor.roleArnPattern || '')}</code>`;
+    }
+    if (admin) {
+      document.getElementById('anchor-account').value = anchor ? (anchor.awsAccountId || '') : '';
+      document.getElementById('anchor-role').value = anchor ? (anchor.roleArnPattern || '') : '';
+    }
+  }
+
+  async function registerAnchor() {
+    const awsAccountId = (document.getElementById('anchor-account').value || '').trim();
+    const roleArnPattern = (document.getElementById('anchor-role').value || '').trim();
+    try {
+      const r = await fetch('/api/org/anchor', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'sts', awsAccountId, roleArnPattern }),
+      });
+      if (!r.ok) throw new Error(`register anchor: ${r.status}`);
+      showToast('Anchor registered (pending). Prove control to activate.');
+      loadOrgSettings();
+    } catch (e) { showToast(`Register anchor failed: ${e.message || e}`, true); }
+  }
+
+  async function clearAnchor() {
+    if (!window.confirm('Clear the org’s attestation anchor?')) return;
+    try {
+      const r = await fetch('/api/org/anchor', { method: 'DELETE' });
+      if (!r.ok) throw new Error(`clear anchor: ${r.status}`);
+      showToast('Anchor cleared.');
+      loadOrgSettings();
+    } catch (e) { showToast(`Clear anchor failed: ${e.message || e}`, true); }
   }
 
   async function saveDisposition() {
@@ -2903,6 +2988,8 @@
   document.getElementById('member-add-input').addEventListener('keydown', e => { if (e.key === 'Enter') addMember(); });
   document.getElementById('members-table-wrap').addEventListener('click', handleMembersAction);
   document.getElementById('save-disposition-btn').addEventListener('click', saveDisposition);
+  document.getElementById('anchor-register-btn').addEventListener('click', registerAnchor);
+  document.getElementById('anchor-clear-btn').addEventListener('click', clearAnchor);
   document.getElementById('agent-types-table-wrap').addEventListener('click', handleTableAction);
   document.getElementById('tmpl-form-cancel').addEventListener('click', closeTemplateForm);
   document.getElementById('tmpl-form-save').addEventListener('click', saveTemplateForm);
@@ -3185,7 +3272,10 @@
     ME.isOrgAdmin = !!me.isOrgAdmin;
     ME.activeOrg = me.activeOrg || '';
     if (me.isAdmin || me.isOrgAdmin) document.getElementById('open-agent-types-btn').hidden = false;
-    if (me.isOrgAdmin) document.getElementById('open-members-btn').hidden = false;
+    // Any member of an active org can open the Organization view (members list +
+    // settings + anchor) — read-only for non-admins (loadOrgSettings hides the
+    // mutating controls; the server gates every write regardless).
+    if (me.isOrgAdmin || ME.activeOrg) document.getElementById('open-members-btn').hidden = false;
 
     // Couldn't reach the org backend — don't strand the user on a false no-org
     // screen; offer a reload instead.

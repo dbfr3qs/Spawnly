@@ -42,7 +42,12 @@ public final class AttestorFactory {
             // AWS attestors plug in behind the same seam — no authenticator
             // change. Mirrors identityserver/Program.cs's ATTESTOR switch.
             case "aws-sts":
-                return new StsCredentialVerifier();
+                // STS_TRUSTED_ENDPOINT (empty by default) NARROWS the trusted STS
+                // endpoint so an in-cluster fake STS can stand in for e2e; unset in
+                // production, so the AWS host pattern applies (see the field's SSRF
+                // note). Same override the Go replay verifier honours.
+                return new StsCredentialVerifier(
+                        resolve(config, "stsTrustedEndpoint", StsCredentialVerifier.STS_TRUSTED_ENDPOINT_ENV, ""));
             case "aws-stsweb":
                 return new StsWebCredentialVerifier(stsWebOptions(config));
             default:

@@ -36,6 +36,17 @@ FROM gcr.io/distroless/static-debian12 AS sample-api
 COPY --from=build-sample-api /bin/sample-api /
 ENTRYPOINT ["/sample-api"]
 
+# fake-sts is an E2E-ONLY trust-injection stub (see cmd/fake-sts/main.go). It has
+# its own image stage, deliberately NOT in the Makefile SERVICES list nor the
+# kustomize base, so a normal build/deploy can never pull it in — only the e2e
+# path (scripts/deploy-fake-sts.sh) builds, loads, and applies it.
+FROM builder AS build-fake-sts
+RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/fake-sts ./cmd/fake-sts
+
+FROM gcr.io/distroless/static-debian12 AS fake-sts
+COPY --from=build-fake-sts /bin/fake-sts /
+ENTRYPOINT ["/fake-sts"]
+
 FROM builder AS build-dashboard
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/dashboard ./cmd/dashboard
 

@@ -68,6 +68,11 @@ func requireOrg(w http.ResponseWriter, ctx context.Context, s registry.Store, id
 // (the orchestrator gates them with requireAdmin); org-admin self-service arrives
 // in Phase 6.
 func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client, dir orgdirectory.Directory, cp func(http.HandlerFunc) http.HandlerFunc) {
+	// Per-org attestation-anchor lifecycle (Phase 8): PUT/DELETE .../anchor and
+	// POST .../anchor/activate. Same org-endpoints family, same cp gate; the
+	// anchor is also visible read-only in GET /v1/orgs/{id} below.
+	registerAnchorRoutes(mux, s, cp, nil)
+
 	// POST /v1/orgs — create an org as ONE logical transaction, ordered
 	// Keycloak-org -> store PutOrg -> (SpiceDB admin tuple + Keycloak first-admin
 	// membership). On any later step failing, the earlier writes are unwound

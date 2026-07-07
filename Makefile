@@ -18,7 +18,7 @@ EXTRA_AGENTS  := keycloak weather-monitor
 MCP_SERVERS   := travel-tools
 SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS) $(EXTRA_AGENTS) $(MCP_SERVERS)
 
-.PHONY: build test test-provider test-dynamodb docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed reseed-orgs print-% e2e-setup e2e mobile-dev
+.PHONY: build test test-provider test-dynamodb docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed reseed-orgs print-% e2e-setup e2e-anchor-setup e2e mobile-dev
 
 # print-<VAR> — echo a make variable so shell scripts can read the authoritative
 # lists instead of re-declaring them. e.g. `make -s print-SERVICES`.
@@ -199,8 +199,16 @@ demo:
 e2e-setup:
 	cd e2e && npm install && npx playwright install --with-deps chromium
 
+# e2e-anchor-setup — deploy the E2E-ONLY fake STS stub and point the registry's
+# STS trust at it, so the anchor suite (anchor.spec.ts) can activate anchors
+# in-cluster. Idempotent; NOT part of the kustomize base or bootstrap (see
+# scripts/deploy-fake-sts.sh for the "e2e only" stance).
+e2e-anchor-setup:
+	./scripts/deploy-fake-sts.sh
+
 # e2e — run the browser-based dashboard tests. Assumes a bootstrapped cluster
 # (make bootstrap) and ANTHROPIC_API_KEY in .env. Playwright owns the dashboard
-# port-forward (see e2e/playwright.config.ts → scripts/e2e.sh).
-e2e:
+# port-forward (see e2e/playwright.config.ts → scripts/e2e.sh). Deploys fake-sts
+# first so the anchor suite has an STS to prove control against.
+e2e: e2e-anchor-setup
 	cd e2e && npm test

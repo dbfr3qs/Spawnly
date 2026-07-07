@@ -5,7 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
@@ -39,6 +41,14 @@ type AwsSource struct {
 	presign func(ctx context.Context) (presignedRequest, error)
 }
 
+// AwsEndpointURLStsEnv overrides the STS endpoint the presigner targets. It is
+// the standard AWS SDK service-endpoint variable name; honouring it explicitly
+// lets the CLIENT side (the sidecar's presign source, cmd/anchorctl) point a
+// presigned GetCallerIdentity at an in-cluster FAKE STS for e2e, matching the
+// verifier's STS_TRUSTED_ENDPOINT override. Unset in a real deploy, so the
+// presigner uses the ambient/regional AWS STS endpoint as before.
+const AwsEndpointURLStsEnv = "AWS_ENDPOINT_URL_STS"
+
 // NewAwsSource builds an AwsSource from the ambient AWS configuration. It does
 // not require credentials at construction time — they are resolved lazily on
 // the first Fetch (IRSA-friendly).
@@ -47,7 +57,14 @@ func NewAwsSource(ctx context.Context) (*AwsSource, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load AWS config: %w", err)
 	}
-	presigner := sts.NewPresignClient(sts.NewFromConfig(cfg))
+	var stsOpts []func(*sts.Options)
+	if ep := os.Getenv(AwsEndpointURLStsEnv); ep != "" {
+		// BaseEndpoint routes the presigned request at the configured endpoint
+		// (e.g. the fake STS). The signature still uses real SigV4; the fake
+		// deliberately ignores it (see cmd/fake-sts).
+		stsOpts = append(stsOpts, func(o *sts.Options) { o.BaseEndpoint = aws.String(ep) })
+	}
+	presigner := sts.NewPresignClient(sts.NewFromConfig(cfg, stsOpts...))
 	return &AwsSource{
 		presign: func(ctx context.Context) (presignedRequest, error) {
 			req, err := presigner.PresignGetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})

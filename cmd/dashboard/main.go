@@ -382,6 +382,15 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	// token, so no path param is needed here.
 	mux.Handle("GET /api/org/templates", auth.require(proxy("GET", orchestratorURL+"/v1/org/templates")))
 
+	// Per-org attestation anchor (multi-tenancy Phase 8). Register/clear/activate
+	// are the org admin's surface; members read the anchor via GET /api/org (it
+	// rides the org record). The orchestrator's requireOrgAdmin is the real gate —
+	// a non-admin session's write here 404s there. All ride the session's active
+	// org (never a client-supplied id).
+	mux.Handle("PUT /api/org/anchor", orgProxy("PUT", "/anchor"))
+	mux.Handle("DELETE /api/org/anchor", orgProxy("DELETE", "/anchor"))
+	mux.Handle("POST /api/org/anchor/activate", orgProxy("POST", "/anchor/activate"))
+
 	// Self-serve org creation (multi-tenancy Phase 7). The no-organization screen
 	// posts {orgId, name} here; the orchestrator makes the token sub the first
 	// admin and enforces the reserved-slug + one-org-per-user guards. Session-gated

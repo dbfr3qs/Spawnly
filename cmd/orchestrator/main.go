@@ -1284,6 +1284,25 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members/" + url.PathEscape(r.PathValue("user"))
 	})))
 
+	// Per-org attestation anchor (multi-tenancy Phase 8). Registering, clearing,
+	// and ACTIVATING (proof of control) an anchor are all org-admin operations —
+	// gated by requireOrgAdmin, so a plain member cannot touch the anchor and a
+	// cross-org caller gets an indistinguishable 404. Members still SEE the anchor
+	// read-only: it rides the org record returned by GET /v1/orgs/{id} above
+	// (requireOrgMember). The activate body carries a presigned STS
+	// GetCallerIdentity, which forwardToRegistry streams through to the registry's
+	// oracle-free proof-of-control handler; the actual account/role match happens
+	// there (the single choke point), never in the orchestrator.
+	mux.HandleFunc("PUT /v1/orgs/{id}/anchor", requireOrgAdmin(validator, audience, writeScope, sdb, forwardToRegistry("PUT", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/anchor"
+	})))
+	mux.HandleFunc("DELETE /v1/orgs/{id}/anchor", requireOrgAdmin(validator, audience, writeScope, sdb, forwardToRegistry("DELETE", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/anchor"
+	})))
+	mux.HandleFunc("POST /v1/orgs/{id}/anchor/activate", requireOrgAdmin(validator, audience, writeScope, sdb, forwardToRegistry("POST", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/anchor/activate"
+	})))
+
 	// GET /v1/my/orgs — the CALLER's OWN org memberships (session-gated, NOT
 	// admin-gated). Powers the dashboard org picker / no-organization screen. The
 	// membership subject is the token sub (userIDFrom), NEVER a client param — a
