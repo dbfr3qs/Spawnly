@@ -23,8 +23,16 @@ var validOrgID = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // orgTuple builds the SpiceDB relationship coordinates for an org membership:
 // resource organization:<id>, relation member|admin, subject user:<userId>.
+//
+// Both object ids are normalized with spicedb.EncodeObjectID so they match the
+// agent owner/org tuples (cmd/registry/main.go) and the Phase-4 CheckPermission
+// subject/resource (agentAllowed, orchestrator canView/canManage) — the same
+// encoding on every side. orgID is DNS-label constrained (already safe, so the
+// encoding is the identity); userID may carry '. : @' (ValidUserID admits them)
+// which SpiceDB's object-id charset rejects raw, so encoding is load-bearing
+// there. This is the single chokepoint for every membership tuple.
 func orgTuple(orgID, role, userID string) (resource, relation, subject string) {
-	return "organization:" + orgID, role, "user:" + userID
+	return "organization:" + spicedb.EncodeObjectID(orgID), role, "user:" + spicedb.EncodeObjectID(userID)
 }
 
 // requireOrg reports whether org id exists, writing the correct error and

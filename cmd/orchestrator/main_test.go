@@ -901,12 +901,20 @@ func TestListAgentsProxiesToRegistry(t *testing.T) {
 		t.Fatalf("got %d, want 200", rec.Code)
 	}
 
-	var agents []map[string]string
+	var agents []struct {
+		AgentID   string `json:"agentId"`
+		UserID    string `json:"userId"`
+		CanManage bool   `json:"canManage"`
+	}
 	if err := json.NewDecoder(rec.Body).Decode(&agents); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if len(agents) != 1 || agents[0]["agentId"] != "a1" {
+	if len(agents) != 1 || agents[0].AgentID != "a1" {
 		t.Fatalf("unexpected agents response: %v", agents)
+	}
+	// a1 is org-less and owned by the caller (alice) → manage authority.
+	if !agents[0].CanManage {
+		t.Errorf("owner's own org-less agent must report canManage=true")
 	}
 }
 

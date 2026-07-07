@@ -556,16 +556,34 @@ func subtree(ctx context.Context, s registry.Store, id string) ([]string, error)
 	return out, nil
 }
 
-// agentOwnedBy reports whether the agent exists and is owned by userId. Ownership
-// is the agent record's UserID. An empty userId never owns anything (so a caller
-// that asserts no identity is denied), and an unknown id reports exists=false.
+// SpiceDB agent permissions checked for human lifecycle authority (schema.zed):
+// view = owner + org->view_agents (read: subtree/events/logs/chain);
+// manage = owner + org->admin_agents (mutate: revoke/resume/dismiss/kill/...).
+const (
+	actionView   = "view"
+	actionManage = "manage"
+)
+
+// agentAllowed reports whether the agent exists and whether userId is allowed the
+// given action (actionView / actionManage) on it — the Phase-4 authorization flip
+// from pure userId-equality to SpiceDB org checks. Two paths:
 //
-// A backend read error is PROPAGATED (not swallowed to exists=false): mapping a
-// transient DynamoDB read failure to "not found" would turn a retryable 5xx into
-// a misleading 404, and — on the revoke/resume paths this gates — could let a
-// caller believe an agent is gone when the store merely hiccupped. The handler
-// surfaces the error as a 5xx via storeErr, matching the subtree/revokeNode fix.
-func agentOwnedBy(ctx context.Context, s registry.Store, id, userId string) (owned, exists bool, err error) {
+//   - ORG-LESS agent (record OrgID == ""): today's equality, decided from the
+//     record alone with NO SpiceDB round-trip. Global agents (incl. any whose
+//     owner/org tuples predate this phase) keep working exactly as before, and
+//     the existing e2e — all org-less — stays on this path unchanged.
+//   - ORG-SCOPED agent (record OrgID != ""): SpiceDB is authoritative via
+//     CheckPermission on "agent:<id>" for the action. The subject userId is
+//     normalized with spicedb.EncodeObjectID so it matches the object id written
+//     on the owner/membership tuples (registry.ValidUserID admits '. : @', which
+//     SpiceDB's object-id charset rejects raw).
+//
+// A STORE read error is PROPAGATED (exists=false, err set) so the handler surfaces
+// a retryable 5xx — mapping it to 404 would falsely tell a caller the agent is
+// gone. A SpiceDB CheckPermission error, by contrast, FAILS CLOSED: it is logged
+// and returns allowed=false (a 404 for the caller), never a 5xx oracle and never
+// an open grant — matching the recorded agentOwnedBy follow-up.
+func agentAllowed(ctx context.Context, s registry.Store, sdb spicedb.Client, id, userId, action string) (allowed, exists bool, err error) {
 	rec, err := s.GetAgent(ctx, id)
 	if err != nil {
 		return false, false, err
@@ -573,7 +591,21 @@ func agentOwnedBy(ctx context.Context, s registry.Store, id, userId string) (own
 	if rec.AgentID == "" {
 		return false, false, nil
 	}
-	return userId != "" && rec.UserID == userId, true, nil
+	if userId == "" {
+		return false, true, nil // no asserted identity never owns / is never a member
+	}
+	if rec.OrgID == "" {
+		return rec.UserID == userId, true, nil
+	}
+	ok, cerr := sdb.CheckPermission(ctx, "agent:"+id, action, "user:"+spicedb.EncodeObjectID(userId))
+	if cerr != nil {
+		// Fail closed: deny (404) and log, rather than 5xx (which would leak that
+		// the id exists) or fail open. The org tuples are the source of truth; a
+		// SpiceDB hiccup must not grant access.
+		log.Printf("agentAllowed: spicedb %s check for agent %s user %s failed (fail-closed deny): %v", action, id, userId, cerr)
+		return false, true, nil
+	}
+	return ok, true, nil
 }
 
 // depth returns how many agents are in the lineage from id up to the root,
@@ -1180,15 +1212,22 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		// never a body value. The owner tuple is skipped for a user-less global
 		// agent so we never write a malformed `user:` (empty id) tuple — the same
 		// guard the tenant-relation skip applies above for a tenant-less agent.
+		// userId/orgId are normalized to a SpiceDB-safe object id here on the WRITE
+		// side; agentAllowed applies the SAME spicedb.EncodeObjectID on the READ
+		// (CheckPermission) side, and orgTuple does likewise for org membership —
+		// so the owner/org/membership tuples and the Phase-4 checks agree even for
+		// subjects carrying '. : @' (which ValidUserID admits but SpiceDB rejects
+		// raw). For the common UUID-sub / DNS-label-org case the encoding is the
+		// identity, so nothing changes for existing tuples.
 		if rec.UserID != "" {
-			ownerRes, ownerSub := "agent:"+agentID, "user:"+rec.UserID
+			ownerRes, ownerSub := "agent:"+agentID, "user:"+spicedb.EncodeObjectID(rec.UserID)
 			if err := sdb.WriteRelationship(ctx, ownerRes, "owner", ownerSub); err != nil {
 				log.Printf("spicedb owner-tuple write error for %s: %v", agentID, err)
 			}
 			tuples = append(tuples, relTuple{Resource: ownerRes, Relation: "owner", Subject: ownerSub})
 		}
 		if rec.OrgID != "" {
-			orgRes, orgSub := "agent:"+agentID, "organization:"+rec.OrgID
+			orgRes, orgSub := "agent:"+agentID, "organization:"+spicedb.EncodeObjectID(rec.OrgID)
 			if err := sdb.WriteRelationship(ctx, orgRes, "org", orgSub); err != nil {
 				log.Printf("spicedb org-tuple write error for %s: %v", agentID, err)
 			}
@@ -1357,26 +1396,21 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			if ok {
 				resTypes = relationResourceTypes(tpl, rec.TenantID != "")
 			}
+			// Template relations (tenant/project/...) have "agent:<id>" as their
+			// SUBJECT, so a subject-scoped delete reaches them.
 			if err := sdb.DeleteAgentRelationships(ctx, agentID, resTypes); err != nil {
 				log.Printf("spicedb cleanup error for %s: %v", agentID, err)
 			}
-			if err := sdb.DeleteRelationship(ctx, "agent:"+agentID, "enabled", "agent:"+agentID); err != nil {
-				log.Printf("spicedb enabled-tuple cleanup error for %s: %v", agentID, err)
-			}
-			// The owner/org lifecycle tuples (Phase 1) have "agent:<id>" as their
-			// RESOURCE, not subject, so DeleteAgentRelationships (a subject-only
-			// filter) does not reach them — delete each explicitly. Revoke/resume
-			// need no such cleanup: they only toggle the `enabled` tuple, leaving
-			// owner/org intact so a resumed agent keeps its authority.
-			if rec.UserID != "" {
-				if err := sdb.DeleteRelationship(ctx, "agent:"+agentID, "owner", "user:"+rec.UserID); err != nil {
-					log.Printf("spicedb owner-tuple cleanup error for %s: %v", agentID, err)
-				}
-			}
-			if rec.OrgID != "" {
-				if err := sdb.DeleteRelationship(ctx, "agent:"+agentID, "org", "organization:"+rec.OrgID); err != nil {
-					log.Printf("spicedb org-tuple cleanup error for %s: %v", agentID, err)
-				}
+			// The agent's own lifecycle tuples (enabled, owner, org — all with
+			// "agent:<id>" as the RESOURCE) are swept in ONE resource-scoped delete,
+			// collapsing what used to be three per-tuple DeleteRelationship calls
+			// (Phase-4 follow-up). This is also robust to a drifted record: every
+			// tuple on the agent resource goes, without reconstructing each exact
+			// (possibly encoded) subject. Revoke/resume need no such cleanup — they
+			// only toggle `enabled`, leaving owner/org intact so a resumed agent
+			// keeps its authority.
+			if err := sdb.DeleteResourceRelationships(ctx, "agent:"+agentID); err != nil {
+				log.Printf("spicedb agent-resource cleanup error for %s: %v", agentID, err)
 			}
 		}
 		w.WriteHeader(http.StatusOK)
@@ -1385,11 +1419,12 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	mux.HandleFunc("POST /v1/agents/{id}/dismiss", func(w http.ResponseWriter, r *http.Request) {
 		agentID := r.PathValue("id")
 		userId := r.URL.Query().Get("userId")
-		owned, exists, err := agentOwnedBy(r.Context(), s, agentID, userId)
+		// dismiss mutates the agent → manage authority.
+		allowed, exists, err := agentAllowed(r.Context(), s, sdb, agentID, userId, actionManage)
 		if storeErr(w, err) {
 			return
 		}
-		if !exists || !owned {
+		if !exists || !allowed {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -1415,11 +1450,12 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	mux.HandleFunc("POST /v1/agents/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		userId := r.URL.Query().Get("userId")
-		owned, exists, err := agentOwnedBy(r.Context(), s, id, userId)
+		// revoke mutates the agent (and its subtree) → manage authority.
+		allowed, exists, err := agentAllowed(r.Context(), s, sdb, id, userId, actionManage)
 		if storeErr(w, err) {
 			return
 		}
-		if !exists || !owned {
+		if !exists || !allowed {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -1457,11 +1493,12 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	mux.HandleFunc("POST /v1/agents/{id}/resume", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		userId := r.URL.Query().Get("userId")
-		owned, exists, err := agentOwnedBy(r.Context(), s, id, userId)
+		// resume mutates the agent (and its subtree) → manage authority.
+		allowed, exists, err := agentAllowed(r.Context(), s, sdb, id, userId, actionManage)
 		if storeErr(w, err) {
 			return
 		}
-		if !exists || !owned {
+		if !exists || !allowed {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -1497,11 +1534,15 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	mux.HandleFunc("GET /v1/agents/{id}/subtree", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		userId := r.URL.Query().Get("userId")
-		owned, exists, err := agentOwnedBy(r.Context(), s, id, userId)
+		// subtree is the read side of the DELETE cascade (a mutation the
+		// orchestrator drives), so it takes manage authority per the spec matrix —
+		// not view. A same-org member (view-only) must not be able to enumerate an
+		// admin's agent subtree as a prelude to a delete they can't perform.
+		allowed, exists, err := agentAllowed(r.Context(), s, sdb, id, userId, actionManage)
 		if storeErr(w, err) {
 			return
 		}
-		if !exists || !owned {
+		if !exists || !allowed {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}

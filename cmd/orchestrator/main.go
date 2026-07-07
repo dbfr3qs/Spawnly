@@ -41,6 +41,18 @@ import (
 // Tests set it to 0.
 var cascadeSettleDelay = 300 * time.Millisecond
 
+// enforceOrgSpawn gates the "non-admin human spawn REQUIRES an active org" rule.
+// It is a package-level seam (precedent: cascadeSettleDelay above, which tests
+// already flip) deliberately defaulting OFF for Phase 4: the dashboard cannot
+// request `organization:<alias>` scopes until Phase 5, so every non-admin human
+// token is still org-less and org-less non-admin spawn must keep WORKING (today's
+// behaviour). Phase 5 flips this true — and then removes the seam — once
+// single-org tokens exist, making a non-admin with no active org a 403. Org
+// derivation from the claim (req.OrgID = claims.OrgID) happens regardless of this
+// flag; the flag only controls the org-less REJECTION. See main_test.go, which
+// covers BOTH states.
+var enforceOrgSpawn = false
+
 type SpawnRequest struct {
 	AgentType string `json:"agentType"`
 	UserID    string `json:"userId"`
@@ -145,15 +157,46 @@ func isContainerNotReadyErr(err error) bool {
 	return false
 }
 
-// ownsAgent reports whether userId owns the agent (its registry record's
-// UserID). Empty userId never owns. Used to gate the read/interact endpoints
-// the orchestrator fronts directly.
-func ownsAgent(ctx context.Context, regClient registry.Client, id, userId string) bool {
+// SpiceDB agent permissions (schema.zed): view = read (events/logs/chain);
+// manage = mutate (message/revoke/resume/dismiss/delete). Same names the
+// registry checks — kept here so the orchestrator-tier gate matches.
+const (
+	actionView   = "view"
+	actionManage = "manage"
+)
+
+// agentAllowed reports whether userId is allowed the given action on the agent —
+// the orchestrator-tier mirror of the registry's agentAllowed (Phase-4 authz
+// flip). Org-less agents keep today's userId-equality with NO SpiceDB round-trip
+// (so existing org-less flows are byte-identical); org-scoped agents defer to
+// SpiceDB. A SpiceDB error FAILS CLOSED (deny → the caller's 404), never opens
+// access. An unknown/unavailable agent also denies (the read/interact handlers
+// surface that as 404, never enumerable).
+func agentAllowed(ctx context.Context, regClient registry.Client, sdb spicedb.Client, id, userId, action string) bool {
 	if userId == "" {
 		return false
 	}
 	rec, err := regClient.GetAgent(ctx, id)
-	return err == nil && rec.UserID == userId
+	if err != nil || rec.AgentID == "" {
+		return false
+	}
+	if rec.OrgID == "" {
+		return rec.UserID == userId
+	}
+	ok, cerr := sdb.CheckPermission(ctx, "agent:"+id, action, "user:"+spicedb.EncodeObjectID(userId))
+	if cerr != nil {
+		log.Printf("agentAllowed: spicedb %s check for agent %s user %s failed (fail-closed deny): %v", action, id, userId, cerr)
+		return false
+	}
+	return ok
+}
+
+// canView / canManage are the two authority levels the orchestrator gates on.
+func canView(ctx context.Context, regClient registry.Client, sdb spicedb.Client, id, userId string) bool {
+	return agentAllowed(ctx, regClient, sdb, id, userId, actionView)
+}
+func canManage(ctx context.Context, regClient registry.Client, sdb spicedb.Client, id, userId string) bool {
+	return agentAllowed(ctx, regClient, sdb, id, userId, actionManage)
 }
 
 // ctxKey is the private type for orchestrator request-context values.
@@ -162,6 +205,7 @@ type ctxKey int
 const (
 	ctxUserID ctxKey = iota
 	ctxRoles
+	ctxOrgID
 )
 
 // userIDFrom returns the authenticated user id placed in the context by
@@ -170,6 +214,15 @@ const (
 // never owns), so this never silently widens access.
 func userIDFrom(ctx context.Context) string {
 	s, _ := ctx.Value(ctxUserID).(string)
+	return s
+}
+
+// orgIDFrom returns the active organization the token names (the parsed
+// `organization` claim), placed in the context by requireToken. Empty when the
+// token is org-less (global) — the caller then sees only its own org-less agents
+// and never any org-scoped ones.
+func orgIDFrom(ctx context.Context) string {
+	s, _ := ctx.Value(ctxOrgID).(string)
 	return s
 }
 
@@ -224,6 +277,9 @@ func requireToken(v tokenvalidator.TokenValidator, audience, scope string, next 
 		}
 		ctx := context.WithValue(r.Context(), ctxUserID, userID)
 		ctx = context.WithValue(ctx, ctxRoles, claims.Roles)
+		// Stash the active org (fail-closed "" when the token names none) so the
+		// list handler scopes visibility to org agents without re-parsing the token.
+		ctx = context.WithValue(ctx, ctxOrgID, claims.OrgID)
 		next(w, r.WithContext(ctx))
 	}
 }
@@ -386,9 +442,20 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 				return
 			}
 			req.UserID = userID
-			// Human-path org derivation from the token's organization claim is
-			// Phase 4 (needs tokenvalidator.Claims.OrgID). Until then human spawns
-			// stay org-less (req.OrgID == "") — today's behaviour, unchanged.
+			// Org derived from the token's organization claim, NEVER the body: a
+			// token carrying an org claim always spawns into that org (admin or not).
+			// Empty when the token is org-less.
+			req.OrgID = claims.OrgID
+			// SEQUENCING (Phase 4): the dashboard can't request organization:<alias>
+			// scopes until Phase 5, so non-admin human tokens are all org-less today
+			// and must keep spawning. enforceOrgSpawn defaults OFF, so this rejection
+			// is dormant until Phase 5 flips it. When ON: a non-admin with no active
+			// org is refused; a realm admin keeps the org-less (global) spawn path.
+			if enforceOrgSpawn && req.OrgID == "" && !claims.HasRole("admin") {
+				log.Printf("spawn: non-admin user %s has no active organization", userID)
+				http.Error(w, "no active organization", http.StatusForbidden)
+				return
+			}
 		}
 
 		if req.UserID == "" {
@@ -540,29 +607,77 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	})
 
 	mux.HandleFunc("GET /v1/agents", requireToken(validator, audience, readScope, func(w http.ResponseWriter, r *http.Request) {
-		agents, err := regClient.ListAgents(r.Context())
+		ctx := r.Context()
+		agents, err := regClient.ListAgents(ctx)
 		if err != nil {
 			http.Error(w, "registry unavailable", http.StatusBadGateway)
 			return
 		}
-		// Ownership scoping: the token's userId (the authenticated human) limits
-		// the result to this user's agents — no cross-user enumeration.
-		if userId := userIDFrom(r.Context()); userId != "" {
-			owned := make([]registry.AgentRecord, 0, len(agents))
-			for _, a := range agents {
-				if a.UserID == userId {
-					owned = append(owned, a)
-				}
+		userID := userIDFrom(ctx)
+		orgID := orgIDFrom(ctx)
+
+		// The caller's org authority is resolved against SpiceDB ONCE per request
+		// (not per agent): two facts drive the whole list — is the caller a current
+		// MEMBER of their active org (org read-visibility) and are they an ADMIN
+		// (manage over every org agent). Deriving visibility from SpiceDB, not the
+		// bare `organization` claim, keeps the list consistent with the per-agent
+		// gates: when a member is removed their SpiceDB tuples drop immediately, so
+		// a still-unexpired org token can no longer enumerate the org's agents
+		// (closing a stale-token metadata leak). admin ⊇ member in the schema, so an
+		// admin need not be re-checked for membership.
+		isOrgMember, isOrgAdmin := false, false
+		if userID != "" && orgID != "" {
+			orgObj := "organization:" + spicedb.EncodeObjectID(orgID)
+			userObj := "user:" + spicedb.EncodeObjectID(userID)
+			adminOK, cerr := sdb.CheckPermission(ctx, orgObj, "admin_agents", userObj)
+			if cerr != nil {
+				// Fail closed: an unreadable authority fact denies (no org rows, no
+				// manage), never an accidental grant.
+				log.Printf("list: org-admin check for user %s org %s failed (treating as non-admin): %v", userID, orgID, cerr)
 			}
-			agents = owned
+			isOrgAdmin = adminOK
+			if isOrgAdmin {
+				isOrgMember = true
+			} else {
+				memberOK, merr := sdb.CheckPermission(ctx, orgObj, "view_agents", userObj)
+				if merr != nil {
+					log.Printf("list: org-member check for user %s org %s failed (treating as non-member): %v", userID, orgID, merr)
+				}
+				isOrgMember = memberOK
+			}
+		}
+
+		// Visibility (spec matrix): a caller sees their OWN agents (org-scoped or
+		// org-less, always — the record UserID is the owner) PLUS every agent in
+		// their ACTIVE org when SpiceDB confirms membership. Cross-org agents and
+		// other users' org-less agents are invisible. The own-agent term keeps the
+		// list consistent with the per-agent gates: canView/canManage still succeed
+		// on your own org agent via its owner tuple even in a removed-member window,
+		// so it must still appear here. Per-agent canManage: owner always; org
+		// admins over any agent in their org. Record-field equality on the rows —
+		// no PER-ROW SpiceDB (the two org checks above are per-request).
+		type agentListItem struct {
+			registry.AgentRecord
+			CanManage bool `json:"canManage"`
+		}
+		items := make([]agentListItem, 0, len(agents))
+		for _, a := range agents {
+			own := a.UserID != "" && a.UserID == userID
+			inOrg := isOrgMember && a.OrgID != "" && a.OrgID == orgID
+			if !own && !inOrg {
+				continue
+			}
+			canManage := own || (inOrg && isOrgAdmin)
+			items = append(items, agentListItem{AgentRecord: a, CanManage: canManage})
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(agents)
+		json.NewEncoder(w).Encode(items)
 	}))
 
 	mux.HandleFunc("GET /v1/agents/{id}/events", requireToken(validator, audience, readScope, func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		if !ownsAgent(r.Context(), regClient, id, userIDFrom(r.Context())) {
+		// events are a read → view authority (owner or any same-org member).
+		if !canView(r.Context(), regClient, sdb, id, userIDFrom(r.Context())) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -577,7 +692,8 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	mux.HandleFunc("GET /v1/agents/{id}/logs", requireToken(validator, audience, readScope, func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		if !ownsAgent(r.Context(), regClient, id, userIDFrom(r.Context())) {
+		// logs are a read → view authority (owner or any same-org member).
+		if !canView(r.Context(), regClient, sdb, id, userIDFrom(r.Context())) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -699,7 +815,8 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		ctx := r.Context()
 		id := r.PathValue("id")
 		userID := userIDFrom(ctx)
-		if !ownsAgent(ctx, regClient, id, userID) {
+		// DELETE tears the agent + subtree down → manage authority.
+		if !canManage(ctx, regClient, sdb, id, userID) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -788,17 +905,18 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		return path
 	}
 
-	// requireOwnedAgent is the primary ownership gate for the per-agent ops the
-	// orchestrator forwards to the registry (dismiss/revoke/resume). It sits
-	// INSIDE requireToken — which has already validated the access token and put
-	// the user (token sub) in the context — and denies (404, never 403, so
-	// ownership isn't enumerable) unless that user owns the {id} agent per its
-	// registry record. This makes the validated sub authoritative, mirroring the
+	// requireCanManage is the primary authorization gate for the per-agent
+	// mutations the orchestrator forwards to the registry (dismiss/revoke/resume).
+	// It sits INSIDE requireToken — which has already validated the access token
+	// and put the user (token sub) in the context — and denies (404, never 403, so
+	// authorization isn't enumerable) unless that user holds manage on the {id}
+	// agent: owner for org-less agents, owner-or-org-admin for org-scoped ones.
+	// This makes the validated sub authoritative, mirroring the
 	// DELETE/events/logs/message handlers; the forwarded userId + the registry's
-	// own agentOwnedBy check remain as a defense-in-depth backstop.
-	requireOwnedAgent := func(next http.HandlerFunc) http.HandlerFunc {
+	// own agentAllowed check remain as a defense-in-depth backstop.
+	requireCanManage := func(next http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			if !ownsAgent(r.Context(), regClient, r.PathValue("id"), userIDFrom(r.Context())) {
+			if !canManage(r.Context(), regClient, sdb, r.PathValue("id"), userIDFrom(r.Context())) {
 				http.Error(w, "not found", http.StatusNotFound)
 				return
 			}
@@ -806,7 +924,7 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		}
 	}
 
-	mux.HandleFunc("POST /v1/agents/{id}/dismiss", requireToken(validator, audience, writeScope, requireOwnedAgent(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /v1/agents/{id}/dismiss", requireToken(validator, audience, writeScope, requireCanManage(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		// Ownership is enforced above by requireOwnedAgent (token sub); the
 		// forwarded userId keeps the registry's own agentOwnedBy check as a
@@ -865,10 +983,10 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	// revoke/resume are cascading authorization actions owned by the registry.
 	// Ownership is gated here at the orchestrator (requireOwnedAgent, token sub);
 	// the forwarded userId leaves the registry's agentOwnedBy check as a backstop.
-	mux.HandleFunc("POST /v1/agents/{id}/revoke", requireToken(validator, audience, writeScope, requireOwnedAgent(forwardToRegistry("POST", func(r *http.Request) string {
+	mux.HandleFunc("POST /v1/agents/{id}/revoke", requireToken(validator, audience, writeScope, requireCanManage(forwardToRegistry("POST", func(r *http.Request) string {
 		return withUserID("/v1/agents/"+r.PathValue("id")+"/revoke", r)
 	}))))
-	mux.HandleFunc("POST /v1/agents/{id}/resume", requireToken(validator, audience, writeScope, requireOwnedAgent(forwardToRegistry("POST", func(r *http.Request) string {
+	mux.HandleFunc("POST /v1/agents/{id}/resume", requireToken(validator, audience, writeScope, requireCanManage(forwardToRegistry("POST", func(r *http.Request) string {
 		return withUserID("/v1/agents/"+r.PathValue("id")+"/resume", r)
 	}))))
 
@@ -976,7 +1094,8 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	mux.HandleFunc("POST /v1/agents/{id}/message", requireToken(validator, audience, writeScope, func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		if !ownsAgent(r.Context(), regClient, id, userIDFrom(r.Context())) {
+		// messaging an agent is a mutation (per the spec matrix) → manage authority.
+		if !canManage(r.Context(), regClient, sdb, id, userIDFrom(r.Context())) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
