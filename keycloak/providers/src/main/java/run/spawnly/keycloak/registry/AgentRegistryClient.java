@@ -81,6 +81,26 @@ public class AgentRegistryClient {
     }
 
     /**
+     * Fetches an organization record by id (Phase 9 per-org verifier resolution),
+     * via the control-plane-gated {@code GET /v1/orgs/{id}}. Returns {@code null}
+     * if the org does not exist, or the registry is unreachable/errors (fail
+     * closed) — the caller then treats the org as unanchored and, for an STS
+     * credential, refuses (never mint against an unknown anchor).
+     */
+    public Organization getOrg(String orgId) {
+        String body = get("/v1/orgs/" + enc(orgId));
+        if (body == null) {
+            return null;
+        }
+        try {
+            return JsonSerialization.readValue(body, Organization.class);
+        } catch (Exception e) {
+            log.debugf(e, "malformed org record for %s", orgId);
+            return null;
+        }
+    }
+
+    /**
      * Fetches the delegation policy for a (parentType → childType) edge (Phase 3).
      * Returns {@code null} only when the registry is unreachable or non-2xx; a
      * well-formed 200 is returned as-is (which may carry {@code allowed=false}),

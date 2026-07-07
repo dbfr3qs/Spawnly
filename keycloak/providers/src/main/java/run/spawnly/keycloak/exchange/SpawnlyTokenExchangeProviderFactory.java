@@ -7,8 +7,8 @@ import org.keycloak.models.KeycloakSessionFactory;
 import org.keycloak.protocol.oidc.TokenExchangeProvider;
 import org.keycloak.protocol.oidc.TokenExchangeProviderFactory;
 
-import run.spawnly.keycloak.attestor.AgentCredentialVerifier;
 import run.spawnly.keycloak.attestor.AttestorFactory;
+import run.spawnly.keycloak.attestor.OrgAwareVerifier;
 import run.spawnly.keycloak.registry.AgentRegistryClient;
 
 import java.util.LinkedHashMap;
@@ -72,15 +72,19 @@ public class SpawnlyTokenExchangeProviderFactory implements TokenExchangeProvide
         SCOPE_AUDIENCE = Map.copyOf(m);
     }
 
-    private volatile AgentCredentialVerifier verifier;
+    private volatile OrgAwareVerifier verifier;
     private volatile AgentRegistryClient registry;
 
     @Override
     public void init(Config.Scope config) {
         // Select the attestor once (unknown value ⇒ IllegalStateException ⇒
-        // startup fails loudly). Same seam as the Phase-1 authenticator.
-        this.verifier = AttestorFactory.build(config);
+        // startup fails loudly). Same seam as the Phase-1 authenticator. Wrap it in
+        // the Phase-9 org-aware resolver (STS_TRUSTED_ENDPOINT honoured) so a remote
+        // (STS) agent's actor_token is verified against its org anchor when it
+        // delegates.
         this.registry = new AgentRegistryClient();
+        this.verifier = new OrgAwareVerifier(
+                AttestorFactory.build(config), registry, AttestorFactory.resolveStsTrustedEndpoint(config));
         log.debug("spawnly-token-exchange provider initialized");
     }
 

@@ -16,9 +16,15 @@ import org.keycloak.sessions.AuthenticationSessionModel;
 
 import run.spawnly.keycloak.attestor.AgentCredentialVerifier;
 import run.spawnly.keycloak.attestor.AgentIdentity;
+import run.spawnly.keycloak.attestor.OrgAwareVerifier;
 import run.spawnly.keycloak.identity.VerifiedAgent;
 import run.spawnly.keycloak.registry.AgentRecord;
 import run.spawnly.keycloak.registry.AgentRegistryClient;
+import run.spawnly.keycloak.registry.AttestationAnchor;
+import run.spawnly.keycloak.registry.Organization;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -119,7 +125,12 @@ class SpawnlyAttestationAuthenticatorTest {
     }
 
     @Test
-    void awsStsAssertion_isAlsoAccepted() {
+    void awsStsAssertion_assertionTypeIsAccepted() {
+        // The AWS_STS assertion TYPE is accepted (not fallen through to the secret
+        // path). This payload is not a real base64 presigned envelope, so Phase 9's
+        // OrgAwareVerifier routes it through the default branch (the injected mock);
+        // the real org-bound STS path is covered by stsAnchoredOrgAgent_* below and
+        // OrgAwareVerifierTest.
         form.putSingle("client_assertion_type", SpawnlyAttestationAuthenticator.AWS_STS_ASSERTION_TYPE);
         form.putSingle("client_assertion", "presigned-sts-url");
         form.putSingle("client_id", "weather-monitor");
@@ -334,6 +345,68 @@ class SpawnlyAttestationAuthenticatorTest {
         verify(ctx).success();
         verify(session).setAttribute(VerifiedAgent.SESSION_ATTR,
                 new VerifiedAgent("alice", SPIFFE, "agent-abc", "acme"));
+    }
+
+    @Test
+    void stsAnchoredOrgAgent_mintsOrgBound_orgStamped() {
+        // Phase 9 end-to-end: an STS credential for an agent recorded under an
+        // anchored org verifies org-bound (account+role match the org anchor) and
+        // its orgId is threaded into the VerifiedAgent — mapper/exchange org
+        // stamping is re-asserted for an anchored-org agent.
+        String arn = "arn:aws:sts::111122223333:assumed-role/acme-agents/remote-1";
+        String stsCred = Base64.getEncoder().encodeToString(
+                "{\"method\":\"POST\",\"url\":\"https://sts.amazonaws.com/?Action=GetCallerIdentity\"}"
+                        .getBytes(StandardCharsets.UTF_8));
+        form.putSingle("client_assertion_type", SpawnlyAttestationAuthenticator.AWS_STS_ASSERTION_TYPE);
+        form.putSingle("client_assertion", stsCred);
+        form.putSingle("client_id", "remote-worker");
+        when(realm.getClientByClientId("remote-worker")).thenReturn(mock(ClientModel.class));
+        when(registry.getAgent("remote-1"))
+                .thenReturn(new AgentRecord("remote-1", "active", "alice", "remote-worker", null, "acme"));
+        when(registry.getOrg("acme")).thenReturn(new Organization("acme", "acme",
+                new AttestationAnchor("sts", "111122223333",
+                        "arn:aws:sts::111122223333:assumed-role/acme-agents/*", "active")));
+
+        // The STS replay is mocked to attest the acme identity; the org-bound
+        // binding (account + role) is the real code under test.
+        AgentCredentialVerifier stsReplay = mock(AgentCredentialVerifier.class);
+        when(stsReplay.verify(any())).thenReturn(new AgentIdentity("remote-1", arn, "aws-sts"));
+        OrgAwareVerifier orgAware = new OrgAwareVerifier(mock(AgentCredentialVerifier.class), stsReplay, registry);
+
+        new SpawnlyAttestationAuthenticator(orgAware, registry).authenticateClient(ctx);
+
+        verify(ctx).success();
+        verify(session).setAttribute(VerifiedAgent.SESSION_ATTR,
+                new VerifiedAgent("alice", arn, "remote-1", "acme"));
+    }
+
+    @Test
+    void stsCrossOrgCredential_isInvalidClient() {
+        // Isolation: an acme STS credential presented for an agent recorded under
+        // globex is refused — org A's account can never authenticate an org B agent.
+        String acmeArn = "arn:aws:sts::111122223333:assumed-role/acme-agents/remote-1";
+        String stsCred = Base64.getEncoder().encodeToString(
+                "{\"method\":\"POST\",\"url\":\"https://sts.amazonaws.com/?Action=GetCallerIdentity\"}"
+                        .getBytes(StandardCharsets.UTF_8));
+        form.putSingle("client_assertion_type", SpawnlyAttestationAuthenticator.AWS_STS_ASSERTION_TYPE);
+        form.putSingle("client_assertion", stsCred);
+        form.putSingle("client_id", "remote-worker");
+        when(realm.getClientByClientId("remote-worker")).thenReturn(mock(ClientModel.class));
+        when(registry.getAgent("remote-1"))
+                .thenReturn(new AgentRecord("remote-1", "active", "alice", "remote-worker", null, "globex"));
+        when(registry.getOrg("globex")).thenReturn(new Organization("globex", "globex",
+                new AttestationAnchor("sts", "999988887777",
+                        "arn:aws:sts::999988887777:assumed-role/globex-agents/*", "active")));
+
+        AgentCredentialVerifier stsReplay = mock(AgentCredentialVerifier.class);
+        when(stsReplay.verify(any())).thenReturn(new AgentIdentity("remote-1", acmeArn, "aws-sts"));
+        OrgAwareVerifier orgAware = new OrgAwareVerifier(mock(AgentCredentialVerifier.class), stsReplay, registry);
+
+        new SpawnlyAttestationAuthenticator(orgAware, registry).authenticateClient(ctx);
+
+        verify(ctx).failure(eq(AuthenticationFlowError.INVALID_CLIENT_CREDENTIALS), any());
+        verify(ctx, never()).success();
+        verify(session, never()).setAttribute(eq(VerifiedAgent.SESSION_ATTR), any());
     }
 
     @Test

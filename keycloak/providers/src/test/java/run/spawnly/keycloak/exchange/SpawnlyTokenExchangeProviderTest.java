@@ -22,6 +22,7 @@ import org.keycloak.services.cors.Cors;
 
 import run.spawnly.keycloak.attestor.AgentCredentialVerifier;
 import run.spawnly.keycloak.attestor.AgentIdentity;
+import run.spawnly.keycloak.attestor.OrgAwareVerifier;
 import run.spawnly.keycloak.registry.AgentRecord;
 import run.spawnly.keycloak.registry.AgentRegistryClient;
 import run.spawnly.keycloak.registry.DelegationPolicy;
@@ -139,7 +140,12 @@ class SpawnlyTokenExchangeProviderTest {
             "orchestrator:spawn", "orchestrator");
 
     private SpawnlyTokenExchangeProvider provider(AgentCredentialVerifier v) {
-        return new SpawnlyTokenExchangeProvider(session, v, registry, SCOPE_AUDIENCE);
+        // The provider now takes the org-aware resolver; a non-STS actor_token
+        // (a JWT-SVID, as every test here uses) is delegated to the wrapped base
+        // verifier, so these delegation-policy tests exercise the SPIRE path
+        // unchanged. The STS actor_token binding is covered in OrgAwareVerifierTest.
+        return new SpawnlyTokenExchangeProvider(
+                session, new OrgAwareVerifier(v, registry, ""), registry, SCOPE_AUDIENCE);
     }
 
     private TokenExchangeContext ctx(String subjectToken, String scope, String audience,

@@ -2385,6 +2385,16 @@ func main() {
 	// memory (registry.SchemaState), so this seeds the DynamoDB store — which
 	// starts with none — and re-applies the same value to the in-memory store.
 	s.SetSchema(activeSchema, schemaVersion, schemaSource)
+
+	// Per-org verifier resolution (multi-tenancy Phase 9): wrap the configured
+	// default registrant verifier so a consumer-hosted (remote) agent can
+	// self-register with its org's AWS STS credential — resolved to the org that
+	// owns the agent's record and bound to that org's active anchor (account +
+	// role pattern). A non-STS credential (JWT-SVID/OIDC/mTLS) is passed straight
+	// through, so platform SPIRE registration is bit-identical. The isolation
+	// invariant (an STS credential verifies ONLY against its record's org anchor)
+	// mirrors the Keycloak OrgAwareVerifier on the token-minting side.
+	verifier = registrant.NewOrgAwareVerifier(verifier, s, nil)
 	log.Printf("registry listening on :8080 (store=%s schema source=%s version=%s)",
 		getEnv("STORE", "memory"), schemaSource, schemaVersion)
 	srv := &http.Server{

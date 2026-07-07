@@ -329,6 +329,55 @@ public class StsCredentialVerifier implements AgentCredentialVerifier {
         return sessionName.isEmpty() ? null : sessionName;
     }
 
+    /**
+     * Extracts the 12-digit account id from an ARN
+     * ({@code arn:partition:service:region:<account>:resource}). Returns
+     * {@code null} if the ARN has no account segment. Mirrors Go
+     * {@code attestor.AccountFromArn}; used by the Phase-9 org-aware verifier to
+     * bind the STS-attested account to the record's org anchor account.
+     */
+    public static String accountFromArn(String arn) {
+        if (arn == null) {
+            return null;
+        }
+        // arn:partition:service:region:<account>:resource — the account is field 5.
+        String[] parts = arn.split(":", 6);
+        if (parts.length < 6 || parts[4].isEmpty()) {
+            return null;
+        }
+        return parts[4];
+    }
+
+    /**
+     * Reports whether an assumed-role ARN matches an anchor's roleArnPattern. The
+     * pattern is a simple glob: {@code *} matches any run of characters (including
+     * none); every other character is literal. Matching is anchored (the whole ARN
+     * must match) and case-sensitive. An empty pattern matches nothing
+     * (fail-closed): an anchor with no role constraint must not authenticate any
+     * role in the account. Mirrors Go {@code attestor.MatchRoleArnPattern}
+     * verbatim so the registry (self-registration) and the IdP (token minting)
+     * enforce the SAME anchor role check (the isolation invariant).
+     */
+    public static boolean matchRoleArnPattern(String pattern, String arn) {
+        if (pattern == null || pattern.isEmpty() || arn == null || arn.isEmpty()) {
+            return false;
+        }
+        StringBuilder b = new StringBuilder("^");
+        String[] segs = pattern.split("\\*", -1);
+        for (int i = 0; i < segs.length; i++) {
+            if (i > 0) {
+                b.append(".*");
+            }
+            b.append(Pattern.quote(segs[i]));
+        }
+        b.append("$");
+        try {
+            return Pattern.compile(b.toString()).matcher(arn).matches();
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
     /** The wire form of a SigV4-presigned GetCallerIdentity request. */
     static final class PresignedRequest {
         String method;

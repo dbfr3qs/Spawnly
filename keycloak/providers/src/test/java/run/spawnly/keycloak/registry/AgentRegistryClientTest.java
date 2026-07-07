@@ -147,6 +147,66 @@ class AgentRegistryClientTest {
                 .withHeader("Authorization", absent()));
     }
 
+    // ── Organizations (Phase 9 per-org verifier resolution) ─────────────────────
+
+    @Test
+    void getOrg_parsesActiveStsAnchor() {
+        wm.stubFor(get(urlEqualTo("/v1/orgs/acme")).willReturn(aResponse()
+                .withHeader("Content-Type", "application/json")
+                .withBody("{\"orgId\":\"acme\",\"name\":\"Acme\",\"anchor\":{\"type\":\"sts\","
+                        + "\"awsAccountId\":\"111122223333\","
+                        + "\"roleArnPattern\":\"arn:aws:sts::111122223333:assumed-role/acme-agents/*\","
+                        + "\"status\":\"active\",\"activatedAt\":\"2026-07-01T00:00:00Z\"},\"future\":1}")));
+
+        Organization org = client(() -> "").getOrg("acme");
+
+        assertNotNull(org);
+        assertEquals("acme", org.orgId());
+        assertNotNull(org.anchor());
+        assertEquals("111122223333", org.anchor().awsAccountId());
+        assertTrue(org.anchor().isActiveSts());
+    }
+
+    @Test
+    void getOrg_unanchoredOrg_anchorNull() {
+        wm.stubFor(get(urlEqualTo("/v1/orgs/globex")).willReturn(aResponse()
+                .withBody("{\"orgId\":\"globex\",\"name\":\"Globex\"}")));
+        Organization org = client(() -> "").getOrg("globex");
+        assertNotNull(org);
+        assertNull(org.anchor());
+    }
+
+    @Test
+    void getOrg_pendingAnchor_isNotActiveSts() {
+        wm.stubFor(get(urlEqualTo("/v1/orgs/acme")).willReturn(aResponse()
+                .withBody("{\"orgId\":\"acme\",\"anchor\":{\"type\":\"sts\",\"awsAccountId\":\"1\","
+                        + "\"roleArnPattern\":\"*\",\"status\":\"pending\"}}")));
+        Organization org = client(() -> "").getOrg("acme");
+        assertNotNull(org);
+        assertFalse(org.anchor().isActiveSts());
+    }
+
+    @Test
+    void getOrg_notFound_returnsNull() {
+        wm.stubFor(get(urlEqualTo("/v1/orgs/ghost")).willReturn(aResponse().withStatus(404)));
+        assertNull(client(() -> "").getOrg("ghost"));
+    }
+
+    @Test
+    void getOrg_error_failsClosedNull() {
+        wm.stubFor(get(urlEqualTo("/v1/orgs/x")).willReturn(aResponse().withStatus(500)));
+        assertNull(client(() -> "").getOrg("x"));
+    }
+
+    @Test
+    void getOrg_carriesControlPlaneBearer() {
+        wm.stubFor(get(urlEqualTo("/v1/orgs/acme")).willReturn(aResponse()
+                .withBody("{\"orgId\":\"acme\"}")));
+        client(() -> "cp-token").getOrg("acme");
+        wm.verify(getRequestedFor(urlEqualTo("/v1/orgs/acme"))
+                .withHeader("Authorization", equalTo("Bearer cp-token")));
+    }
+
     @Test
     void getDelegationPolicy_parsesAndCarriesQuery() {
         wm.stubFor(get(urlPathEqualTo("/v1/delegation-policy")).willReturn(aResponse()

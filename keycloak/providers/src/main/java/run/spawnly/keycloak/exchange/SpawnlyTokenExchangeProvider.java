@@ -22,8 +22,8 @@ import org.keycloak.services.Urls;
 import org.keycloak.services.cors.Cors;
 import org.keycloak.util.JsonSerialization;
 
-import run.spawnly.keycloak.attestor.AgentCredentialVerifier;
 import run.spawnly.keycloak.attestor.AgentIdentity;
+import run.spawnly.keycloak.attestor.OrgAwareVerifier;
 import run.spawnly.keycloak.registry.AgentRecord;
 import run.spawnly.keycloak.registry.AgentRegistryClient;
 import run.spawnly.keycloak.registry.DelegationPolicy;
@@ -115,14 +115,18 @@ public class SpawnlyTokenExchangeProvider implements TokenExchangeProvider {
     private static final long EXCHANGED_TOKEN_LIFESPAN_SECONDS = 120L;
 
     private final KeycloakSession session;
-    private final AgentCredentialVerifier verifier;
+    // Per-org resolution (Phase 9): the actor_token (the delegating agent's
+    // credential) is verified org-bound, so a remote (STS) agent can delegate too
+    // — an STS actor_token binds to the anchor of the org owning the actor's
+    // record, exactly as on the client-authentication mint path.
+    private final OrgAwareVerifier verifier;
     private final AgentRegistryClient registry;
     // scope -> audience (resource) name, mirroring deploy/keycloak/scopes.tf's
     // scope_audience map (Config.cs ApiResources). A delegation token requests
     // audience=delegation and carries none of these.
     private final Map<String, String> scopeAudience;
 
-    public SpawnlyTokenExchangeProvider(KeycloakSession session, AgentCredentialVerifier verifier,
+    public SpawnlyTokenExchangeProvider(KeycloakSession session, OrgAwareVerifier verifier,
                                         AgentRegistryClient registry, Map<String, String> scopeAudience) {
         this.session = session;
         this.verifier = verifier;
@@ -187,6 +191,10 @@ public class SpawnlyTokenExchangeProvider implements TokenExchangeProvider {
         }
 
         // ── 2. actor_token: a valid attestation credential (the new actor) ─────
+        //      Verified org-bound (Phase 9): an STS actor_token binds to the anchor
+        //      of the org owning the actor's registry record; a SPIRE actor_token
+        //      goes to the platform default unchanged. Failure ⇒ null ⇒ the same
+        //      invalid_request below (oracle-free).
         AgentIdentity actorIdentity;
         try {
             actorIdentity = verifier.verify(actorToken);

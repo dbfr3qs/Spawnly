@@ -56,6 +56,18 @@ public final class AttestorFactory {
     }
 
     /**
+     * Resolves the {@code STS_TRUSTED_ENDPOINT} override (Phase 8) the same way
+     * {@link #build} does for the {@code aws-sts} attestor. Empty by default (the
+     * production stance: the hardcoded AWS STS host pattern applies); set to an
+     * in-cluster fake STS for e2e. The Phase-9 {@link OrgAwareVerifier} builds its
+     * org-bound STS replay verifier with this so it honours the SAME endpoint
+     * narrowing regardless of which attestor is the platform default.
+     */
+    public static String resolveStsTrustedEndpoint(Config.Scope config) {
+        return resolve(config, "stsTrustedEndpoint", StsCredentialVerifier.STS_TRUSTED_ENDPOINT_ENV, "");
+    }
+
+    /**
      * Reads the {@code STSWEB_*} options the way identityserver/Program.cs:42
      * does: audience defaults to "spawnly"; when {@code STSWEB_JWKS_URL} is
      * empty but {@code STSWEB_ISSUER} is set, the JWKS URL is derived as
