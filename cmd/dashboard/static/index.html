@@ -142,6 +142,22 @@
     .org-gate-card p { color: var(--text-dim, #9aa3b2); font-size: 14px; margin: 0 0 18px; }
     .org-picker-list { display: flex; flex-direction: column; gap: 10px; }
     .org-picker-list .btn { width: 100%; }
+    /* Self-serve create-org form on the no-organization screen (Phase 7). */
+    .create-org-form { display: flex; flex-direction: column; gap: 12px; text-align: left; margin: 0 0 16px; }
+    .create-org-form label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-dim, #9aa3b2); }
+    .create-org-form input {
+      padding: 9px 11px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,.14);
+      background: var(--bg, #12141d);
+      color: var(--text, #e8eaf0);
+      font-family: var(--font);
+      font-size: 13px;
+    }
+    .create-org-form .btn { width: 100%; }
+    .create-org-hint { color: var(--text-dim, #9aa3b2); font-size: 11px; margin: 0; }
+    .form-error { color: #f87171; font-size: 12px; margin: 0; }
+    .org-gate-sep { border: none; border-top: 1px solid rgba(255,255,255,.12); margin: 4px 0 16px; }
 
     header h1::before {
       content: '';
@@ -1160,11 +1176,29 @@
   <div class="org-gate-card">
     <!-- No-organization message -->
     <div id="org-gate-noorg" hidden data-testid="no-org-screen">
-      <h2>No organization</h2>
-      <p>Your account isn't a member of any organization yet. Ask an organization
-         admin to add you, then sign in again.</p>
+      <h2>Create your organization</h2>
+      <p>Your account isn't part of an organization yet. Create one to get
+         started — you'll be its first admin. (Or ask an existing org's admin to
+         add you, then sign in again.)</p>
+      <!-- Self-serve signup (Phase 7): posts to the session-gated /api/signup/org;
+           the orchestrator makes the token sub the first admin. On success we
+           re-auth into the new org so the session token carries its claim. -->
+      <form id="create-org-form" class="create-org-form" data-testid="create-org-form">
+        <label>Organization name
+          <input id="create-org-name" type="text" placeholder="Acme Inc." autocomplete="organization" />
+        </label>
+        <label>Organization ID
+          <input id="create-org-slug" type="text" required placeholder="acme"
+                 maxlength="63" data-testid="create-org-slug" />
+        </label>
+        <p class="create-org-hint">Lowercase letters, numbers and hyphens. This is
+           your organization's permanent identifier.</p>
+        <p class="form-error" id="create-org-error" data-testid="create-org-error" hidden></p>
+        <button id="create-org-submit" class="btn btn-primary" type="submit" data-testid="create-org-submit">Create organization</button>
+      </form>
+      <hr class="org-gate-sep" />
       <form method="post" action="/logout" class="logout-form">
-        <button class="btn btn-primary" type="submit" data-testid="no-org-logout">Log out</button>
+        <button class="btn btn-ghost" type="submit" data-testid="no-org-logout">Log out</button>
       </form>
     </div>
     <!-- Org picker -->
@@ -3093,6 +3127,45 @@
       window.location = v ? `/switch-org?org=${encodeURIComponent(v)}` : '/switch-org';
     });
   }
+
+  // Self-serve org creation (Phase 7). Bound once on load; the form only becomes
+  // visible when showGate('noorg') runs for an org-less user. On success we re-auth
+  // into the new org via /switch-org so the session token carries its claim and the
+  // user lands on the dashboard as the org admin. Server gates are authoritative —
+  // the orchestrator enforces the first-admin=sub, reserved-slug and one-org limits.
+  (function () {
+    const form = document.getElementById('create-org-form');
+    if (!form) return;
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const errEl = document.getElementById('create-org-error');
+      const btn = document.getElementById('create-org-submit');
+      errEl.hidden = true;
+      const slug = document.getElementById('create-org-slug').value.trim();
+      const name = document.getElementById('create-org-name').value.trim();
+      if (!slug) return;
+      btn.disabled = true;
+      try {
+        const r = await fetch('/api/signup/org', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ orgId: slug, name: name || slug }),
+        });
+        if (r.ok) {
+          window.location = `/switch-org?org=${encodeURIComponent(slug)}`;
+          return;
+        }
+        const msg = (await r.text()).trim();
+        errEl.textContent = msg || 'Could not create the organization. Try again.';
+        errEl.hidden = false;
+      } catch (_) {
+        errEl.textContent = 'Something went wrong. Try again.';
+        errEl.hidden = false;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  })();
 
   (async () => {
     let me;

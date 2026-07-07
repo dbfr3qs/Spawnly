@@ -382,6 +382,14 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	// token, so no path param is needed here.
 	mux.Handle("GET /api/org/templates", auth.require(proxy("GET", orchestratorURL+"/v1/org/templates")))
 
+	// Self-serve org creation (multi-tenancy Phase 7). The no-organization screen
+	// posts {orgId, name} here; the orchestrator makes the token sub the first
+	// admin and enforces the reserved-slug + one-org-per-user guards. Session-gated
+	// only at this BFF tier (the orchestrator's requireToken is the real gate); the
+	// proxy carries the session's delegated access token, so the browser can never
+	// name a different first admin.
+	mux.Handle("POST /api/signup/org", auth.require(proxy("POST", orchestratorURL+"/v1/signup/org")))
+
 	// Stored spawn consents (management view). Scoped at the orchestrator to the
 	// token's user — the browser cannot list or revoke another user's grants.
 	mux.Handle("GET /api/consents", auth.require(proxy("GET", orchestratorURL+"/v1/consents")))

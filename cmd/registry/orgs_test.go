@@ -435,6 +435,118 @@ func TestPatchOrgDisposition(t *testing.T) {
 	}
 }
 
+// --- Self-serve signup guards (Phase 7) -------------------------------------
+
+// selfServe drives the registry's create as the orchestrator's /v1/signup/org
+// does: ?selfServe=1 with the caller stamped as adminUser.
+func selfServeCreate(t *testing.T, mux http.Handler, orgID, admin string) *httptest.ResponseRecorder {
+	t.Helper()
+	return doReq(t, mux, "POST", "/v1/orgs?selfServe=1", map[string]string{"orgId": orgID, "adminUser": admin})
+}
+
+func TestSelfServeCreate_HappyPath(t *testing.T) {
+	s := newStore()
+	sdb := spicedb.NewMock()
+	dir := newFakeDirectory()
+	mux := orgMux(s, sdb, dir)
+
+	rec := selfServeCreate(t, mux, "acme", "alice")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	// The caller is the first admin (never a body field).
+	if !sdb.HasRelationship("organization:acme", "admin", "user:alice") {
+		t.Fatal("caller should be the first admin")
+	}
+	if !dir.hasCall("CreateOrg:acme") || !dir.hasCall("AddMember:acme/alice") {
+		t.Fatalf("directory calls = %v", dir.calls)
+	}
+}
+
+func TestSelfServeCreate_ReservedSlugRejected(t *testing.T) {
+	mux := orgMux(newStore(), spicedb.NewMock(), newFakeDirectory())
+	for _, slug := range []string{"www", "api", "auth", "admin", "mobile", "docs"} {
+		rec := selfServeCreate(t, mux, slug, "alice")
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("reserved slug %q: status=%d, want 400", slug, rec.Code)
+		}
+	}
+	// Reserved is enforced for the platform-admin path too (no selfServe param).
+	if rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "api", "adminUser": "alice"}); rec.Code != http.StatusBadRequest {
+		t.Errorf("reserved slug on admin path: status=%d, want 400", rec.Code)
+	}
+}
+
+func TestSelfServeCreate_InvalidSlugRejected(t *testing.T) {
+	mux := orgMux(newStore(), spicedb.NewMock(), newFakeDirectory())
+	for _, slug := range []string{"Acme", "-acme", "acme-", "a_b", ""} {
+		if rec := selfServeCreate(t, mux, slug, "alice"); rec.Code != http.StatusBadRequest {
+			t.Errorf("invalid slug %q: status=%d, want 400", slug, rec.Code)
+		}
+	}
+}
+
+func TestSelfServeCreate_SecondOrgRejected(t *testing.T) {
+	s := newStore()
+	sdb := spicedb.NewMock()
+	dir := newFakeDirectory()
+	mux := orgMux(s, sdb, dir)
+
+	if rec := selfServeCreate(t, mux, "acme", "alice"); rec.Code != http.StatusCreated {
+		t.Fatalf("first org status = %d", rec.Code)
+	}
+	// alice already belongs to acme — a second self-serve org is refused (409),
+	// and nothing is written for it.
+	rec := selfServeCreate(t, mux, "globex", "alice")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("second org status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok, _ := s.GetOrg(context.Background(), "globex"); ok {
+		t.Fatal("second org must not be created")
+	}
+	if dir.hasCall("CreateOrg:globex") {
+		t.Fatalf("keycloak org must not be created; calls=%v", dir.calls)
+	}
+}
+
+func TestSelfServeCreate_NoHijackOfExistingOrg(t *testing.T) {
+	s := newStore()
+	sdb := spicedb.NewMock()
+	dir := newFakeDirectory()
+	mux := orgMux(s, sdb, dir)
+
+	// alice owns acme (platform-admin onboarding path).
+	if rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "acme", "adminUser": "alice"}); rec.Code != http.StatusCreated {
+		t.Fatalf("seed create status = %d", rec.Code)
+	}
+	// mallory tries to self-serve the SAME slug — must be refused (409), never
+	// added as an admin of alice's org.
+	rec := selfServeCreate(t, mux, "acme", "mallory")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("hijack attempt status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if sdb.HasRelationship("organization:acme", "admin", "user:mallory") {
+		t.Fatal("hijack: mallory must not become an admin of acme")
+	}
+	if dir.hasCall("AddMember:acme/mallory") {
+		t.Fatalf("hijack: mallory must not be added to acme; calls=%v", dir.calls)
+	}
+}
+
+func TestAdminCreate_AllowsExistingSlugConverge(t *testing.T) {
+	// The platform-admin path (no selfServe) keeps its idempotent
+	// add-caller-as-admin behaviour — only self-serve refuses an existing slug.
+	s := newStore()
+	sdb := spicedb.NewMock()
+	dir := newFakeDirectory()
+	mux := orgMux(s, sdb, dir)
+	doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "acme", "adminUser": "alice"})
+	rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "acme", "adminUser": "alice"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin re-create status = %d, want 200 (converge)", rec.Code)
+	}
+}
+
 func TestDeleteOrg_CleansTuples(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()

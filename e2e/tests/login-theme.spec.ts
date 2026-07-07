@@ -35,6 +35,21 @@ test.describe('login theme', () => {
     await expect(page.locator('#kc-header-wrapper')).toBeVisible();
   });
 
+  // Self-serve signup (Phase 7) turns on the realm registration form. It is
+  // served by keycloak.v2's register.ftl on the SAME body#keycloak-bg, so the
+  // Spawnly theme must paint it identically to the login page — proving the
+  // registration page a brand-new user first sees is on-brand, not stock.
+  test('the registration page also wears the Spawnly dark palette', async ({ page }) => {
+    await page.goto('/');
+    await expectLoginForm(page);
+    await page.getByRole('link', { name: /register/i }).first().click();
+
+    // The registration form (username field) is up, on the flat Spawnly bg.
+    await expect(page.locator('#username')).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('body')).toHaveCSS('background-color', 'rgb(26, 22, 38)');
+    await expect(page.locator('#kc-header-wrapper')).toBeVisible();
+  });
+
   test.describe('with prefers-color-scheme: light', () => {
     test.use({ colorScheme: 'light' });
 

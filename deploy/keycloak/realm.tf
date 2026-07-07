@@ -17,6 +17,20 @@ resource "keycloak_realm" "spawnly" {
   # resource server reads the claim yet. The tenant primitive is untouched.
   organizations_enabled = true
 
+  # Self-serve signup (multi-tenancy Phase C / Phase 7). Turn on the realm's
+  # registration form so a brand-new user can create an account from the login
+  # page; they then create their own organization (becoming its admin) via the
+  # dashboard's no-organization screen -> POST /api/signup/org. Email
+  # verification stays OFF: there is no SMTP configured for the closed beta, and
+  # the no-invitations decision means signup is not gated on email delivery.
+  # Abuse controls are an explicit non-goal for the beta (see spec phase C); the
+  # only signup guardrails are the reserved-slug list and one-org-per-user limit
+  # enforced server-side in the registry. The registration page inherits the
+  # `spawnly` login theme (CSS-only child of keycloak.v2, which ships
+  # register.ftl), so it renders in the same palette as the login page.
+  registration_allowed = true
+  verify_email         = false
+
   # Spawnly-branded login pages. The `spawnly` theme directory ships in the
   # Keycloak image (root Dockerfile copies keycloak/themes/spawnly into
   # /opt/keycloak/themes/) — it MUST exist there or Keycloak falls back/errors

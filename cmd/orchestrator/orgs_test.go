@@ -39,6 +39,64 @@ func orgForwardMux(t *testing.T, claims tokenvalidator.Claims) (http.Handler, *[
 	return mux, &seen
 }
 
+// TestSignupOrg_DerivesFirstAdminFromToken proves the self-serve signup route
+// (Phase 7): it is requireToken-gated (NOT admin), forwards to the registry's
+// POST /v1/orgs choke point with ?selfServe=1, and stamps the FIRST ADMIN from
+// the validated token sub — never a body field. A body trying to name a
+// different adminUser is ignored.
+func TestSignupOrg_DerivesFirstAdminFromToken(t *testing.T) {
+	var gotURI, gotBody string
+	reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURI = r.Method + " " + r.URL.RequestURI()
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		io.WriteString(w, `{"orgId":"acme"}`)
+	}))
+	t.Cleanup(reg.Close)
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	// newbie is a plain (non-admin), org-less user — the signup caller.
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), spicedb.NewMock(), reg.URL,
+		fakeValidator{claims: humanClaims("newbie", "orchestrator:write")},
+		"orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
+
+	// The body tries to smuggle a different adminUser — it must be ignored.
+	req := httptest.NewRequest("POST", "/v1/signup/org",
+		strings.NewReader(`{"orgId":"acme","name":"Acme","adminUser":"attacker"}`))
+	req.Header.Set("Authorization", "Bearer t")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("signup status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if gotURI != "POST /v1/orgs?selfServe=1" {
+		t.Errorf("forwarded URI = %q, want POST /v1/orgs?selfServe=1", gotURI)
+	}
+	if !strings.Contains(gotBody, `"adminUser":"newbie"`) {
+		t.Errorf("forwarded body = %q, want adminUser=newbie (token sub)", gotBody)
+	}
+	if strings.Contains(gotBody, "attacker") {
+		t.Errorf("forwarded body must not carry the body-supplied adminUser; got %q", gotBody)
+	}
+}
+
+func TestSignupOrg_RequiresToken(t *testing.T) {
+	mux, seen := orgForwardMux(t, humanClaims("newbie", "orchestrator:write"))
+	// No Authorization header ⇒ unauthorized, registry untouched.
+	req := httptest.NewRequest("POST", "/v1/signup/org", strings.NewReader(`{"orgId":"acme"}`))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated signup status = %d, want 401", rec.Code)
+	}
+	if len(*seen) != 0 {
+		t.Fatalf("registry must not be called without a token; saw %v", *seen)
+	}
+}
+
 func TestAdminOrgs_NonAdminForbidden(t *testing.T) {
 	mux, seen := orgForwardMux(t, humanClaims("viewer", "orchestrator:write")) // no admin role
 	req := httptest.NewRequest("POST", "/v1/admin/orgs", strings.NewReader(`{"orgId":"acme","adminUser":"alice"}`))

@@ -17,9 +17,18 @@ import (
 // and hyphens, no leading/trailing hyphen, 1–63 chars). This one identifier is
 // the Keycloak org alias == registry OrgID == SpiceDB object id, and it is
 // constrained now so it doubles as the subdomain slug in the follow-up feature.
-// (Reserved-word rejection — www/api/... — lands with self-serve signup in
-// Phase 7; platform-admin onboarding here needs only the charset guard.)
 var validOrgID = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// reservedOrgIDs are slugs no org may claim (Phase 7). They collide with the
+// platform's own subdomains in the deferred subdomain-per-org model (the org
+// alias doubles as the subdomain slug), so an org named `auth`/`api`/... could
+// otherwise shadow a platform host. Rejected for EVERY caller (platform-admin
+// onboarding and self-serve signup alike) — reserving a name is not a privilege
+// a platform admin should be able to override into a collision. validOrgID
+// already forces lowercase, so a plain lookup is exhaustive.
+var reservedOrgIDs = map[string]bool{
+	"www": true, "api": true, "auth": true, "admin": true, "mobile": true, "docs": true,
+}
 
 // orgTuple builds the SpiceDB relationship coordinates for an org membership:
 // resource organization:<id>, relation member|admin, subject user:<userId>.
@@ -80,16 +89,57 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 			http.Error(w, "invalid orgId", http.StatusBadRequest)
 			return
 		}
+		if reservedOrgIDs[body.OrgID] {
+			http.Error(w, "orgId is reserved", http.StatusBadRequest)
+			return
+		}
 		if !registry.ValidUserID(body.AdminUser) {
 			http.Error(w, "invalid adminUser", http.StatusBadRequest)
 			return
 		}
+
+		// Self-serve signup (Phase 7): the orchestrator's requireToken-gated
+		// /v1/signup/org sets ?selfServe=1 and makes the CALLER the adminUser. Unlike
+		// platform-admin onboarding this path is un-privileged, so it carries two
+		// extra guards the admin path deliberately does NOT (an admin may legitimately
+		// re-assert an org or run many orgs):
+		//   (1) no HIJACK — a self-serve create of an ALREADY-EXISTING slug is refused
+		//       (409), never the idempotent add-caller-as-admin below; otherwise a
+		//       signup could adopt admin over someone else's org by guessing its slug.
+		//   (2) one org per user — a caller who already belongs to any org is refused
+		//       (409), the light per-user rate limit the beta calls for.
+		// Both are 409 with a clear message (this is a cooperative self-service form,
+		// not an oracle-sensitive resource — the caller already authenticated).
+		selfServe := r.URL.Query().Get("selfServe") != ""
 
 		// Preserve an existing record's CreatedAt so a converging retry doesn't
 		// reset it; existed also decides whether an unwind may delete the org.
 		prev, existed, err := s.GetOrg(ctx, body.OrgID)
 		if storeErr(w, err) {
 			return
+		}
+		if selfServe {
+			// NOTE the deliberate asymmetry with the admin path: an admin re-POST of an
+			// existing slug idempotently converges (adds the caller as admin), but a
+			// self-serve re-POST is a hard 409 — we must never adopt a caller onto an
+			// org they didn't create. The rare lost-response retry (registry committed,
+			// response dropped) therefore 409s here, but it self-heals: the next
+			// dashboard load resolves the now-committed membership via /v1/my/orgs and
+			// lands the user in their org rather than back on the create form.
+			if existed {
+				http.Error(w, "that organization ID is already taken", http.StatusConflict)
+				return
+			}
+			userOrgs, lerr := dir.ListUserOrgs(ctx, body.AdminUser)
+			if lerr != nil {
+				log.Printf("org self-serve create %s: list caller orgs for %s: %v", body.OrgID, body.AdminUser, lerr)
+				http.Error(w, "org create failed", http.StatusInternalServerError)
+				return
+			}
+			if len(userOrgs) > 0 {
+				http.Error(w, "you already belong to an organization", http.StatusConflict)
+				return
+			}
 		}
 
 		// Step 1: Keycloak organization (idempotent).

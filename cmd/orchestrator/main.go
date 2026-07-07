@@ -1337,6 +1337,56 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		json.NewEncoder(w).Encode(map[string]any{"orgs": orgs, "activeOrg": activeOrg, "isOrgAdmin": isOrgAdmin})
 	}))
 
+	// POST /v1/signup/org — SELF-SERVE org creation (multi-tenancy Phase 7). Unlike
+	// the platform-admin /v1/admin/orgs family (requireAdmin), this is only
+	// requireToken-gated: any authenticated user may create their FIRST org and
+	// become its admin. The first admin is ALWAYS the validated token sub
+	// (userIDFrom) — never a body field — so a caller can never create an org owned
+	// by someone else, and the registry's one-org-per-user + no-hijack guards ride
+	// on that server-derived identity. The client body carries only {orgId, name};
+	// we re-marshal it with adminUser stamped and forward to the registry's POST
+	// /v1/orgs choke point (same Keycloak+SpiceDB dual-write) with ?selfServe=1 so
+	// the registry applies the self-serve-only guards.
+	mux.HandleFunc("POST /v1/signup/org", requireToken(validator, audience, writeScope, func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		caller := userIDFrom(ctx)
+		var body struct {
+			OrgID string `json:"orgId"`
+			Name  string `json:"name"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		// adminUser is the token sub, stamped server-side; any adminUser in the body
+		// is structurally ignored (it is not a field we decode).
+		payload, err := json.Marshal(map[string]string{"orgId": body.OrgID, "name": body.Name, "adminUser": caller})
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		req2, err := http.NewRequestWithContext(ctx, "POST", registryURL+"/v1/orgs?selfServe=1", bytes.NewReader(payload))
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		req2.Header.Set("Content-Type", "application/json")
+		if t := controlPlaneBearer(); t != "" {
+			req2.Header.Set("Authorization", "Bearer "+t)
+		}
+		resp, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			http.Error(w, "registry unavailable", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		if ct := resp.Header.Get("Content-Type"); ct != "" {
+			w.Header().Set("Content-Type", ct)
+		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	}))
+
 	// Stored spawn consents: registry passthroughs for the dashboard's consent
 	// management view (list per user, revoke to force a re-prompt next spawn).
 	// The query string carries the dashboard's session-user scoping.
