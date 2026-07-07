@@ -98,6 +98,50 @@
     .current-user::before {
       content: "👤 ";
     }
+    .org-indicator::before { content: "🏢 "; }
+    .org-switcher {
+      font-size: 13px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      background: rgba(255,255,255,.08);
+      color: rgba(255,255,255,.9);
+      border: 1px solid rgba(255,255,255,.18);
+    }
+    :root[data-theme="light"] .org-switcher {
+      background: rgba(0,0,0,.04);
+      color: #1a1a2e;
+      border-color: rgba(0,0,0,.15);
+    }
+
+    /* Org gate overlay — full-viewport, blocks the dashboard for the no-org and
+       picker states. */
+    .org-gate {
+      position: fixed;
+      inset: 0;
+      z-index: 2000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(10,12,20,.92);
+      padding: 24px;
+    }
+    /* The [hidden] attribute must win over display:flex above — otherwise the
+       overlay stays in the layout and intercepts pointer events over the whole
+       dashboard even when it's "hidden". */
+    .org-gate[hidden] { display: none; }
+    .org-gate-card {
+      max-width: 460px;
+      width: 100%;
+      background: var(--card, #171a26);
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 12px;
+      padding: 28px 30px;
+      text-align: center;
+    }
+    .org-gate-card h2 { margin: 0 0 10px; font-size: 20px; }
+    .org-gate-card p { color: var(--text-dim, #9aa3b2); font-size: 14px; margin: 0 0 18px; }
+    .org-picker-list { display: flex; flex-direction: column; gap: 10px; }
+    .org-picker-list .btn { width: 100%; }
 
     header h1::before {
       content: '';
@@ -272,11 +316,13 @@
 
     .agent-row {
       display: grid;
-      grid-template-columns: minmax(180px, 250px) 130px 120px 130px 1fr;
+      grid-template-columns: minmax(180px, 250px) 130px 120px 130px 110px 1fr;
       align-items: center;
       gap: 12px;
       padding: 16px 20px;
     }
+    /* Owner (record userId) — a monospace label so it reads as an identity. */
+    .agent-owner { font-family: var(--mono); }
 
     .agent-id {
       font-family: var(--mono);
@@ -840,7 +886,7 @@
     .child-card .agent-row {
       padding: 16px 20px;
       /* Use exact same grid as parent for perfect alignment */
-      grid-template-columns: minmax(180px, 250px) 130px 120px 130px 1fr;
+      grid-template-columns: minmax(180px, 250px) 130px 120px 130px 110px 1fr;
     }
 
     /* ── Consent requests (CIBA) ── */
@@ -1059,6 +1105,12 @@
          local dev even if that fetch fails. -->
     <a class="btn btn-ghost" id="docs-link" href="http://localhost:4321" target="_blank" rel="noopener noreferrer">Docs ↗</a>
     <button class="btn btn-ghost theme-toggle" id="theme-toggle-btn" title="Toggle dark/light mode"></button>
+    <!-- Active org + switcher (multi-tenancy). Populated from /api/me. The switcher
+         is shown only when there is more than one destination (multiple orgs, or a
+         realm admin who can also pick Global). Changing it navigates to /switch-org,
+         which does a full re-auth into the new org. -->
+    <span id="org-indicator" class="current-user org-indicator" data-testid="active-org" hidden></span>
+    <select id="org-switcher" class="org-switcher" data-testid="org-switcher" hidden aria-label="Active organization"></select>
     <span id="current-user" class="current-user"></span>
     <form method="post" action="/logout" class="logout-form">
       <button class="btn btn-ghost" type="submit" id="logout-btn">Log out</button>
@@ -1076,6 +1128,38 @@
   </div>
   <div id="agent-list"></div>
 </main>
+
+<!-- Org gate overlay (multi-tenancy). Covers the page for the two states an
+     ordinary user can't act from: NO organization (0 orgs, non-admin) and the org
+     PICKER (>1 orgs, org-less session). A single-org non-admin is auto-selected
+     (redirected through /switch-org) and never sees this; a realm admin defaults to
+     the Global view and switches via the header dropdown. -->
+<div id="org-gate" class="org-gate" hidden>
+  <div class="org-gate-card">
+    <!-- No-organization message -->
+    <div id="org-gate-noorg" hidden data-testid="no-org-screen">
+      <h2>No organization</h2>
+      <p>Your account isn't a member of any organization yet. Ask an organization
+         admin to add you, then sign in again.</p>
+      <form method="post" action="/logout" class="logout-form">
+        <button class="btn btn-primary" type="submit" data-testid="no-org-logout">Log out</button>
+      </form>
+    </div>
+    <!-- Org picker -->
+    <div id="org-gate-picker" hidden data-testid="org-picker">
+      <h2>Choose an organization</h2>
+      <p>You belong to more than one organization. Pick one to continue.</p>
+      <div id="org-picker-list" class="org-picker-list"></div>
+    </div>
+    <!-- Soft error when the org list couldn't be loaded (don't strand the user on a
+         false no-org screen). -->
+    <div id="org-gate-error" hidden data-testid="org-gate-error">
+      <h2>Couldn't load your organizations</h2>
+      <p>Something went wrong reaching the platform. Try again.</p>
+      <button class="btn btn-primary" onclick="location.reload()">Reload</button>
+    </div>
+  </div>
+</div>
 
 <!-- Admin: Agent Types view (admin-only; hidden until /api/me isAdmin) -->
 <section class="admin-view" id="agent-types-view" hidden>
@@ -1896,6 +1980,13 @@
     return '';
   }
   function actionButtonsHtml(a) {
+    // canManage (from GET /api/agents, owner || org-admin) gates every MUTATING
+    // control. A same-org member viewing another member's agent sees it READ-ONLY:
+    // no revoke/kill/dismiss (and no chat/message — see buildCard). This is cosmetic
+    // only — the orchestrator enforces the same manage authority on every call, so a
+    // tampered client that re-adds a button still gets a 404. Absent canManage (an
+    // older payload) is treated as read-only, fail-closed.
+    if (!a.canManage) return '';
     return `
       <span id="revokewrap-${a.agentId}" data-state="${revokeState(a.status)}">${revokeBtnHtml(a.agentId, revokeState(a.status))}</span>
       <span id="killwrap-${a.agentId}">${isKillable(a.status) ? `<button class="btn btn-danger" data-testid="kill" onclick="handleKill('${a.agentId}')">Kill</button>` : ''}</span>
@@ -1941,6 +2032,7 @@
         <span class="agent-meta">${escHtml(a.agentType || '—')}</span>
         <span class="status-wrap">${statusBadge(a.status)}</span>
         <span class="agent-meta">${escHtml(a.tenantId || '—')}</span>
+        <span class="agent-meta agent-owner" title="owner">${escHtml(a.userId || '—')}</span>
         <div class="agent-actions">
           <button class="btn btn-events" id="evtbtn-${a.agentId}"
                   onclick="toggleEvents('${a.agentId}')">▼ Events</button>
@@ -1993,10 +2085,11 @@
         <span class="agent-meta">${escHtml(a.agentType || '—')}</span>
         <span class="status-wrap">${statusBadge(a.status)}</span>
         <span class="agent-meta">${escHtml(a.tenantId || '—')}</span>
+        <span class="agent-meta agent-owner" title="owner">${escHtml(a.userId || '—')}</span>
         <div class="agent-actions">
           <button class="btn btn-events" id="evtbtn-${a.agentId}"
                   onclick="toggleEvents('${a.agentId}')">▼ Events</button>
-          ${a.lifecycle === 'long-lived' && a.supportsChat ? `<button class="btn btn-chat" id="chatbtn-${a.agentId}" onclick="toggleChat('${a.agentId}')">💬 Chat</button>` : ''}
+          ${a.canManage && a.lifecycle === 'long-lived' && a.supportsChat ? `<button class="btn btn-chat" id="chatbtn-${a.agentId}" onclick="toggleChat('${a.agentId}')">💬 Chat</button>` : ''}
           ${actionButtonsHtml(a)}
         </div>
       </div>`;
@@ -2761,21 +2854,105 @@
     document.getElementById('consents-modal').classList.remove('open');
   });
 
-  // Show the logged-in user in the header. The page itself is only reachable
-  // with a session (the server redirects to /login otherwise), so this is just
-  // a label; a 401 here means the session lapsed, so bounce to login.
-  // Also surface isAdmin to toggle the admin-only "Agent Types" nav entry.
-  // The nav button is cosmetic convenience; the BFF/orchestrator gates are the
-  // real boundary, so a tampered client that unhides it still 403s on every call.
+  // ── Identity + org gate ───────────────────────────────────────────────────
+  // /api/me drives the whole login-into-org UX. It reports the session identity
+  // (user/isAdmin/activeOrg) plus the caller's org memberships (orgs/isOrgAdmin)
+  // from the orchestrator. The gate below decides between: the dashboard (in an
+  // org, or a realm admin's Global view), the no-organization screen, the org
+  // picker, or an auto-select redirect. Server gates are the real boundary — this
+  // is UX only, and the orchestrator 403/404s any call from the wrong org context.
+  const ORG_LABEL_GLOBAL = 'Global (no organization)';
+
+  function showGate(which) {
+    document.getElementById('org-gate-noorg').hidden = which !== 'noorg';
+    document.getElementById('org-gate-picker').hidden = which !== 'picker';
+    document.getElementById('org-gate-error').hidden = which !== 'error';
+    document.getElementById('org-gate').hidden = false;
+  }
+
+  function renderOrgSwitcher(orgs, activeOrg, isAdmin) {
+    // Destinations: each org the user belongs to, plus "Global" for a realm admin.
+    const dests = orgs.map(o => ({ value: o.orgId, label: o.name || o.orgId }));
+    if (isAdmin) dests.push({ value: '', label: ORG_LABEL_GLOBAL });
+    // Only worth showing when there's a real choice.
+    if (dests.length <= 1) return;
+    const sel = document.getElementById('org-switcher');
+    sel.innerHTML = dests.map(d =>
+      `<option value="${escHtml(d.value)}" ${d.value === (activeOrg || '') ? 'selected' : ''}>${escHtml(d.label)}</option>`
+    ).join('');
+    sel.hidden = false;
+    sel.addEventListener('change', () => {
+      const v = sel.value;
+      // A full re-auth into the chosen org (or Global when empty).
+      window.location = v ? `/switch-org?org=${encodeURIComponent(v)}` : '/switch-org';
+    });
+  }
+
   (async () => {
+    let me;
     try {
       const r = await fetch('/api/me');
       if (r.status === 401) { window.location = '/login'; return; }
-      if (!r.ok) return;
-      const me = await r.json();
-      if (me.user) document.getElementById('current-user').textContent = me.user;
-      if (me.isAdmin) document.getElementById('open-agent-types-btn').hidden = false;
-    } catch (_) {}
+      if (!r.ok) { showGate('error'); return; }
+      me = await r.json();
+    } catch (_) { showGate('error'); return; }
+
+    if (me.user) document.getElementById('current-user').textContent = me.user;
+    if (me.isAdmin) document.getElementById('open-agent-types-btn').hidden = false;
+
+    // Couldn't reach the org backend — don't strand the user on a false no-org
+    // screen; offer a reload instead.
+    if (me.orgsUnavailable) { showGate('error'); return; }
+
+    const orgs = Array.isArray(me.orgs) ? me.orgs : [];
+    const activeOrg = me.activeOrg || '';
+
+    if (activeOrg) {
+      // In an org: show it in the header + a switcher when there's a choice.
+      // Clear the auto-select loop guard — we resolved into an org successfully.
+      try { sessionStorage.removeItem('spawnly.autoOrg'); } catch (_) {}
+      const ind = document.getElementById('org-indicator');
+      const label = (orgs.find(o => o.orgId === activeOrg) || {}).name || activeOrg;
+      ind.textContent = label;
+      ind.hidden = false;
+      renderOrgSwitcher(orgs, activeOrg, me.isAdmin);
+      return; // dashboard proceeds
+    }
+
+    // Org-less session.
+    if (me.isAdmin) {
+      // Realm admin: the Global (org-less) view is legitimate. Label it + let them
+      // switch into any org via the dropdown.
+      const ind = document.getElementById('org-indicator');
+      ind.textContent = ORG_LABEL_GLOBAL;
+      ind.hidden = false;
+      renderOrgSwitcher(orgs, '', true);
+      return; // dashboard proceeds (global)
+    }
+
+    // Ordinary user, org-less: must resolve to an org.
+    if (orgs.length === 0) { showGate('noorg'); return; }
+    if (orgs.length === 1) {
+      // Auto-select the sole org via a re-auth. Loop guard: if we ALREADY tried
+      // to auto-select this org this tab-session but landed org-less again (the
+      // token isn't carrying the org claim for some reason), don't redirect
+      // forever — surface the error gate instead.
+      const only = orgs[0].orgId;
+      let tried = '';
+      try { tried = sessionStorage.getItem('spawnly.autoOrg') || ''; } catch (_) {}
+      if (tried === only) { showGate('error'); return; }
+      try { sessionStorage.setItem('spawnly.autoOrg', only); } catch (_) {}
+      window.location = `/switch-org?org=${encodeURIComponent(only)}`;
+      return;
+    }
+    // Multiple orgs: pick one.
+    const listEl = document.getElementById('org-picker-list');
+    listEl.innerHTML = orgs.map(o =>
+      `<button class="btn btn-primary" data-testid="org-pick" data-org="${escHtml(o.orgId)}">${escHtml(o.name || o.orgId)}</button>`
+    ).join('');
+    listEl.querySelectorAll('button[data-org]').forEach(b =>
+      b.addEventListener('click', () => { window.location = `/switch-org?org=${encodeURIComponent(b.dataset.org)}`; }));
+    showGate('picker');
   })();
 
   // Point the header Docs link at the env-specific docs origin (localhost:4321

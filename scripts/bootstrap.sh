@@ -347,6 +347,7 @@ KC_TF_DIR="$REPO_ROOT/deploy/keycloak"
   export TF_VAR_alice_password="alice"
   export TF_VAR_viewer_password="viewer"
   export TF_VAR_bob_password="bob"
+  export TF_VAR_nomad_password="nomad"
 
   terraform -chdir="$KC_TF_DIR" init -input=false >/dev/null
   terraform -chdir="$KC_TF_DIR" apply -input=false -auto-approve

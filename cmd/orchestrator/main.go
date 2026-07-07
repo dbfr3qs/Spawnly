@@ -41,18 +41,6 @@ import (
 // Tests set it to 0.
 var cascadeSettleDelay = 300 * time.Millisecond
 
-// enforceOrgSpawn gates the "non-admin human spawn REQUIRES an active org" rule.
-// It is a package-level seam (precedent: cascadeSettleDelay above, which tests
-// already flip) deliberately defaulting OFF for Phase 4: the dashboard cannot
-// request `organization:<alias>` scopes until Phase 5, so every non-admin human
-// token is still org-less and org-less non-admin spawn must keep WORKING (today's
-// behaviour). Phase 5 flips this true — and then removes the seam — once
-// single-org tokens exist, making a non-admin with no active org a 403. Org
-// derivation from the claim (req.OrgID = claims.OrgID) happens regardless of this
-// flag; the flag only controls the org-less REJECTION. See main_test.go, which
-// covers BOTH states.
-var enforceOrgSpawn = false
-
 type SpawnRequest struct {
 	AgentType string `json:"agentType"`
 	UserID    string `json:"userId"`
@@ -197,6 +185,21 @@ func canView(ctx context.Context, regClient registry.Client, sdb spicedb.Client,
 }
 func canManage(ctx context.Context, regClient registry.Client, sdb spicedb.Client, id, userId string) bool {
 	return agentAllowed(ctx, regClient, sdb, id, userId, actionManage)
+}
+
+// orgMemberCheck reports whether userId is a member (or admin — admin ⊇ member in
+// the schema) of org per SpiceDB, keyed by the SAME encoded subject the whole
+// authz layer uses (user:<EncodeObjectID(sub)>). It is the human-spawn
+// subject-consistency guard and the /v1/my/orgs active-org gate. Fail-closed: a
+// SpiceDB error or a genuine non-member both return false.
+func orgMemberCheck(ctx context.Context, sdb spicedb.Client, org, userId string) bool {
+	ok, err := sdb.CheckPermission(ctx,
+		"organization:"+spicedb.EncodeObjectID(org), "view_agents", "user:"+spicedb.EncodeObjectID(userId))
+	if err != nil {
+		log.Printf("orgMemberCheck: spicedb view_agents check for org %s user %s failed (fail-closed deny): %v", org, userId, err)
+		return false
+	}
+	return ok
 }
 
 // ctxKey is the private type for orchestrator request-context values.
@@ -446,14 +449,29 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			// token carrying an org claim always spawns into that org (admin or not).
 			// Empty when the token is org-less.
 			req.OrgID = claims.OrgID
-			// SEQUENCING (Phase 4): the dashboard can't request organization:<alias>
-			// scopes until Phase 5, so non-admin human tokens are all org-less today
-			// and must keep spawning. enforceOrgSpawn defaults OFF, so this rejection
-			// is dormant until Phase 5 flips it. When ON: a non-admin with no active
-			// org is refused; a realm admin keeps the org-less (global) spawn path.
-			if enforceOrgSpawn && req.OrgID == "" && !claims.HasRole("admin") {
+			// A non-admin human MUST have an active organization to spawn: as of
+			// Phase 5 the dashboard mints single-org tokens, so a non-admin with no
+			// active org is refused. A realm admin keeps the org-less (global) spawn
+			// path. tenantId (body primitive) + requiresTenant are unaffected below.
+			if req.OrgID == "" && !claims.HasRole("admin") {
 				log.Printf("spawn: non-admin user %s has no active organization", userID)
 				http.Error(w, "no active organization", http.StatusForbidden)
+				return
+			}
+			// Subject-consistency guard (defense in depth). Keycloak only issues an
+			// organization:<alias> claim to an ACTUAL member, so an org claim here
+			// means the caller is a member — and the SpiceDB membership tuples are
+			// keyed by the same token sub (username, via the dashboard sub=username
+			// mapper; agent tokens likewise carry sub=user:<username>). Re-check
+			// membership against SpiceDB, keyed by <sub>, before spawning into the org:
+			// if the claim says "member" but the check does NOT resolve, the sub no
+			// longer matches the membership-tuple convention (e.g. a future login path
+			// emitting a UUID sub) — fail LOUD rather than silently spawning into an
+			// org whose authorization layer can't see this subject. Fail-closed on a
+			// SpiceDB error (matches the list handler's stance).
+			if req.OrgID != "" && !orgMemberCheck(r.Context(), sdb, req.OrgID, userID) {
+				log.Printf("spawn: user %s carries org claim %q but is not a SpiceDB member (subject/tuple-key mismatch or removed member) — refusing", userID, req.OrgID)
+				http.Error(w, "organization membership could not be verified", http.StatusForbidden)
 				return
 			}
 		}
@@ -1067,6 +1085,59 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	mux.HandleFunc("DELETE /v1/admin/orgs/{id}/members/{user}", requireAdmin(validator, audience, writeScope, forwardToRegistry("DELETE", func(r *http.Request) string {
 		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members/" + url.PathEscape(r.PathValue("user"))
 	})))
+
+	// GET /v1/my/orgs — the CALLER's OWN org memberships (session-gated, NOT
+	// admin-gated). Powers the dashboard org picker / no-organization screen. The
+	// membership subject is the token sub (userIDFrom), NEVER a client param — a
+	// caller can only ever enumerate their OWN orgs, so this leaks no org existence.
+	// It enriches the registry's ?member= list (Keycloak-sourced membership) with
+	// two token-derived facts: the active org (the single-org claim) and whether the
+	// caller is that org's admin (one SpiceDB admin_agents check). Both are derived
+	// server-side from the validated token, so neither can be spoofed by the browser.
+	mux.HandleFunc("GET /v1/my/orgs", requireToken(validator, audience, readScope, func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		member := userIDFrom(ctx)
+		req2, err := http.NewRequestWithContext(ctx, "GET", registryURL+"/v1/orgs?member="+url.QueryEscape(member), nil)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if t := controlPlaneBearer(); t != "" {
+			req2.Header.Set("Authorization", "Bearer "+t)
+		}
+		resp, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			http.Error(w, "registry unavailable", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("my/orgs: registry ?member=%s returned %d", member, resp.StatusCode)
+			http.Error(w, "org list failed", http.StatusBadGateway)
+			return
+		}
+		var orgs []registry.Organization
+		if err := json.NewDecoder(resp.Body).Decode(&orgs); err != nil {
+			http.Error(w, "org list decode failed", http.StatusBadGateway)
+			return
+		}
+		if orgs == nil {
+			orgs = []registry.Organization{}
+		}
+		activeOrg := orgIDFrom(ctx)
+		isOrgAdmin := false
+		if activeOrg != "" {
+			ok, cerr := sdb.CheckPermission(ctx,
+				"organization:"+spicedb.EncodeObjectID(activeOrg), "admin_agents", "user:"+spicedb.EncodeObjectID(member))
+			if cerr != nil {
+				// Fail closed: an unreadable authority fact denies admin, never grants it.
+				log.Printf("my/orgs: admin_agents check for user %s org %s failed (treating as non-admin): %v", member, activeOrg, cerr)
+			}
+			isOrgAdmin = ok
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"orgs": orgs, "activeOrg": activeOrg, "isOrgAdmin": isOrgAdmin})
+	}))
 
 	// Stored spawn consents: registry passthroughs for the dashboard's consent
 	// management view (list per user, revoke to force a re-prompt next spawn).

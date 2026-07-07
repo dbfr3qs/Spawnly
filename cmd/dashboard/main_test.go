@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -452,39 +453,195 @@ func TestTemplateRoutesRequireAdminAtBFF(t *testing.T) {
 	}
 }
 
-// TestHandleMeReportsIsAdmin asserts /api/me returns isAdmin=true for an admin
-// session and isAdmin=false for an ordinary (non-admin) session — the UI gates
-// the Agent Types admin view on this flag.
-func TestHandleMeReportsIsAdmin(t *testing.T) {
-	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
-	a.sessions["admin-sid"] = session{username: "alice", isAdmin: true, expiresAt: time.Now().Add(time.Hour)}
-	a.sessions["viewer-sid"] = session{username: "viewer", isAdmin: false, expiresAt: time.Now().Add(time.Hour)}
+// meSession gives a session a live (non-expiring) token source so /api/me can
+// fetch /v1/my/orgs through the orchestrator stub.
+func meSession(s session) session {
+	oauth := &oauth2.Config{Endpoint: oauth2.Endpoint{TokenURL: "http://refresh.invalid/token"}}
+	s.tokenSrc = oauth.TokenSource(context.Background(), &oauth2.Token{AccessToken: "at-1", Expiry: time.Now().Add(time.Hour)})
+	s.expiresAt = time.Now().Add(time.Hour)
+	return s
+}
 
-	cases := []struct {
-		sid         string
-		wantUser    string
-		wantIsAdmin bool
-	}{
-		{"admin-sid", "alice", true},
-		{"viewer-sid", "viewer", false},
-	}
-	for _, tc := range cases {
+// TestApiMeComposesOrgs drives the composed GET /api/me: it merges the session
+// identity (user/isAdmin/activeOrg) with the orchestrator's /v1/my/orgs
+// (orgs/isOrgAdmin), and degrades to orgsUnavailable when the orchestrator errs.
+func TestApiMeComposesOrgs(t *testing.T) {
+	// Orchestrator stub: /v1/my/orgs echoes the caller's active org from the token —
+	// but the test controls the response per session via a switch on the bearer.
+	orch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/my/orgs" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"orgs":[{"orgId":"acme","name":"Acme"}],"activeOrg":"acme","isOrgAdmin":true}`))
+	}))
+	defer orch.Close()
+
+	a := stubAuth(&oauth2.Config{Endpoint: oauth2.Endpoint{TokenURL: "http://refresh.invalid/token"}})
+	a.sessions["admin-sid"] = meSession(session{username: "alice", isAdmin: true, activeOrg: "acme"})
+	a.sessions["viewer-sid"] = meSession(session{username: "viewer", isAdmin: false, activeOrg: "acme"})
+	mux := buildMux(a, orch.URL, "http://keycloak:8080", "http://docs", fstest.MapFS{})
+
+	get := func(sid string) map[string]any {
 		req := httptest.NewRequest("GET", "/api/me", nil)
-		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tc.sid})
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: sid})
 		rec := httptest.NewRecorder()
-		a.handleMe(rec, req)
+		mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("%s: status = %d, want 200", tc.sid, rec.Code)
+			t.Fatalf("%s: status = %d, want 200", sid, rec.Code)
 		}
 		var got map[string]any
 		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-			t.Fatalf("%s: decode: %v", tc.sid, err)
+			t.Fatalf("%s: decode: %v", sid, err)
 		}
-		if got["user"] != tc.wantUser {
-			t.Errorf("%s: user = %v, want %q", tc.sid, got["user"], tc.wantUser)
+		return got
+	}
+
+	admin := get("admin-sid")
+	if admin["user"] != "alice" || admin["isAdmin"] != true {
+		t.Errorf("admin identity wrong: %v", admin)
+	}
+	if admin["activeOrg"] != "acme" {
+		t.Errorf("activeOrg = %v, want acme", admin["activeOrg"])
+	}
+	if admin["isOrgAdmin"] != true {
+		t.Errorf("isOrgAdmin = %v, want true", admin["isOrgAdmin"])
+	}
+	orgs, _ := admin["orgs"].([]any)
+	if len(orgs) != 1 {
+		t.Errorf("orgs = %v, want one org", admin["orgs"])
+	}
+	if _, bad := admin["orgsUnavailable"]; bad {
+		t.Error("orgsUnavailable should be absent when the orchestrator answers")
+	}
+
+	viewer := get("viewer-sid")
+	if viewer["user"] != "viewer" || viewer["isAdmin"] != false {
+		t.Errorf("viewer identity wrong: %v", viewer)
+	}
+}
+
+// TestApiMeDegradesWhenOrchestratorDown proves /api/me still returns the session
+// identity with orgsUnavailable=true (not a false no-org screen) when the
+// orchestrator's /v1/my/orgs fails, rather than 5xx-ing the whole page.
+func TestApiMeDegradesWhenOrchestratorDown(t *testing.T) {
+	orch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusBadGateway)
+	}))
+	defer orch.Close()
+
+	a := stubAuth(&oauth2.Config{Endpoint: oauth2.Endpoint{TokenURL: "http://refresh.invalid/token"}})
+	a.sessions["sid"] = meSession(session{username: "alice", isAdmin: false, activeOrg: ""})
+	mux := buildMux(a, orch.URL, "http://keycloak:8080", "http://docs", fstest.MapFS{})
+
+	req := httptest.NewRequest("GET", "/api/me", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "sid"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (degrade, not fail)", rec.Code)
+	}
+	var got map[string]any
+	json.NewDecoder(rec.Body).Decode(&got)
+	if got["user"] != "alice" {
+		t.Errorf("user = %v, want alice", got["user"])
+	}
+	if got["orgsUnavailable"] != true {
+		t.Errorf("orgsUnavailable = %v, want true", got["orgsUnavailable"])
+	}
+}
+
+// TestHandleLoginOrgScope asserts /signin?org=<alias> requests the
+// organization:<alias> scope on the authorize redirect (per-login single-org
+// scope), and that an invalid alias is dropped (org-less) rather than injected.
+func TestHandleLoginOrgScope(t *testing.T) {
+	a := stubAuth(&oauth2.Config{
+		ClientID: "dashboard",
+		Endpoint: oauth2.Endpoint{AuthURL: "http://localhost:8090/realms/spawnly/protocol/openid-connect/auth"},
+		Scopes:   []string{"openid", "orchestrator:read", "orchestrator:write"},
+	})
+
+	scopeOf := func(target string) string {
+		req := httptest.NewRequest("GET", target, nil)
+		rec := httptest.NewRecorder()
+		a.handleLogin(rec, req)
+		loc := rec.Header().Get("Location")
+		u, err := url.Parse(loc)
+		if err != nil {
+			t.Fatalf("parse redirect %q: %v", loc, err)
 		}
-		if isAdmin, _ := got["isAdmin"].(bool); isAdmin != tc.wantIsAdmin {
-			t.Errorf("%s: isAdmin = %v, want %v", tc.sid, got["isAdmin"], tc.wantIsAdmin)
+		return u.Query().Get("scope")
+	}
+
+	if sc := scopeOf("/signin?org=acme"); !strings.Contains(sc, "organization:acme") {
+		t.Errorf("org login scope = %q, want it to contain organization:acme", sc)
+	}
+	// Invalid alias (uppercase/space) must NOT be spliced into the scope.
+	if sc := scopeOf("/signin?org=Acme%20Corp"); strings.Contains(sc, "organization:") {
+		t.Errorf("invalid org alias must be dropped, scope = %q", sc)
+	}
+	// No org param → no organization scope override (base scopes only).
+	if sc := scopeOf("/signin"); strings.Contains(sc, "organization:") {
+		t.Errorf("org-less login must not request an organization scope, scope = %q", sc)
+	}
+}
+
+// TestSwitchOrgReAuths asserts /switch-org clears the session and redirects to
+// /signin with the new org, so switching orgs is a full re-auth.
+func TestSwitchOrgReAuths(t *testing.T) {
+	a := stubAuth(&oauth2.Config{})
+	a.sessions["sid"] = session{username: "alice", activeOrg: "acme", expiresAt: time.Now().Add(time.Hour)}
+
+	req := httptest.NewRequest("GET", "/switch-org?org=globex", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "sid"})
+	rec := httptest.NewRecorder()
+	a.handleSwitchOrg(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/signin?org=globex" {
+		t.Errorf("redirect = %q, want /signin?org=globex", loc)
+	}
+	if _, ok := a.sessions["sid"]; ok {
+		t.Error("switch-org must delete the old session (its old-org token must not survive)")
+	}
+	// The session cookie must be cleared (MaxAge<0).
+	var cleared bool
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookie && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Error("session cookie was not cleared on switch-org")
+	}
+}
+
+// TestParseOrgClaim covers the fail-closed single-org extraction from an access
+// token's organization claim (the session's activeOrg source).
+func TestParseOrgClaim(t *testing.T) {
+	mk := func(orgJSON string) string {
+		payload := base64.RawURLEncoding.EncodeToString([]byte(`{"organization":` + orgJSON + `}`))
+		return "h." + payload + ".s"
+	}
+	cases := []struct {
+		name string
+		jwt  string
+		want string
+	}{
+		{"single-array", mk(`["acme"]`), "acme"},
+		{"multi-array fails closed", mk(`["acme","globex"]`), ""},
+		{"empty-array", mk(`[]`), ""},
+		{"map of one", mk(`{"acme":{}}`), "acme"},
+		{"string", mk(`"acme"`), "acme"},
+		{"absent", "h." + base64.RawURLEncoding.EncodeToString([]byte(`{}`)) + ".s", ""},
+		{"garbage", "not-a-jwt", ""},
+	}
+	for _, tc := range cases {
+		if got := parseOrgClaim(tc.jwt); got != tc.want {
+			t.Errorf("%s: parseOrgClaim = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }

@@ -101,3 +101,10 @@ variable "bob_password" {
   sensitive   = true
   default     = ""
 }
+
+variable "nomad_password" {
+  description = "Initial password for the non-admin user `nomad`, a member of NO organization (drives the dashboard 'no organization' screen in e2e). Empty => nomad not created."
+  type        = string
+  sensitive   = true
+  default     = ""
+}

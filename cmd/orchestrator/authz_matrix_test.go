@@ -90,8 +90,25 @@ func TestCanViewCanManage_Matrix(t *testing.T) {
 
 // spawnWithClaims drives the human /spawn path with the given claims and returns
 // the response recorder plus the SpawnRequest the registry saw at preregister
-// (captured OrgID/TenantID/UserID), so a test can assert what was derived.
+// (captured OrgID/TenantID/UserID). When the claims name an org it SEEDS the
+// caller's SpiceDB member tuple first — the realistic state (Keycloak only issues
+// an org claim to a member, and reseed-orgs writes the matching tuple), so the
+// human-path subject-consistency guard passes. Use spawnWithClaimsSDB to drive the
+// guard's negative path (org claim but no membership tuple).
 func spawnWithClaims(t *testing.T, claims tokenvalidator.Claims, body string) (*httptest.ResponseRecorder, registry.AgentRecord) {
+	t.Helper()
+	sdb := spicedb.NewMock()
+	if claims.OrgID != "" {
+		enc := spicedb.EncodeObjectID
+		user := strings.TrimPrefix(claims.User, "user:")
+		sdb.WriteRelationship(context.Background(), "organization:"+enc(claims.OrgID), "member", "user:"+enc(user))
+	}
+	return spawnWithClaimsSDB(t, claims, body, sdb)
+}
+
+// spawnWithClaimsSDB is spawnWithClaims with an explicit SpiceDB mock, so a test
+// can control whether the caller's org-membership tuple exists (the guard path).
+func spawnWithClaimsSDB(t *testing.T, claims tokenvalidator.Claims, body string, sdb spicedb.Client) (*httptest.ResponseRecorder, registry.AgentRecord) {
 	t.Helper()
 	var preregistered registry.AgentRecord
 	reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -113,7 +130,7 @@ func spawnWithClaims(t *testing.T, claims tokenvalidator.Claims, body string) (*
 	defer reg.Close()
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), spicedb.NewMock(), reg.URL,
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, reg.URL,
 		fakeValidator{claims: claims}, "orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
 
 	req := httptest.NewRequest("POST", "/spawn", strings.NewReader(body))
@@ -160,31 +177,111 @@ func TestSpawnHumanPath_RequiresTenantUntouched(t *testing.T) {
 	}
 }
 
-// TestSpawnHumanPath_EnforceOrgSpawnSeam covers BOTH states of the package seam:
-// OFF (Phase 4) org-less non-admin spawns as today; ON (Phase 5) org-less
-// non-admin is 403 while a realm admin keeps the org-less path.
-func TestSpawnHumanPath_EnforceOrgSpawnSeam(t *testing.T) {
+// TestSpawnHumanPath_OrgEnforcement pins the Phase-5 enforced state (the seam is
+// gone): an org-less NON-admin human is refused (403 "no active organization"),
+// while a realm admin keeps the org-less (global) spawn path.
+func TestSpawnHumanPath_OrgEnforcement(t *testing.T) {
 	nonAdmin := humanOrgClaims("frank", "", nil, "orchestrator:write")
 	admin := humanOrgClaims("alice", "", []string{"admin"}, "orchestrator:write")
 	body := `{"agentType":"worker","tenantId":"cust-1"}`
 
-	// Seam OFF (default): org-less non-admin spawn WORKS.
-	if enforceOrgSpawn {
-		t.Fatal("enforceOrgSpawn must default false in Phase 4")
-	}
-	if rec, pre := spawnWithClaims(t, nonAdmin, body); rec.Code != http.StatusAccepted || pre.OrgID != "" {
-		t.Fatalf("seam OFF: org-less non-admin should spawn org-less, got %d orgID=%q", rec.Code, pre.OrgID)
-	}
-
-	// Seam ON (Phase 5 behaviour): org-less non-admin → 403; admin still works.
-	enforceOrgSpawn = true
-	defer func() { enforceOrgSpawn = false }()
-
 	if rec, _ := spawnWithClaims(t, nonAdmin, body); rec.Code != http.StatusForbidden {
-		t.Errorf("seam ON: org-less non-admin: got %d, want 403", rec.Code)
+		t.Errorf("org-less non-admin: got %d, want 403", rec.Code)
 	}
 	if rec, pre := spawnWithClaims(t, admin, body); rec.Code != http.StatusAccepted || pre.OrgID != "" {
-		t.Errorf("seam ON: realm admin org-less spawn must still work, got %d orgID=%q", rec.Code, pre.OrgID)
+		t.Errorf("realm admin org-less spawn must still work, got %d orgID=%q", rec.Code, pre.OrgID)
+	}
+}
+
+// TestSpawnHumanPath_MembershipGuard proves the subject-consistency guard: a token
+// that CARRIES an org claim but whose sub does NOT resolve to a SpiceDB membership
+// tuple (the "future UUID-sub login path silently breaks org authz" scenario, or a
+// removed member on a stale claim) is refused 403 rather than spawning into an org
+// the authz layer can't police. spawnWithClaimsSDB uses an UNSEEDED mock, so the
+// member check fails.
+func TestSpawnHumanPath_MembershipGuard(t *testing.T) {
+	claims := humanOrgClaims("alice", "acme", nil, "orchestrator:write")
+	rec, pre := spawnWithClaimsSDB(t, claims, `{"agentType":"worker","tenantId":"cust-1"}`, spicedb.NewMock())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("org claim without a SpiceDB membership tuple must be refused, got %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	if pre.AgentID != "" {
+		t.Errorf("nothing should have been preregistered on a guard failure, got %+v", pre)
+	}
+}
+
+// --- GET /v1/my/orgs (org picker / no-org screen source) --------------------
+
+// myOrgsResp mirrors the orchestrator's GET /v1/my/orgs response shape.
+type myOrgsResp struct {
+	Orgs       []map[string]any `json:"orgs"`
+	ActiveOrg  string           `json:"activeOrg"`
+	IsOrgAdmin bool             `json:"isOrgAdmin"`
+}
+
+// TestMyOrgs verifies the session-gated my-orgs endpoint: it keys the registry
+// membership lookup on the TOKEN SUB (never a client param), surfaces the active
+// org from the claim, and resolves isOrgAdmin from SpiceDB for that active org.
+func TestMyOrgs(t *testing.T) {
+	// Registry stub: only alice is a member of acme; asserts the orchestrator asked
+	// for member=<sub> and nothing else.
+	var sawMember string
+	reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/orgs" {
+			http.NotFound(w, r)
+			return
+		}
+		sawMember = r.URL.Query().Get("member")
+		w.Header().Set("Content-Type", "application/json")
+		if sawMember == "alice" {
+			w.Write([]byte(`[{"orgId":"acme","name":"Acme"}]`))
+		} else {
+			w.Write([]byte(`[]`))
+		}
+	}))
+	defer reg.Close()
+
+	call := func(user, org, role string) (int, myOrgsResp) {
+		sdb := spicedb.NewMock()
+		enc := spicedb.EncodeObjectID
+		if role != "" {
+			sdb.WriteRelationship(context.Background(), "organization:"+enc(org), role, "user:"+enc(user))
+		}
+		fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+		mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, reg.URL,
+			fakeValidator{claims: humanOrgClaims(user, org, nil, "orchestrator:read")},
+			"orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
+		req := httptest.NewRequest("GET", "/v1/my/orgs", nil)
+		req.Header.Set("Authorization", "Bearer t")
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		var out myOrgsResp
+		json.NewDecoder(rr.Body).Decode(&out)
+		return rr.Code, out
+	}
+
+	// alice, active org acme, admin tuple → 1 org, activeOrg acme, isOrgAdmin true.
+	code, out := call("alice", "acme", "admin")
+	if code != http.StatusOK {
+		t.Fatalf("my/orgs: got %d", code)
+	}
+	if sawMember != "alice" {
+		t.Errorf("registry member param = %q, want the token sub alice", sawMember)
+	}
+	if len(out.Orgs) != 1 || out.Orgs[0]["orgId"] != "acme" {
+		t.Errorf("orgs = %v, want [acme]", out.Orgs)
+	}
+	if out.ActiveOrg != "acme" {
+		t.Errorf("activeOrg = %q, want acme", out.ActiveOrg)
+	}
+	if !out.IsOrgAdmin {
+		t.Error("isOrgAdmin should be true for the org admin")
+	}
+
+	// viewer as a plain member: isOrgAdmin false. (Registry stub returns [] for a
+	// non-alice member, which is fine — the assertion is on isOrgAdmin.)
+	if _, out := call("viewer", "acme", "member"); out.IsOrgAdmin {
+		t.Error("isOrgAdmin should be false for a plain member")
 	}
 }
 

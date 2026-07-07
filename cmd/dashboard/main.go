@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
@@ -143,6 +145,10 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	mux.HandleFunc("GET /signin", auth.handleLogin)
 	mux.HandleFunc("GET /callback", auth.handleCallback)
 	mux.HandleFunc("POST /logout", auth.handleLogout)
+	// Switch the active org via a full re-auth (re-auth-per-org). Public like
+	// /signin: it clears the current session and restarts the OIDC flow with the
+	// new org scope; Keycloak SSO makes the re-auth password-less.
+	mux.HandleFunc("GET /switch-org", auth.handleSwitchOrg)
 
 	// Static UI behind a session (browser GETs redirect to /signin when absent).
 	// Method-less so it doesn't conflict with the method-less OIDC proxy
@@ -187,9 +193,38 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 		}
 	}
 
-	mux.HandleFunc("GET /api/me", func(w http.ResponseWriter, r *http.Request) {
-		auth.require(http.HandlerFunc(auth.handleMe)).ServeHTTP(w, r)
-	})
+	// /api/me drives the org UX: the UI reads it on load to pick between the
+	// dashboard, the org picker, and the no-organization screen. It composes the
+	// session-derived identity (user/isAdmin/activeOrg) with the caller's org
+	// memberships fetched from the orchestrator's GET /v1/my/orgs (which keys on the
+	// session token's sub — the browser cannot ask about another user). On an
+	// orchestrator hiccup the org fields DEGRADE to empty with orgsUnavailable=true
+	// so the UI can show a soft retry rather than a false "no organization" screen.
+	mux.Handle("GET /api/me", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, _ := auth.user(r)
+		out := map[string]any{
+			"user":       user,
+			"isAdmin":    auth.isAdmin(r),
+			"activeOrg":  auth.activeOrg(r),
+			"orgs":       []any{},
+			"isOrgAdmin": false,
+		}
+		token, err := auth.orchestratorToken(r.Context(), r)
+		if err != nil {
+			log.Printf("api/me: no orchestrator token for orgs fetch: %v", err)
+			out["orgsUnavailable"] = true
+		} else if my, ferr := fetchMyOrgs(r.Context(), orchestratorURL, token); ferr != nil {
+			log.Printf("api/me: fetch my orgs: %v", ferr)
+			out["orgsUnavailable"] = true
+		} else {
+			out["orgs"] = my.Orgs
+			out["isOrgAdmin"] = my.IsOrgAdmin
+			// activeOrg is taken from the session (parsed from the same access token);
+			// my.ActiveOrg agrees. Keeping the session value avoids a second source.
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(out)
+	})))
 
 	// Client-side config the static UI reads on load (e.g. the env-specific docs
 	// link target). Behind a session like the rest of /api.
@@ -314,6 +349,39 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	})))
 
 	return mux
+}
+
+// myOrgs is the shape of the orchestrator's GET /v1/my/orgs response. Orgs stays a
+// list of raw objects (orgId/name/…) so the org fields pass through to the UI
+// without the dashboard needing the registry's Organization type.
+type myOrgs struct {
+	Orgs       []map[string]any `json:"orgs"`
+	ActiveOrg  string           `json:"activeOrg"`
+	IsOrgAdmin bool             `json:"isOrgAdmin"`
+}
+
+// fetchMyOrgs calls the orchestrator's session-gated GET /v1/my/orgs with the
+// session's delegated token. The orchestrator keys the membership lookup on the
+// token sub, so the result is exactly the caller's own orgs.
+func fetchMyOrgs(ctx context.Context, orchestratorURL, token string) (myOrgs, error) {
+	var out myOrgs
+	req, err := http.NewRequestWithContext(ctx, "GET", orchestratorURL+"/v1/my/orgs", nil)
+	if err != nil {
+		return out, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return out, fmt.Errorf("orchestrator /v1/my/orgs: status %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return out, err
+	}
+	return out, nil
 }
 
 // copyResponse copies an upstream response's status, headers, and body verbatim.

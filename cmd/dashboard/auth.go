@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -48,10 +50,24 @@ type Authenticator struct {
 	pending  map[string]pendingLogin // OIDC state -> PKCE verifier
 }
 
+// validOrgAlias is the org alias/slug charset (a DNS label) — the SAME shape the
+// registry enforces (cmd/registry/orgs.go validOrgID). Applied before an org
+// alias is spliced into an OAuth scope string (organization:<alias>) or a redirect
+// query, so a crafted value can never inject whitespace/newlines into the scope or
+// smuggle extra request params. An invalid alias is treated as org-less (dropped).
+var validOrgAlias = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
 type session struct {
 	username   string
 	rawIDToken string // kept for the logout id_token_hint
 	isAdmin    bool
+	// activeOrg is the single organization this session's token names (the
+	// `organization` claim), parsed from the access token at callback. "" for an
+	// org-less (global) session — a realm admin, or a fresh login before an org was
+	// picked. Single-org by construction: the dashboard requests organization:<alias>
+	// so the token names exactly one org (see handleLogin). The org picker / no-org
+	// screen (static UI) and /switch-org drive changes to it.
+	activeOrg string
 	// tokenSrc yields the delegated OAuth access token the dashboard presents to
 	// the orchestrator (audienced for "orchestrator", sub=userId, scope
 	// orchestrator:read/write). It is a ReuseTokenSource: it caches the current
@@ -155,8 +171,88 @@ func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true, Secure: forwardedHTTPS(r), SameSite: http.SameSiteLaxMode, MaxAge: 600,
 	})
 
-	authURL := a.oauth.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier))
+	opts := []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier)}
+	// Per-login single-org scope: when the login names an org (?org=<alias>, set by
+	// the picker / auto-select / /switch-org), request organization:<alias> so
+	// Keycloak stamps that single active org into the token. The scope set is thus
+	// per-login (not the static config list): base scopes + this one org. Keycloak
+	// only issues the claim if the user is actually a member — a non-member request
+	// yields an org-less token (verified against a live realm), so this cannot be
+	// used to claim an org the user does not belong to. Overriding the authorize
+	// "scope" param (SetAuthURLParam runs after AuthCodeURL sets it from Scopes) is
+	// what makes the scope per-login; the code exchange + refresh preserve the
+	// granted scopes, so the org rides the whole session without more plumbing.
+	if org := r.URL.Query().Get("org"); org != "" && validOrgAlias.MatchString(org) {
+		scopes := append(append([]string{}, a.oauth.Scopes...), "organization:"+org)
+		opts = append(opts, oauth2.SetAuthURLParam("scope", strings.Join(scopes, " ")))
+	}
+
+	authURL := a.oauth.AuthCodeURL(state, opts...)
 	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+// handleSwitchOrg switches the active org by a FULL re-auth (the settled
+// re-auth-per-org decision): it clears the current session — the old-org token
+// must not survive the switch — then re-runs /signin with the new org scope.
+// Keycloak SSO makes the re-auth password-less. An empty/omitted org switches to
+// the org-less (global) session (a realm admin picking "global"). The org alias is
+// validated in handleLogin before it reaches a scope string.
+func (a *Authenticator) handleSwitchOrg(w http.ResponseWriter, r *http.Request) {
+	if sid, err := r.Cookie(sessionCookie); err == nil && sid.Value != "" {
+		a.mu.Lock()
+		delete(a.sessions, sid.Value)
+		a.mu.Unlock()
+	}
+	clearCookie(w, sessionCookie, forwardedHTTPS(r))
+	target := "/signin"
+	if org := r.URL.Query().Get("org"); org != "" && validOrgAlias.MatchString(org) {
+		target += "?org=" + url.QueryEscape(org)
+	}
+	http.Redirect(w, r, target, http.StatusFound)
+}
+
+// parseOrgClaim extracts the single active org from a raw JWT's `organization`
+// claim, for the dashboard's OWN session bookkeeping (display + picker state). It
+// decodes the payload WITHOUT verifying the signature — the token is one the
+// dashboard just obtained from its own IdP over the back channel and only uses for
+// display; the orchestrator independently validates + re-derives the org for every
+// authorization decision, so this is never a trust boundary. Fail-closed and shape-
+// tolerant, mirroring tokenvalidator.parseOrgID: only a claim naming EXACTLY one
+// org yields it; zero, multiple, or an unparsable claim yields "" (org-less).
+func parseOrgClaim(rawJWT string) string {
+	parts := strings.Split(rawJWT, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		if payload, err = base64.URLEncoding.DecodeString(parts[1]); err != nil {
+			return ""
+		}
+	}
+	var claims struct {
+		Organization any `json:"organization"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	switch t := claims.Organization.(type) {
+	case []any:
+		if len(t) == 1 {
+			if s, ok := t[0].(string); ok {
+				return s
+			}
+		}
+	case map[string]any:
+		if len(t) == 1 {
+			for k := range t {
+				return k
+			}
+		}
+	case string:
+		return t
+	}
+	return ""
 }
 
 // handleCallback completes the flow: validate state, exchange the code, verify
@@ -226,8 +322,13 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// single request's lifetime; refresh runs against the discovered (internal)
 	// token endpoint, preserving split-horizon.
 	tokenSrc := a.oauth.TokenSource(context.Background(), tok)
+	// Record the session's active org from the ACCESS token's organization claim
+	// (the token the dashboard presents to the orchestrator, and the one that
+	// carries the org). "" for an org-less login; a single alias when an org scope
+	// was requested and the user is a member.
+	activeOrg := parseOrgClaim(tok.AccessToken)
 	a.mu.Lock()
-	a.sessions[sid] = session{username: username, isAdmin: isAdmin, rawIDToken: rawID, tokenSrc: tokenSrc, expiresAt: time.Now().Add(8 * time.Hour)}
+	a.sessions[sid] = session{username: username, isAdmin: isAdmin, activeOrg: activeOrg, rawIDToken: rawID, tokenSrc: tokenSrc, expiresAt: time.Now().Add(8 * time.Hour)}
 	a.mu.Unlock()
 
 	http.SetCookie(w, &http.Cookie{
@@ -273,14 +374,6 @@ func (a *Authenticator) realmPath() string {
 		return ""
 	}
 	return strings.TrimRight(u.Path, "/")
-}
-
-// handleMe reports the logged-in user and whether they are an admin (the UI
-// shows it, confirms the session, and gates the Agent Types admin view).
-func (a *Authenticator) handleMe(w http.ResponseWriter, r *http.Request) {
-	user, _ := a.user(r) // require() guarantees a session before this runs
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"user": user, "isAdmin": a.isAdmin(r)})
 }
 
 // require gates a handler behind a valid session. Unauthenticated API calls get
@@ -440,6 +533,26 @@ func (a *Authenticator) user(r *http.Request) (string, bool) {
 		return "", false
 	}
 	return s.username, true
+}
+
+// activeOrg returns the session's active organization alias (the token's
+// organization claim), or "" for an org-less session or no live session.
+func (a *Authenticator) activeOrg(r *http.Request) string {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil || c.Value == "" {
+		return ""
+	}
+	a.mu.Lock()
+	s, ok := a.sessions[c.Value]
+	if ok && time.Now().After(s.expiresAt) {
+		delete(a.sessions, c.Value)
+		ok = false
+	}
+	a.mu.Unlock()
+	if !ok {
+		return ""
+	}
+	return s.activeOrg
 }
 
 func (a *Authenticator) gcPendingLocked() {

@@ -66,6 +66,18 @@ func humanClaims(user string, scopes ...string) tokenvalidator.Claims {
 	}
 }
 
+// humanAdminClaims is humanClaims plus the realm `admin` role. As of Phase 5 a
+// non-admin human MUST have an active org to spawn, so spawn-MECHANICS tests
+// (workload creation, tenant guard, disabled template, agentType, task) use an
+// org-less admin — a fully supported global-spawn path — to exercise spawn
+// behaviour without seeding an org membership. Org-scoped spawn authz (the
+// non-admin org-member and cross-org paths) is covered in authz_matrix_test.go.
+func humanAdminClaims(user string, scopes ...string) tokenvalidator.Claims {
+	c := humanClaims(user, scopes...)
+	c.Roles = []string{"admin"}
+	return c
+}
+
 func newScheme() *runtime.Scheme {
 	s := runtime.NewScheme()
 	clientgoscheme.AddToScheme(s)
@@ -138,7 +150,7 @@ func TestSpawnHumanPathCreatesAgentWorkload(t *testing.T) {
 	// The fake validator returns a human token (no act, write scope). The
 	// handler must accept it as the human path and ignore the body UserID.
 	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL,
-		fakeValidator{claims: humanClaims("user-1", "orchestrator:write")},
+		fakeValidator{claims: humanAdminClaims("user-1", "orchestrator:write")},
 		"orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
 
 	body, _ := json.Marshal(SpawnRequest{
@@ -220,7 +232,7 @@ func TestSpawnPreregisterFailureAbortsSpawn(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), spicedb.NewMock(), mockReg.URL,
-		fakeValidator{claims: humanClaims("user-1", "orchestrator:write")},
+		fakeValidator{claims: humanAdminClaims("user-1", "orchestrator:write")},
 		"orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
 
 	body, _ := json.Marshal(SpawnRequest{AgentType: "worker", TenantID: "tenant-1"})
@@ -267,7 +279,7 @@ func TestSpawnCreateFailureReapsOrphan(t *testing.T) {
 			},
 		}).Build()
 	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), spicedb.NewMock(), mockReg.URL,
-		fakeValidator{claims: humanClaims("user-1", "orchestrator:write")},
+		fakeValidator{claims: humanAdminClaims("user-1", "orchestrator:write")},
 		"orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
 
 	body, _ := json.Marshal(SpawnRequest{AgentType: "worker", TenantID: "tenant-1"})
@@ -602,7 +614,7 @@ func TestSpawnMissingRequiredFields(t *testing.T) {
 	// Human token with write scope so the auth passes; the test then validates
 	// the agentType check (userId now comes from the token, not the body).
 	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL,
-		fakeValidator{claims: humanClaims("alice", "orchestrator:write")},
+		fakeValidator{claims: humanAdminClaims("alice", "orchestrator:write")},
 		"orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
 
 	// Missing agentType
@@ -722,7 +734,7 @@ func TestSpawnTenantPresenceGuard(t *testing.T) {
 
 			fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 			sdb := spicedb.NewMock()
-			mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: humanClaims("alice", "orchestrator:write")}, "orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
+			mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: humanAdminClaims("alice", "orchestrator:write")}, "orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
 
 			body, _ := json.Marshal(SpawnRequest{
 				AgentType: "worker",
@@ -787,7 +799,7 @@ func TestSpawnDisabledTemplateRejected(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: humanClaims("alice", "orchestrator:write", "orchestrator:read")}, "orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: humanAdminClaims("alice", "orchestrator:write", "orchestrator:read")}, "orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
 
 	body, _ := json.Marshal(SpawnRequest{
 		AgentType: "worker",
@@ -816,7 +828,7 @@ func TestSpawnRequiresAgentType(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: humanClaims("alice", "orchestrator:write", "orchestrator:read")}, "orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: humanAdminClaims("alice", "orchestrator:write", "orchestrator:read")}, "orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
 
 	// A spawn with no agentType is rejected: there is no default agent type.
 	body, _ := json.Marshal(map[string]string{"userId": "u1", "tenantId": "t1"})
@@ -843,7 +855,7 @@ func TestSpawnWithTask(t *testing.T) {
 
 	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
 	sdb := spicedb.NewMock()
-	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: humanClaims("alice", "orchestrator:write", "orchestrator:read")}, "orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, mockReg.URL, fakeValidator{claims: humanAdminClaims("alice", "orchestrator:write", "orchestrator:read")}, "orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
 
 	body, _ := json.Marshal(SpawnRequest{
 		AgentType: "worker",
