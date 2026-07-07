@@ -200,6 +200,17 @@ Open `http://localhost:8090` to watch events, spin up agents, and chat with long
 
 **Logging in.** The dashboard now requires a human login over OIDC. Visiting it without a session redirects to the Keycloak login page; sign in with the seeded demo user **`alice` / `alice`**. The logged-in identity becomes the `userId` on every agent you spawn (so the agent's access token carries `sub=user:alice`) — the spawn form no longer takes a free-text user. The **Log out** button in the header ends both the dashboard session and the Keycloak session. This is the machine-vs-human split: agents authenticate with SPIFFE JWT-SVIDs, while a person logs in with a username/password.
 
+**Seeded users & demo orgs.** Bootstrap seeds four users (`deploy/keycloak/users.tf`) and two demo **organizations** (`make reseed-orgs`); the password equals the username for each. Organizations are the SaaS business-account boundary — distinct from the per-agent `tenantId` primitive — and membership (member vs admin) drives authorization via SpiceDB.
+
+| User | Realm role | Org membership |
+| --- | --- | --- |
+| `alice` | `admin` (platform) | org **admin** of `acme` |
+| `viewer` | — | **member** of `acme` |
+| `bob` | — | org **admin** of `globex` (cross-org isolation) |
+| `nomad` | — | **no org** (shows the "no organization" screen) |
+
+A user's token is single-org (the dashboard requests the `organization:<alias>` scope); a multi-org user gets a picker and switches orgs by re-authenticating. `alice`, as a realm admin, additionally keeps the org-less "Global" view.
+
 **Reconnecting later?** If you just want the dashboard back — e.g. after a Docker/Kind restart drops the connection — run `make dash`. It repairs the kubeconfig (the control-plane container's IP can drift across restarts) and port-forwards the dashboard to `localhost:8090`, without re-running the bootstrap.
 
 ---
