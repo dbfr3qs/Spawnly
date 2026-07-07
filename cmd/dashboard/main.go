@@ -257,6 +257,42 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 		proxy("DELETE", orchestratorURL+"/v1/templates/"+url.PathEscape(r.PathValue("agentType")))(w, r)
 	})))
 
+	// Org onboarding + membership admin API (multi-tenancy Phase 3). Platform-admin
+	// only: requireAdmin gates every twin at this BFF tier (defense in depth with
+	// the orchestrator's requireAdmin). The proxy carries the session's delegated
+	// access token; the orchestrator forwards to the registry with its
+	// control-plane bearer. Org-admin self-service twins (/api/org/...) come in
+	// Phase 6.
+	mux.Handle("POST /api/admin/orgs", auth.requireAdmin(proxy("POST", orchestratorURL+"/v1/admin/orgs")))
+	mux.Handle("GET /api/admin/orgs", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target := orchestratorURL + "/v1/admin/orgs"
+		if m := r.URL.Query().Get("member"); m != "" {
+			target += "?member=" + url.QueryEscape(m)
+		}
+		proxy("GET", target)(w, r)
+	})))
+	mux.Handle("GET /api/admin/orgs/{id}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("GET", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id")))(w, r)
+	})))
+	mux.Handle("PATCH /api/admin/orgs/{id}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("PATCH", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id")))(w, r)
+	})))
+	mux.Handle("DELETE /api/admin/orgs/{id}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("DELETE", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id")))(w, r)
+	})))
+	mux.Handle("GET /api/admin/orgs/{id}/members", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("GET", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id"))+"/members")(w, r)
+	})))
+	mux.Handle("POST /api/admin/orgs/{id}/members", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("POST", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id"))+"/members")(w, r)
+	})))
+	mux.Handle("PATCH /api/admin/orgs/{id}/members/{user}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("PATCH", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id"))+"/members/"+url.PathEscape(r.PathValue("user")))(w, r)
+	})))
+	mux.Handle("DELETE /api/admin/orgs/{id}/members/{user}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("DELETE", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id"))+"/members/"+url.PathEscape(r.PathValue("user")))(w, r)
+	})))
+
 	// Stored spawn consents (management view). Scoped at the orchestrator to the
 	// token's user — the browser cannot list or revoke another user's grants.
 	mux.Handle("GET /api/consents", auth.require(proxy("GET", orchestratorURL+"/v1/consents")))

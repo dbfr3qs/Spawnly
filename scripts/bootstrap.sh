@@ -186,6 +186,24 @@ kubectl create secret generic control-plane-auth \
   --from-literal=token="${CP_TOKEN}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+# Org-admin client secret — the registry's org directory authenticates to
+# Keycloak's admin REST as the least-privilege `org-admin` service-account client
+# (multi-tenancy Phase 3). Created before the services so the registry has it at
+# start, and passed to Terraform below as the org-admin CLIENT secret so both
+# sides match by construction. Reuse an existing value across re-bootstraps;
+# generate one on first bootstrap. Never baked into an image.
+echo "==> Ensuring org-admin auth secret..."
+ORG_ADMIN_SECRET=$(kubectl get secret org-admin-auth -o jsonpath='{.data.secret}' 2>/dev/null | base64 -d 2>/dev/null || true)
+if [ -z "$ORG_ADMIN_SECRET" ]; then
+  ORG_ADMIN_SECRET=$(openssl rand -hex 32)
+  echo "  generated a new org-admin client secret"
+else
+  echo "  reusing existing org-admin client secret"
+fi
+kubectl create secret generic org-admin-auth \
+  --from-literal=secret="${ORG_ADMIN_SECRET}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 # Interactive dashboard login (local demo): alice/alice (the ADMIN user, who
 # can manage agent types), plus an optional non-admin viewer/viewer for
 # exercising authz-deny paths and e2e. The IdP reads these from the
@@ -325,8 +343,10 @@ KC_TF_DIR="$REPO_ROOT/deploy/keycloak"
   export TF_VAR_orchestrator_client_secret="orchestrator-secret"
   export TF_VAR_idp_consent_client_secret="idp-consent-secret"
   export TF_VAR_machine_client_secret="placeholder"
+  export TF_VAR_org_admin_client_secret="${ORG_ADMIN_SECRET}"
   export TF_VAR_alice_password="alice"
   export TF_VAR_viewer_password="viewer"
+  export TF_VAR_bob_password="bob"
 
   terraform -chdir="$KC_TF_DIR" init -input=false >/dev/null
   terraform -chdir="$KC_TF_DIR" apply -input=false -auto-approve
@@ -375,6 +395,13 @@ echo "  ai-provider secret applied (provider=${_AI_PROVIDER}, model=${_AI_MODEL}
 
 echo "==> Seeding agent templates..."
 "${REPO_ROOT}/scripts/seed.sh"
+
+# ── Demo organizations ─────────────────────────────────────────────────────────
+# Create the demo orgs (multi-tenancy Phase 3) through the registry's onboarding
+# API, which dual-writes Keycloak Organizations + SpiceDB tuples. Idempotent, so
+# safe on every re-bootstrap. Requires the realm (org-admin client) applied above.
+echo "==> Seeding demo organizations (acme, globex)..."
+"${REPO_ROOT}/scripts/reseed-orgs.sh"
 
 echo ""
 echo "Bootstrap complete."

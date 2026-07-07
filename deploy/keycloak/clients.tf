@@ -215,6 +215,61 @@ resource "keycloak_openid_client_optional_scopes" "idp_consent" {
   ]
 }
 
+# ---- org-admin: control-plane org directory client (client-credentials) ----
+# The registry's org onboarding + membership API (multi-tenancy Phase 3) writes
+# Keycloak Organizations/Users through THIS service-account client — the single
+# dual-write choke point over Keycloak + SpiceDB. It is LEAST-PRIVILEGE: its
+# service account is granted exactly two realm-management client roles
+# (manage-users, manage-realm), never the master/realm admin. The secret arrives
+# at runtime from the bootstrap-generated Secret (never baked into an image).
+resource "keycloak_openid_client" "org_admin" {
+  realm_id  = keycloak_realm.spawnly.id
+  client_id = "org-admin"
+  name      = "Spawnly Org Admin"
+
+  access_type                  = "CONFIDENTIAL"
+  service_accounts_enabled     = true
+  standard_flow_enabled        = false
+  implicit_flow_enabled        = false
+  direct_access_grants_enabled = false
+
+  client_secret = var.org_admin_client_secret
+
+  # EXCEPTION to the file-wide full_scope_allowed=false invariant: a
+  # service-account (client-credentials) token only carries the account's
+  # assigned roles when full scope is allowed — with it false, Keycloak filters
+  # the realm-management roles OUT of the token and every admin call 403s
+  # (verified against a live realm). Least privilege is preserved a different way
+  # here: the service account is assigned ONLY manage-users + manage-realm below,
+  # so full scope still admits just those two roles (plus the harmless default
+  # realm roles). This client never lists roles/orchestrator:* among any scope,
+  # so it cannot mint a human/agent-shaped token.
+  full_scope_allowed = true
+}
+
+# The built-in realm-management client, whose roles authorize admin-REST calls.
+data "keycloak_openid_client" "realm_management" {
+  realm_id  = keycloak_realm.spawnly.id
+  client_id = "realm-management"
+}
+
+# manage-users: create users (unknown-member invite), find users, org member
+# add/remove/list. manage-realm: organization CRUD. These two — and only these —
+# are the minimal set that authorizes every org-directory operation.
+resource "keycloak_openid_client_service_account_role" "org_admin_manage_users" {
+  realm_id                = keycloak_realm.spawnly.id
+  service_account_user_id = keycloak_openid_client.org_admin.service_account_user_id
+  client_id               = data.keycloak_openid_client.realm_management.id
+  role                    = "manage-users"
+}
+
+resource "keycloak_openid_client_service_account_role" "org_admin_manage_realm" {
+  realm_id                = keycloak_realm.spawnly.id
+  service_account_user_id = keycloak_openid_client.org_admin.service_account_user_id
+  client_id               = data.keycloak_openid_client.realm_management.id
+  role                    = "manage-realm"
+}
+
 # ===========================================================================
 # Machine (agent) clients — confidential client-credentials authenticated by
 # the custom "spawnly-attestation" client authenticator (Phase 1). An agent
@@ -400,6 +455,12 @@ resource "keycloak_openid_client_default_scopes" "orchestrator" {
 resource "keycloak_openid_client_default_scopes" "idp_consent" {
   realm_id       = keycloak_realm.spawnly.id
   client_id      = keycloak_openid_client.idp_consent.id
+  default_scopes = local.default_scopes_service_account
+}
+
+resource "keycloak_openid_client_default_scopes" "org_admin" {
+  realm_id       = keycloak_realm.spawnly.id
+  client_id      = keycloak_openid_client.org_admin.id
   default_scopes = local.default_scopes_service_account
 }
 

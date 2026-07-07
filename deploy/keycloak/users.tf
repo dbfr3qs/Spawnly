@@ -68,3 +68,27 @@ resource "keycloak_user" "viewer" {
   }
   # No admin role — the `role` claim is simply absent for this user.
 }
+
+# ---- bob: non-admin user, second org (globex) ------------------------------
+# Exercises cross-org isolation: bob is the org admin of `globex` (via the
+# Phase-3 onboarding API, SpiceDB tuple — NOT a realm role), so he must see none
+# of alice's `acme` agents. Same fail-closed count pattern as viewer.
+resource "keycloak_user" "bob" {
+  count = var.bob_password != "" ? 1 : 0
+
+  realm_id = keycloak_realm.spawnly.id
+  username = "bob"
+  enabled  = true
+
+  email          = "bob@example.com"
+  email_verified = true
+  first_name     = "Bob"
+  last_name      = "Builder"
+
+  initial_password {
+    value     = var.bob_password
+    temporary = false
+  }
+  # No realm admin role — bob's org-admin authority over globex is a SpiceDB
+  # tuple written by the onboarding API, not the realm `admin` role.
+}

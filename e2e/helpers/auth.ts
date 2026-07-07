@@ -29,6 +29,14 @@ export async function expectLoginForm(page: Page): Promise<void> {
 // redirects to the (proxied) Keycloak login page; fill it and submit. The
 // redirect chain lands back on the dashboard shell. Asserts success by waiting
 // for #agent-list, which only renders on the dashboard.
+//
+// Handles Keycloak's IDENTITY-FIRST (username-first) login: with realm
+// Organizations enabled, the browser flow presents username on the first screen
+// and password on a second (so it can detect an org's brokered IdP before
+// asking for a password). The password field is therefore not guaranteed to be
+// present alongside the username field — we submit the username and wait for the
+// password screen. If the deployment uses the classic single-screen form
+// (password already present), the same code path still works.
 export async function login(
   page: Page,
   user: string = DEMO_USER,
@@ -37,7 +45,14 @@ export async function login(
   await page.goto('/');
   await expect(page.locator(LOGIN_USERNAME)).toBeVisible({ timeout: 30_000 });
   await page.locator(LOGIN_USERNAME).fill(user);
-  await page.locator(LOGIN_PASSWORD).fill(pass);
+
+  const password = page.locator(LOGIN_PASSWORD);
+  if (!(await password.isVisible())) {
+    // Identity-first: submit the username to advance to the password screen.
+    await page.locator(LOGIN_SUBMIT).click();
+    await expect(password).toBeVisible({ timeout: 30_000 });
+  }
+  await password.fill(pass);
   await page.locator(LOGIN_SUBMIT).click();
   await expect(page.locator('#agent-list')).toBeVisible({ timeout: 30_000 });
 }

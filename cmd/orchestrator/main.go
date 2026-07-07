@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -908,6 +909,45 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	})))
 	mux.HandleFunc("DELETE /v1/templates/{agentType}", requireAdmin(validator, audience, writeScope, forwardToRegistry("DELETE", func(r *http.Request) string {
 		return "/v1/templates/" + r.PathValue("agentType")
+	})))
+
+	// Org onboarding + membership admin API (multi-tenancy Phase 3). PLATFORM-ADMIN
+	// ONLY: requireAdmin gates every route (role=admin on top of the delegated
+	// token), and forwardToRegistry carries the orchestrator's control-plane bearer
+	// so the registry's cp-gated org endpoints authorize. The registry is the
+	// single dual-write choke point (Keycloak + SpiceDB); the orchestrator only
+	// forwards. Org-admin self-service over their OWN org arrives in Phase 6.
+	mux.HandleFunc("POST /v1/admin/orgs", requireAdmin(validator, audience, writeScope, forwardToRegistry("POST", func(*http.Request) string {
+		return "/v1/orgs"
+	})))
+	// List orgs, or ?member=<user> to list one user's orgs. Only the `member`
+	// param is forwarded (re-escaped) so no other query can be smuggled through.
+	mux.HandleFunc("GET /v1/admin/orgs", requireAdmin(validator, audience, readScope, forwardToRegistry("GET", func(r *http.Request) string {
+		if m := r.URL.Query().Get("member"); m != "" {
+			return "/v1/orgs?member=" + url.QueryEscape(m)
+		}
+		return "/v1/orgs"
+	})))
+	mux.HandleFunc("GET /v1/admin/orgs/{id}", requireAdmin(validator, audience, readScope, forwardToRegistry("GET", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id"))
+	})))
+	mux.HandleFunc("PATCH /v1/admin/orgs/{id}", requireAdmin(validator, audience, writeScope, forwardToRegistry("PATCH", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id"))
+	})))
+	mux.HandleFunc("DELETE /v1/admin/orgs/{id}", requireAdmin(validator, audience, writeScope, forwardToRegistry("DELETE", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id"))
+	})))
+	mux.HandleFunc("GET /v1/admin/orgs/{id}/members", requireAdmin(validator, audience, readScope, forwardToRegistry("GET", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members"
+	})))
+	mux.HandleFunc("POST /v1/admin/orgs/{id}/members", requireAdmin(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members"
+	})))
+	mux.HandleFunc("PATCH /v1/admin/orgs/{id}/members/{user}", requireAdmin(validator, audience, writeScope, forwardToRegistry("PATCH", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members/" + url.PathEscape(r.PathValue("user"))
+	})))
+	mux.HandleFunc("DELETE /v1/admin/orgs/{id}/members/{user}", requireAdmin(validator, audience, writeScope, forwardToRegistry("DELETE", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members/" + url.PathEscape(r.PathValue("user"))
 	})))
 
 	// Stored spawn consents: registry passthroughs for the dashboard's consent

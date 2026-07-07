@@ -46,25 +46,60 @@ export async function mobileAccessToken(page: Page): Promise<string> {
     `${origin}/realms/spawnly/protocol/openid-connect/auth?${params.toString()}`,
     { redirect: 'manual' },
   );
+  // Cookie jar carried across the auth-flow requests (accumulates AUTH_SESSION_ID
+  // etc.; later steps refresh them).
+  const jar = new Map<string, string>();
+  const stash = (resp: Response) => {
+    for (const c of resp.headers.getSetCookie?.() ?? []) {
+      const pair = c.split(';')[0];
+      const eq = pair.indexOf('=');
+      if (eq > 0) jar.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+    }
+  };
+  const cookieHeader = () => [...jar].map(([k, v]) => `${k}=${v}`).join('; ');
+  const formAction = (html: string) =>
+    html.match(/id="kc-form-login"[\s\S]*?action="([^"]+)"/)?.[1]?.replace(/&amp;/g, '&');
+
   let location = authPage.headers.get('location');
   if (!(location && location.startsWith(redirectUri))) {
-    // Not already SSO'd → drive the login form.
-    const html = await authPage.text();
-    const action = html.match(/id="kc-form-login"[\s\S]*?action="([^"]+)"/)?.[1]?.replace(/&amp;/g, '&');
-    if (!action) throw new Error('mobile: could not find the Keycloak login form action on the authorize page');
-    const flowCookies = (authPage.headers.getSetCookie?.() ?? [])
-      .map((c) => c.split(';')[0])
-      .join('; ');
-    // 2. POST alice's credentials → 302 to the app's custom-scheme redirect
-    //    (spawnly://auth?code=…). redirect:'manual' captures the Location
-    //    without following the unfollowable scheme.
-    const loginResp = await fetch(action, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: flowCookies },
-      body: new URLSearchParams({ username: DEMO_USER, password: DEMO_PASS }).toString(),
-      redirect: 'manual',
-    });
-    location = loginResp.headers.get('location');
+    // Not already SSO'd → drive the login form(s). With realm Organizations
+    // enabled the flow is IDENTITY-FIRST: username on the first screen, password
+    // on a second (so Keycloak can broker an org's IdP before asking for a
+    // password). We walk each kc-form-login page, POSTing whichever fields it
+    // asks for and carrying the flow cookies forward, until Keycloak 302s to the
+    // app's custom-scheme redirect (spawnly://auth?code=…). A single-screen form
+    // (both fields at once) completes on the first iteration.
+    stash(authPage);
+    let html = await authPage.text();
+    for (let step = 0; step < 3; step++) {
+      const action = formAction(html);
+      if (!action) throw new Error('mobile: could not find the Keycloak login form action');
+      const form = new URLSearchParams();
+      if (/name="username"/.test(html)) form.set('username', DEMO_USER);
+      if (/name="password"/.test(html) || /type="password"/.test(html)) form.set('password', DEMO_PASS);
+
+      // redirect:'manual' captures the custom-scheme Location without following it.
+      let resp = await fetch(action, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookieHeader() },
+        body: form.toString(),
+        redirect: 'manual',
+      });
+      stash(resp);
+      location = resp.headers.get('location');
+      if (location && location.startsWith(redirectUri)) break;
+
+      // Not at the app yet → advance to the next screen. A 302 points at the
+      // next auth-flow GET (the identity-first password screen); a 200 already
+      // IS the next form. Fetch the next form's HTML either way.
+      if (location) {
+        resp = await fetch(location, { headers: { Cookie: cookieHeader() }, redirect: 'manual' });
+        stash(resp);
+        location = resp.headers.get('location');
+        if (location && location.startsWith(redirectUri)) break;
+      }
+      html = await resp.text();
+    }
   }
   if (!location || !location.startsWith(redirectUri)) {
     throw new Error(`mobile login did not redirect to the app (location ${location}); is the mobile client configured?`);

@@ -61,6 +61,26 @@ spec:
                   name: control-plane-auth
                   key: token
                   optional: true
+            # Org directory (multi-tenancy Phase 3): the registry writes Keycloak
+            # Organizations/Users through the least-privilege `org-admin`
+            # service-account client. The secret comes from the optional
+            # `org-admin-auth` Secret (bootstrap.sh generates it + passes the same
+            # value to Terraform as the org-admin client secret). When the Secret
+            # is absent (a raw apply with no bootstrap) ORG_ADMIN_CLIENT_SECRET is
+            # unset and the org endpoints are disabled (they 500) — the platform
+            # otherwise runs unchanged.
+            - name: KEYCLOAK_URL
+              value: "http://keycloak:8080"
+            - name: KEYCLOAK_REALM
+              value: "spawnly"
+            - name: ORG_ADMIN_CLIENT_ID
+              value: "org-admin"
+            - name: ORG_ADMIN_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: org-admin-auth
+                  key: secret
+                  optional: true
             # --- oidc tier ---
             # - name: CONTROL_PLANE_OIDC_JWKS_URL
             #   value: "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs"

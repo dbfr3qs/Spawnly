@@ -51,7 +51,7 @@ func (f *readFailStore) GetAgent(ctx context.Context, id string) (registry.Agent
 
 func allowAllMux(s registry.Store) http.Handler {
 	return buildMux(s, spicedb.NewMock(),
-		registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+		registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 }
 
 // --- Item 1: read-time consent-sweep backstop -------------------------------
@@ -216,7 +216,7 @@ func TestEventsEndpointAuth(t *testing.T) {
 	}
 
 	t.Run("gated tier (shared-secret)", func(t *testing.T) {
-		mux := buildMux(seed(), spicedb.NewMock(), verifier, controlplane.NewSharedSecret("sekrit"))
+		mux := buildMux(seed(), spicedb.NewMock(), verifier, controlplane.NewSharedSecret("sekrit"), testDir())
 
 		if c := post(mux, "/v1/agents/child/events", ""); c != http.StatusUnauthorized {
 			t.Errorf("no credential = %d, want 401", c)
@@ -254,7 +254,7 @@ func TestPreregisterRequiresControlPlaneAuth(t *testing.T) {
 	verifier := registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{})
 	body, _ := json.Marshal(registry.AgentRecord{AgentID: "ag", AgentType: "worker", UserID: "u1"})
 
-	mux := buildMux(newStore(), spicedb.NewMock(), verifier, controlplane.NewSharedSecret("sekrit"))
+	mux := buildMux(newStore(), spicedb.NewMock(), verifier, controlplane.NewSharedSecret("sekrit"), testDir())
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/agents/preregister", bytes.NewReader(body)))
 	if rec.Code != http.StatusUnauthorized {
@@ -280,7 +280,7 @@ func TestSelfRegisterCannotForgeParent(t *testing.T) {
 	s.registerAgent(registry.AgentRecord{AgentID: "attacker", AgentType: "worker", UserID: "u1", Status: "pending"})
 
 	verifier := registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{SpiffeID: "spiffe://example.org/attacker"})
-	mux := buildMux(s, spicedb.NewMock(), verifier, controlplane.NewSharedSecret("sekrit"))
+	mux := buildMux(s, spicedb.NewMock(), verifier, controlplane.NewSharedSecret("sekrit"), testDir())
 
 	// Self-register (SVID) trying to smuggle parentId=victim in the body.
 	regBody, _ := json.Marshal(map[string]string{"agentType": "worker", "parentId": "victim"})

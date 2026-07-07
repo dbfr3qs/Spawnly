@@ -34,8 +34,34 @@ endpoints resolve to the in-cluster backchannel host
   the six machine clients `weather-monitor` / `chain-worker` / `travel-planner`
   / `flight-search` / `hotel-search` / `fx-converter` (client-credentials with
   a placeholder secret; 120s token lifespan where Config.cs sets it).
-- **Users** — `alice` (realm role `admin`) and `viewer` (no role), created only
-  when their password variable is non-empty (fail-closed).
+- **Users** — `alice` (realm role `admin`), `viewer` and `bob` (no realm role),
+  created only when their password variable is non-empty (fail-closed). `bob` is
+  the org admin of the demo `globex` org — via a SpiceDB tuple written by the
+  onboarding API, NOT a realm role (see below).
+- **`org-admin` client** — a confidential client-credentials client the registry
+  uses to drive Keycloak Organizations/Users (multi-tenancy). Its service account
+  holds exactly two `realm-management` roles, `manage-users` + `manage-realm`
+  (never the master/realm admin). It is the *only* client with
+  `full_scope_allowed = true`, and deliberately so: a service-account token
+  carries its assigned roles only when full scope is allowed, so with it `false`
+  Keycloak filters the realm-management roles out and every admin call 403s.
+  Least privilege is preserved by the role *assignment* (just those two roles),
+  and the client lists no `roles`/`orchestrator:*` scope, so it cannot mint a
+  human/agent-shaped token.
+
+## Organizations — never edit membership in the Keycloak console
+
+Organization membership is a **dual-write**: it lives in Keycloak (who is in the
+org) AND in SpiceDB (the member-vs-admin authorization tuples), kept consistent
+by the registry's org onboarding API (`POST /v1/orgs`, `.../members`), which is
+the single choke point that writes both together with cleanup on partial
+failure. **Do not add, remove, or re-role org members directly in the Keycloak
+admin console** (or via raw admin REST): a console edit updates Keycloak but not
+SpiceDB, silently desyncing authorization from membership (a "member" the
+authz layer never sees, or a ghost admin tuple with no Keycloak membership). All
+membership changes must flow through the Spawnly control-plane API — on kind,
+`make reseed-orgs` (or the dashboard admin UI). Keycloak Organizations has no
+native per-org role, so the admin/member distinction is SpiceDB's alone.
 
 ## Security invariant
 

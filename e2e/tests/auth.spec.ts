@@ -30,11 +30,22 @@ test.describe('unauthenticated', () => {
     await page.goto('/');
     await expectLoginForm(page);
     await page.locator(LOGIN_USERNAME).fill(DEMO_USER);
-    await page.locator(LOGIN_PASSWORD).fill('wrong-password');
+    // Identity-first login: the password field appears on a second screen after
+    // submitting the username (realm Organizations enabled). Advance to it if
+    // it's not already present, then submit a wrong password.
+    const password = page.locator(LOGIN_PASSWORD);
+    if (!(await password.isVisible())) {
+      await page.locator(LOGIN_SUBMIT).click();
+      await expect(password).toBeVisible({ timeout: 30_000 });
+    }
+    await password.fill('wrong-password');
     await page.locator(LOGIN_SUBMIT).click();
-    // Still on the login page with an error; no dashboard, no session.
+    // Rejected: still on Keycloak's (identity-first) password screen with an
+    // error, never the dashboard, and no session. The error page shows the
+    // username read-only (no #username input) so we assert the rejection
+    // directly; #agent-list absence + the API 401 prove no session was set.
+    await expect(page.getByText('Invalid password.')).toBeVisible({ timeout: 30_000 });
     await expect(page.locator('#agent-list')).toHaveCount(0);
-    await expectLoginForm(page);
     const resp = await page.request.get('/api/agents');
     expect(resp.status()).toBe(401);
   });

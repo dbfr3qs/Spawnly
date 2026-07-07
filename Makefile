@@ -18,7 +18,7 @@ EXTRA_AGENTS  := keycloak weather-monitor
 MCP_SERVERS   := travel-tools
 SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS) $(EXTRA_AGENTS) $(MCP_SERVERS)
 
-.PHONY: build test test-provider test-dynamodb docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed print-% e2e-setup e2e mobile-dev
+.PHONY: build test test-provider test-dynamodb docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed reseed-orgs print-% e2e-setup e2e mobile-dev
 
 # print-<VAR> — echo a make variable so shell scripts can read the authoritative
 # lists instead of re-declaring them. e.g. `make -s print-SERVICES`.
@@ -148,6 +148,12 @@ logs-%:
 # Seeds every co-located template.json via scripts/seed.sh.
 reseed:
 	./scripts/seed.sh
+
+# reseed-orgs — re-create the demo organizations (acme, globex) through the
+# registry's onboarding API (Keycloak + SpiceDB dual-write). Idempotent; run
+# after a registry redeploy that lost its in-memory org records.
+reseed-orgs:
+	./scripts/reseed-orgs.sh
 
 port-forward:
 	@echo "Dashboard → http://localhost:8090  (Ctrl+C to stop)"

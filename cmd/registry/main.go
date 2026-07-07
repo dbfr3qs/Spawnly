@@ -9,6 +9,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -23,6 +24,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/spawnly/platform/internal/controlplane"
 	"github.com/spawnly/platform/internal/events"
+	"github.com/spawnly/platform/internal/orgdirectory"
+	"github.com/spawnly/platform/internal/orgdirectory/keycloak"
 	"github.com/spawnly/platform/internal/registrant"
 	"github.com/spawnly/platform/internal/registry"
 	"github.com/spawnly/platform/internal/registry/dynamostore"
@@ -832,7 +835,7 @@ func rejectInvalidUserID(w http.ResponseWriter, userID string) bool {
 	return true
 }
 
-func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier, cpAuth controlplane.Authenticator) http.Handler {
+func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier, cpAuth controlplane.Authenticator, dir orgdirectory.Directory) http.Handler {
 	mux := http.NewServeMux()
 
 	// Control-plane caller authentication for the consent lifecycle endpoints.
@@ -855,6 +858,11 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	}
 	// handleCP registers a consent-lifecycle handler behind the control-plane check.
 	handleCP := func(pattern string, h http.HandlerFunc) { mux.HandleFunc(pattern, cp(h)) }
+
+	// Org onboarding + membership control-plane API (multi-tenancy Phase 3). All
+	// org/membership mutation flows through here (registry = the single dual-write
+	// choke point over Keycloak + SpiceDB); every route is cp-gated.
+	registerOrgRoutes(mux, s, sdb, dir, cp)
 
 	// Template management (create/disable/delete) is a control-plane operation,
 	// so it sits behind the same control-plane authenticator as the consent
@@ -2125,6 +2133,8 @@ func main() {
 	// configured JWKS (any IdP), enforcing audience + scope.
 	cpAuth := buildControlPlaneAuth(ctx)
 
+	dir := buildOrgDirectory()
+
 	s := buildStore(ctx)
 	// Apply the active schema (default or SPICEDB_SCHEMA_PATH override) to whatever
 	// backend was selected. The schema is boot-time config every Store keeps in
@@ -2135,7 +2145,7 @@ func main() {
 		getEnv("STORE", "memory"), schemaSource, schemaVersion)
 	srv := &http.Server{
 		Addr:              ":8080",
-		Handler:           buildMux(s, sdb, verifier, cpAuth),
+		Handler:           buildMux(s, sdb, verifier, cpAuth, dir),
 		ReadHeaderTimeout: 10 * time.Second, // Slowloris defense; no risk to legit responses.
 		ReadTimeout:       30 * time.Second, // request bodies are all small JSON.
 		IdleTimeout:       120 * time.Second,
@@ -2223,4 +2233,52 @@ func buildControlPlaneAuth(ctx context.Context) controlplane.Authenticator {
 		log.Fatalf("unknown CONTROL_PLANE_AUTH %q", v)
 		return nil // unreachable
 	}
+}
+
+// buildOrgDirectory selects the org-membership directory backend. When
+// ORG_ADMIN_CLIENT_SECRET is set (the bootstrap-generated org-admin client
+// secret, deploy/keycloak + scripts/bootstrap.sh), it returns the Keycloak
+// admin-REST adapter authenticating as the least-privilege org-admin
+// service-account client. When unset — a bare `kubectl apply` with no org
+// onboarding, or the pre-Phase-3 demo — it returns a disabled directory whose
+// methods fail loudly, so the org endpoints 500 rather than silently corrupting
+// half a dual-write. The secret is NEVER read from a file or baked into an image.
+func buildOrgDirectory() orgdirectory.Directory {
+	secret := getEnv("ORG_ADMIN_CLIENT_SECRET", "")
+	if secret == "" {
+		log.Printf("org directory: ORG_ADMIN_CLIENT_SECRET unset — org endpoints disabled")
+		return disabledDirectory{}
+	}
+	base := getEnv("KEYCLOAK_URL", "http://keycloak:8080")
+	realm := getEnv("KEYCLOAK_REALM", "spawnly")
+	clientID := getEnv("ORG_ADMIN_CLIENT_ID", "org-admin")
+	log.Printf("org directory: keycloak admin-REST (base=%s realm=%s client=%s)", base, realm, clientID)
+	return keycloak.New(base, realm, clientID, secret, nil)
+}
+
+// disabledDirectory is the org directory when no org-admin credential is
+// configured. Every method fails, so an org endpoint returns 500 instead of
+// half-completing a Keycloak/SpiceDB dual-write.
+type disabledDirectory struct{}
+
+var errOrgDirectoryDisabled = errors.New("org directory not configured (ORG_ADMIN_CLIENT_SECRET unset)")
+
+func (disabledDirectory) CreateOrg(context.Context, string, string) error {
+	return errOrgDirectoryDisabled
+}
+func (disabledDirectory) DeleteOrg(context.Context, string) error { return errOrgDirectoryDisabled }
+func (disabledDirectory) AddMember(context.Context, string, string) error {
+	return errOrgDirectoryDisabled
+}
+func (disabledDirectory) RemoveMember(context.Context, string, string) error {
+	return errOrgDirectoryDisabled
+}
+func (disabledDirectory) SetRole(context.Context, string, string, string) error {
+	return errOrgDirectoryDisabled
+}
+func (disabledDirectory) ListMembers(context.Context, string) ([]orgdirectory.Member, error) {
+	return nil, errOrgDirectoryDisabled
+}
+func (disabledDirectory) ListUserOrgs(context.Context, string) ([]string, error) {
+	return nil, errOrgDirectoryDisabled
 }
