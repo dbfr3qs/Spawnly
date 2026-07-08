@@ -9,23 +9,20 @@ import { spawn, listAgents, type AgentSummary } from '../helpers/dashboard';
 import { killAgent } from '../helpers/cleanup';
 
 // switchOrg drives the header re-auth-per-org flow: navigate to /switch-org
-// (org omitted = Global), then complete the Keycloak (identity-first) form if it
-// re-prompts. Under realm Organizations the browser flow may ask for the username
-// again even with an SSO session, so we don't rely on it being password-less.
-async function switchOrg(page: Page, user: string, pass: string, org?: string) {
+// (org omitted = Global). The switch MUST be silent — the dashboard re-auths via
+// prompt=none against the live Keycloak SSO session, so no login form may ever
+// appear (that regression is exactly what dropping offline_access fixed: an
+// offline_access login made Keycloak 26.1+ delete the online session, forcing a
+// password on every switch). If Keycloak re-prompts, the assertion below fails
+// on the login form instead of silently typing the password.
+async function switchOrg(page: Page, org?: string) {
   await page.goto(org ? `/switch-org?org=${encodeURIComponent(org)}` : '/switch-org');
+  const list = page.locator('#agent-list');
   const uname = page.locator(LOGIN_USERNAME);
-  if (await uname.isVisible({ timeout: 8_000 }).catch(() => false)) {
-    await uname.fill(user);
-    const pw = page.locator(LOGIN_PASSWORD);
-    if (!(await pw.isVisible())) {
-      await page.locator(LOGIN_SUBMIT).click();
-      await expect(pw).toBeVisible({ timeout: 30_000 });
-    }
-    await pw.fill(pass);
-    await page.locator(LOGIN_SUBMIT).click();
-  }
-  await expect(page.locator('#agent-list')).toBeVisible({ timeout: 30_000 });
+  // Wait for the flow to settle on either outcome, then require it was silent.
+  await expect(list.or(uname).first()).toBeVisible({ timeout: 30_000 });
+  await expect(uname, 'org switch must be password-less (no login form)').not.toBeVisible();
+  await expect(list).toBeVisible();
 }
 
 // Poll the caller's list until the agent reaches a status (default: active), so
@@ -56,7 +53,7 @@ async function waitForListedStatus(
 //     404s);
 //   • an org admin manages every agent in the org;
 //   • a user in another org sees none of it (empty list, 404s);
-//   • switching orgs is a full re-auth;
+//   • switching orgs is a SILENT re-auth (prompt=none on the SSO session — no password);
 //   • an org-less non-admin gets the "no organization" screen and cannot spawn;
 //   • a realm admin keeps the org-less (Global) spawn path.
 
@@ -150,28 +147,28 @@ test.describe('organization isolation matrix', () => {
     expect((await bob.request.delete(`/api/agents/${acmeAgentId}`)).status()).toBe(404);
   });
 
-  test('switching orgs is a full re-auth (acme ↔ Global for the realm admin)', async () => {
+  test('switching orgs is a silent re-auth (acme ↔ Global for the realm admin)', async () => {
     // alice starts in acme.
     await alice.goto('/');
     await expect(alice.locator('[data-testid="active-org"]')).toContainText(/acme/i, {
       timeout: 30_000,
     });
 
-    // Switch to Global (org-less) — a full re-auth through /switch-org.
-    await switchOrg(alice, 'alice', 'alice');
+    // Switch to Global (org-less) — a silent (password-less) re-auth through /switch-org.
+    await switchOrg(alice);
     await expect(alice.locator('[data-testid="active-org"]')).toContainText(/global/i, {
       timeout: 30_000,
     });
 
     // Switch back into acme so the rest of the suite/cleanup runs as the acme admin.
-    await switchOrg(alice, 'alice', 'alice', 'acme');
+    await switchOrg(alice, 'acme');
     await expect(alice.locator('[data-testid="active-org"]')).toContainText(/acme/i, {
       timeout: 30_000,
     });
   });
 
   test('a realm admin keeps the org-less (Global) spawn path', async () => {
-    await switchOrg(alice, 'alice', 'alice'); // Global
+    await switchOrg(alice); // Global
     await expect(alice.locator('[data-testid="active-org"]')).toContainText(/global/i, {
       timeout: 30_000,
     });
@@ -183,7 +180,7 @@ test.describe('organization isolation matrix', () => {
       expect(rec.canManage).toBeTruthy();
     } finally {
       await killAgent(alice, globalId);
-      await switchOrg(alice, 'alice', 'alice', 'acme');
+      await switchOrg(alice, 'acme');
     }
   });
 });

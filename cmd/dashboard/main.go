@@ -180,8 +180,9 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 			if err != nil {
 				// The session is live but a fresh access token could NOT be obtained:
 				// the refresh failed (Keycloak token endpoint unreachable from the
-				// dashboard, offline_access not granted, or the refresh token revoked).
-				// A broken refresh looks like THIS (502), not a 401.
+				// dashboard, the SSO session expired past the realm idle/max window,
+				// or the refresh token revoked). A broken refresh looks like THIS
+				// (502), not a 401.
 				log.Printf("proxy %s %s: 502 could not obtain orchestrator token (refresh failed): %v", method, r.URL.Path, err)
 				http.Error(w, "auth unavailable", http.StatusBadGateway)
 				return

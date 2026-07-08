@@ -68,7 +68,23 @@ export async function login(
   // realm admin gets the Global view; a single-org non-admin is auto-selected into
   // their org by the client, both ending on the dashboard shell (#agent-list).
   await page.goto(org ? `/signin?org=${encodeURIComponent(org)}` : '/');
-  await expect(page.locator(LOGIN_USERNAME)).toBeVisible({ timeout: 30_000 });
+  // Two valid outcomes: the Keycloak login form (no SSO session — the normal
+  // fresh-context path), or a SILENT completion straight to the dashboard shell
+  // (the context already holds a live Keycloak SSO session; since the dashboard
+  // stopped requesting offline_access the online session survives login, so a
+  // second login() on the same context never re-prompts). In the silent case the
+  // SSO session dictates the user — assert it's the one the caller asked for,
+  // so a wrong-user silent login fails loudly instead of polluting the test.
+  const uname = page.locator(LOGIN_USERNAME);
+  const list = page.locator('#agent-list');
+  await expect(uname.or(list).first()).toBeVisible({ timeout: 30_000 });
+  if (await list.isVisible()) {
+    await expect(
+      page.locator('#current-user'),
+      `silent SSO login landed as the wrong user (wanted ${user}) — use a fresh context to log in as someone else`,
+    ).toHaveText(user, { timeout: 10_000 });
+    return;
+  }
   await page.locator(LOGIN_USERNAME).fill(user);
 
   const password = page.locator(LOGIN_PASSWORD);
@@ -89,7 +105,13 @@ export async function login(
 // owns closing the context.
 export async function contextFor(browser: Browser, user: string, org?: string) {
   const pass = USERS[user]?.pass ?? user;
-  const ctx = await browser.newContext();
+  // Empty storageState explicitly: browser.newContext() inherits the project's
+  // storageState (alice's session from auth.setup.ts) otherwise — and now that
+  // the Keycloak SSO session survives login (offline_access dropped), an
+  // inherited alice session would complete /signin SILENTLY as alice instead of
+  // prompting for this user. (Before the fix the dead SSO session forced a
+  // re-prompt, which masked the inheritance.)
+  const ctx = await browser.newContext({ storageState: { cookies: [], origins: [] } });
   const page = await ctx.newPage();
   await login(page, user, pass, org);
   await ctx.storageState({ path: authFile(org ? `${user}-${org}` : user) });

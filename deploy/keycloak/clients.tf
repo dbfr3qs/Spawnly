@@ -35,8 +35,11 @@ resource "keycloak_openid_client" "dashboard" {
   valid_redirect_uris             = ["${var.dashboard_origin}/callback"]
   valid_post_logout_redirect_uris = ["${var.dashboard_origin}/"]
 
-  # offline_access mints a refresh token so the backend keeps its short-lived
-  # orchestrator token fresh for the browser session (Config.cs AllowOfflineAccess).
+  # The backend keeps its short-lived orchestrator token fresh via an ONLINE
+  # refresh token (this flag), bounded by the realm's SSO windows (realm.tf).
+  # NOT offline_access: since Keycloak 26.1 (keycloak/keycloak#32650) an initial
+  # login with offline_access deletes the online SSO session, which broke the
+  # silent (prompt=none) org switch.
   use_refresh_tokens = true
 
   full_scope_allowed = false
@@ -58,13 +61,13 @@ resource "keycloak_openid_client_optional_scopes" "dashboard" {
 
   # NOTE: only `profile` is a Keycloak DEFAULT default-client-scope that must
   # NOT be listed here (the provider errors "already attached as a default
-  # scope"). `offline_access` is a default-OPTIONAL scope, so it MUST be listed
-  # among the optional scopes below — `keycloak_openid_client_optional_scopes`
-  # is authoritative and would otherwise DETACH it, killing the refresh token
-  # (dashboard session dies at the realm idle timeout instead of lasting the 8h
-  # session). See finding #3.
+  # scope"). `offline_access` is deliberately NOT attached: the dashboard must
+  # never mint offline tokens — an initial login with offline_access deletes the
+  # online SSO session on Keycloak 26.1+ (keycloak/keycloak#32650), breaking the
+  # silent org switch. Detaching it here makes that a hard guarantee even if a
+  # future login request asks for the scope. The dashboard's refresh token is the
+  # ONLINE one (use_refresh_tokens above), valid for the realm's SSO windows.
   optional_scopes = [
-    "offline_access",
     # Built-in scope Keycloak provisions when organizations_enabled=true
     # (realm.tf). Requesting `organization` (or `organization:<alias>` for a
     # single active org) makes the org membership mapper stamp the `organization`

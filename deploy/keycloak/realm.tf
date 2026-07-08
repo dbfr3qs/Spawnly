@@ -39,9 +39,24 @@ resource "keycloak_realm" "spawnly" {
 
   # Refresh-token rotation, one-time use. The mobile client relies on
   # rotation (Config.cs: RefreshTokenUsage.OneTimeOnly); enforcing it at the
-  # realm keeps the posture even for the dashboard's offline_access token.
+  # realm keeps the posture even for the dashboard's refresh token.
   revoke_refresh_token    = true
   refresh_token_max_reuse = 0
+
+  # ── SSO session windows ────────────────────────────────────────────────────
+  # The dashboard deliberately does NOT request offline_access: since Keycloak
+  # 26.1 (keycloak/keycloak#32650) an initial login with offline_access DELETES
+  # the online SSO session, which broke the silent (prompt=none) org switch —
+  # every switch fell back to a full username/password prompt. The dashboard's
+  # long-lived session therefore rides ONLINE refresh tokens, whose lifetime is
+  # bounded by these realm windows (Keycloak defaults: 30m idle / 10h max):
+  #   - idle 8h  = the dashboard's own sliding session window (cmd/dashboard
+  #     sessionTTL), so a user who walks away and returns within the dashboard
+  #     session can still refresh without a new login;
+  #   - max 24h = a hard daily cap on any single SSO session (active use past
+  #     24h re-authenticates), comfortably above the 8h sliding window.
+  sso_session_idle_timeout = "8h"
+  sso_session_max_lifespan = "24h"
 
   # ── CIBA policy (Phase 4) ────────────────────────────────────────────────
   # The realm's CIBA (Client-Initiated Backchannel Authentication) policy. These

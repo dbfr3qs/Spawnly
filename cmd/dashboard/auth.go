@@ -147,12 +147,23 @@ func (a *Authenticator) ensure(ctx context.Context) error {
 			// openid/profile drive the human's id_token; spawnly-roles carries the
 			// user's flat `role` claim (admin gating) into the id_token;
 			// orchestrator:read/write are the delegated authority the access token
-			// carries to the orchestrator; offline_access mints the refresh token
-			// that keeps it fresh for the session's lifetime. NOTE: the scope is
+			// carries to the orchestrator. NOTE: the scope is
 			// "spawnly-roles", not "roles" — Keycloak's built-in `roles` scope
 			// emits realm_access.roles; our flat `role` claim lives in a distinct
 			// scope (see deploy/keycloak/scopes.tf).
-			Scopes: []string{oidc.ScopeOpenID, "profile", "spawnly-roles", "orchestrator:read", "orchestrator:write", "offline_access"},
+			//
+			// offline_access is DELIBERATELY ABSENT. Since Keycloak 26.1
+			// (keycloak/keycloak#32650) requesting offline_access on the login that
+			// CREATES the session makes Keycloak delete the ONLINE SSO session and
+			// keep only the offline one — after which every prompt=none re-auth
+			// (the silent /switch-org path) returns login_required and the user is
+			// forced to type their password on every org switch. Without it the
+			// code exchange still returns an ONLINE refresh token (Keycloak's
+			// client-level "use refresh tokens" default), which the session's
+			// ReuseTokenSource rotates exactly as before; the realm's SSO idle/max
+			// windows (deploy/keycloak/realm.tf) are sized to cover the dashboard's
+			// 8h sliding session that offline tokens used to cover.
+			Scopes: []string{oidc.ScopeOpenID, "profile", "spawnly-roles", "orchestrator:read", "orchestrator:write"},
 		}
 
 		a.verifier = provider.Verifier(&oidc.Config{ClientID: a.clientID})
@@ -243,12 +254,13 @@ func (a *Authenticator) startAuth(w http.ResponseWriter, r *http.Request, org st
 // session (a realm admin picking "global"). The org alias is validated before it
 // reaches a scope string.
 //
-// The silent path engages on HTTPS: Keycloak's SSO cookies are Secure+SameSite=None
-// (SameSite=None mandates Secure), so a browser only sends them over https. Over
-// plain http (a bare kind cluster) they are held but never transmitted, so the
-// silent attempt returns login_required and this gracefully falls back to the
-// interactive login — i.e. no regression anywhere, password-less where TLS is
-// present (the real deploy behind the ALB).
+// The silent path works over both http (kind: localhost is a trustworthy origin,
+// so browsers do send Keycloak's Secure+SameSite=None SSO cookies) and https (the
+// AWS ALB). It only falls back to the interactive login when Keycloak genuinely
+// has no live SSO session — e.g. Keycloak restarted, or the session lapsed. (The
+// historical always-interactive behaviour was Keycloak 26.1+ deleting the online
+// session when offline_access was in the login scopes — see the Scopes comment in
+// ensure() — not cookie transport.)
 func (a *Authenticator) handleSwitchOrg(w http.ResponseWriter, r *http.Request) {
 	if err := a.ensure(r.Context()); err != nil {
 		http.Error(w, "auth unavailable: "+err.Error(), http.StatusBadGateway)
@@ -510,8 +522,10 @@ func (a *Authenticator) require(next http.Handler) http.Handler {
 // request extends the session's expiry to now+sessionTTL (see touchSession), so an
 // actively-used session never lapses, while an idle one still expires after this
 // window. 8h comfortably exceeds the "at least an hour" expectation; the 5-minute
-// access token is refreshed underneath it via the offline refresh token, so the
+// access token is refreshed underneath it via the (online) refresh token, so the
 // session's lifetime — not the access token's — governs how long a user stays in.
+// The realm's SSO idle window (deploy/keycloak/realm.tf) is sized to match, so an
+// idle-then-returning user within 8h still refreshes without a new login.
 const sessionTTL = 8 * time.Hour
 
 // touchSession looks up a live session by id and SLIDES its idle expiry to
