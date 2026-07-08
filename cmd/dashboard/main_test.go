@@ -673,6 +673,40 @@ func TestSilentSwitchFallback(t *testing.T) {
 	}
 }
 
+// TestTouchSessionSlides pins the sliding-idle-window behaviour: a live session's
+// expiry is pushed forward on each touch (so activity keeps a user signed in),
+// while an expired one is reaped and an absent one reports not-live.
+func TestTouchSessionSlides(t *testing.T) {
+	a := stubAuth(&oauth2.Config{})
+
+	// Live but expiring soon → touch slides it to ~now+sessionTTL and persists it.
+	a.sessions["sid"] = session{username: "alice", expiresAt: time.Now().Add(time.Minute)}
+	s, ok := a.touchSession("sid")
+	if !ok {
+		t.Fatal("live session should be found")
+	}
+	if time.Until(s.expiresAt) < sessionTTL-time.Minute {
+		t.Errorf("touchSession did not slide the window: expiry in %v, want ~%v", time.Until(s.expiresAt), sessionTTL)
+	}
+	if a.sessions["sid"].expiresAt != s.expiresAt {
+		t.Error("slid expiry was not persisted back to the session map")
+	}
+
+	// Past its idle window → not live, and reaped.
+	a.sessions["dead"] = session{username: "bob", expiresAt: time.Now().Add(-time.Minute)}
+	if _, ok := a.touchSession("dead"); ok {
+		t.Error("expired session must report not-live")
+	}
+	if _, present := a.sessions["dead"]; present {
+		t.Error("expired session should be reaped")
+	}
+
+	// Absent.
+	if _, ok := a.touchSession("nope"); ok {
+		t.Error("absent session must report not-live")
+	}
+}
+
 // TestParseOrgClaim covers the fail-closed single-org extraction from an access
 // token's organization claim (the session's activeOrg source).
 func TestParseOrgClaim(t *testing.T) {

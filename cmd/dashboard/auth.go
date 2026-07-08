@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -405,7 +406,7 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// was requested and the user is a member.
 	activeOrg := parseOrgClaim(tok.AccessToken)
 	a.mu.Lock()
-	a.sessions[sid] = session{username: username, isAdmin: isAdmin, activeOrg: activeOrg, rawIDToken: rawID, tokenSrc: tokenSrc, expiresAt: time.Now().Add(8 * time.Hour)}
+	a.sessions[sid] = session{username: username, isAdmin: isAdmin, activeOrg: activeOrg, rawIDToken: rawID, tokenSrc: tokenSrc, expiresAt: time.Now().Add(sessionTTL)}
 	a.mu.Unlock()
 
 	http.SetCookie(w, &http.Cookie{
@@ -468,11 +469,54 @@ func (a *Authenticator) require(next http.Handler) http.Handler {
 		// state and overwrite the cookie of the in-flight navigation, surfacing
 		// as an "invalid state" error on the callback.
 		if strings.HasPrefix(r.URL.Path, "/api/") || !isPageNavigation(r) {
+			// Diagnostic for the "401 after a while" class of report. An API 401 here
+			// (as opposed to the proxy's) means there was NO live session for the
+			// request. `cookie-present=true` narrows it to a LOST session — the
+			// dashboard pod restarted (in-memory sessions don't survive), it runs >1
+			// replica without shared sessions, or the session passed its idle window;
+			// `false` means the browser sent no session cookie (logged out, or the
+			// Secure cookie wasn't sent, e.g. over plain http).
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				cookiePresent := false
+				if ck, err := r.Cookie(sessionCookie); err == nil && ck.Value != "" {
+					cookiePresent = true
+				}
+				log.Printf("require %s: 401 no live dashboard session (session-cookie-present=%v)", r.URL.Path, cookiePresent)
+			}
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		http.Redirect(w, r, "/signin", http.StatusFound)
 	})
+}
+
+// sessionTTL is the dashboard session's SLIDING idle window. Every authenticated
+// request extends the session's expiry to now+sessionTTL (see touchSession), so an
+// actively-used session never lapses, while an idle one still expires after this
+// window. 8h comfortably exceeds the "at least an hour" expectation; the 5-minute
+// access token is refreshed underneath it via the offline refresh token, so the
+// session's lifetime — not the access token's — governs how long a user stays in.
+const sessionTTL = 8 * time.Hour
+
+// touchSession looks up a live session by id and SLIDES its idle expiry to
+// now+sessionTTL, returning the (updated) session. ok is false — and the entry is
+// reaped — when the session is absent or already past its idle window. This is the
+// single place session liveness is evaluated, so every authenticated entry point
+// (page loads via user(), API calls via orchestratorToken) slides the window.
+func (a *Authenticator) touchSession(sid string) (session, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s, ok := a.sessions[sid]
+	if !ok {
+		return session{}, false
+	}
+	if time.Now().After(s.expiresAt) {
+		delete(a.sessions, sid)
+		return session{}, false
+	}
+	s.expiresAt = time.Now().Add(sessionTTL)
+	a.sessions[sid] = s
+	return s, true
 }
 
 // isAdmin reports whether the request's session belongs to an admin user.
@@ -481,13 +525,7 @@ func (a *Authenticator) isAdmin(r *http.Request) bool {
 	if err != nil || c.Value == "" {
 		return false
 	}
-	a.mu.Lock()
-	s, ok := a.sessions[c.Value]
-	if ok && time.Now().After(s.expiresAt) {
-		delete(a.sessions, c.Value)
-		ok = false
-	}
-	a.mu.Unlock()
+	s, ok := a.touchSession(c.Value)
 	return ok && s.isAdmin
 }
 
@@ -567,13 +605,7 @@ func (a *Authenticator) orchestratorToken(ctx context.Context, r *http.Request) 
 	if err != nil || c.Value == "" {
 		return "", errNoSession
 	}
-	a.mu.Lock()
-	s, ok := a.sessions[c.Value]
-	if ok && time.Now().After(s.expiresAt) {
-		delete(a.sessions, c.Value)
-		ok = false
-	}
-	a.mu.Unlock()
+	s, ok := a.touchSession(c.Value)
 	if !ok {
 		return "", errNoSession
 	}
@@ -593,19 +625,14 @@ func (a *Authenticator) orchestratorToken(ctx context.Context, r *http.Request) 
 	return tok.AccessToken, nil
 }
 
-// user returns the logged-in username for the request, if any.
+// user returns the logged-in username for the request, if any. It slides the
+// session's idle window (page navigations count as activity).
 func (a *Authenticator) user(r *http.Request) (string, bool) {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil || c.Value == "" {
 		return "", false
 	}
-	a.mu.Lock()
-	s, ok := a.sessions[c.Value]
-	if ok && time.Now().After(s.expiresAt) {
-		delete(a.sessions, c.Value)
-		ok = false
-	}
-	a.mu.Unlock()
+	s, ok := a.touchSession(c.Value)
 	if !ok {
 		return "", false
 	}

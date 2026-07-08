@@ -167,10 +167,22 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 		return func(w http.ResponseWriter, r *http.Request) {
 			token, err := auth.orchestratorToken(r.Context(), r)
 			if errors.Is(err, errNoSession) {
+				// No live dashboard session for this cookie. Distinguishes a
+				// session-loss 401 (the dashboard pod restarted and wiped its
+				// in-memory sessions, a >1-replica deploy without shared sessions, or
+				// an expired/absent cookie) from the refresh-failure 502 just below —
+				// the two have completely different fixes. Diagnostic only; the 401 is
+				// unchanged.
+				log.Printf("proxy %s %s: 401 no dashboard session (cookie missing/expired, or the dashboard pod restarted / runs >1 replica and lost the in-memory session)", method, r.URL.Path)
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
 			if err != nil {
+				// The session is live but a fresh access token could NOT be obtained:
+				// the refresh failed (Keycloak token endpoint unreachable from the
+				// dashboard, offline_access not granted, or the refresh token revoked).
+				// A broken refresh looks like THIS (502), not a 401.
+				log.Printf("proxy %s %s: 502 could not obtain orchestrator token (refresh failed): %v", method, r.URL.Path, err)
 				http.Error(w, "auth unavailable", http.StatusBadGateway)
 				return
 			}
@@ -189,6 +201,13 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 				return
 			}
 			defer resp.Body.Close()
+			// Live session + a token the dashboard accepted, yet the orchestrator
+			// rejected it: the forwarded access token was stale/invalid upstream — a
+			// distinct failure from the two above. Logged so a forwarded 401 is
+			// distinguishable from the dashboard's own no-session 401.
+			if resp.StatusCode == http.StatusUnauthorized {
+				log.Printf("proxy %s %s: orchestrator returned 401 (forwarded) — the access token was rejected upstream", method, r.URL.Path)
+			}
 			copyResponse(w, resp)
 		}
 	}
