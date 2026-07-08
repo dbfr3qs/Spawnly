@@ -126,6 +126,16 @@ jobs:
             https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz \
             | tar -xz kubeconform
           sudo mv kubeconform /usr/local/bin/
+      # Schemas are fetched from raw.githubusercontent.com, which throttles the
+      # shared runner IPs (429 → "giving up after 3 attempt(s)" on random
+      # kinds). Cache the downloaded schemas across runs so a warm run makes no
+      # network calls at all; on a cold/partial cache the retry loop below
+      # converges because -cache persists every schema that DID download.
+      - name: cache kubeconform schemas
+        uses: actions/cache@v4
+        with:
+          path: .kubeconform-cache
+          key: kubeconform-schemas-v1.31.0
       # -ignore-missing-schemas: the CRD-typed AgentWorkload resources have no
       # published schema. -strict catches unknown fields in the core resources.
       # -skip: the strict standalone schema catalog has NO schema for
@@ -134,9 +144,18 @@ jobs:
       # (kustomization.yaml is kustomize build input, not a cluster resource),
       # so those two kinds are unvalidatable here by construction and must be
       # skipped explicitly rather than relying on 404s being soft errors.
+      # -n 2 keeps the schema-host request rate low to dodge the throttling.
       - name: kubeconform deploy/
         run: |
-          kubeconform -strict -summary -ignore-missing-schemas \
-            -kubernetes-version 1.31.0 \
-            -skip CustomResourceDefinition,Kustomization \
-            deploy/crds/ deploy/manifests/
+          mkdir -p .kubeconform-cache
+          for attempt in 1 2 3; do
+            kubeconform -strict -summary -ignore-missing-schemas \
+              -kubernetes-version 1.31.0 \
+              -skip CustomResourceDefinition,Kustomization \
+              -cache .kubeconform-cache \
+              -n 2 \
+              deploy/crds/ deploy/manifests/ && exit 0
+            echo "kubeconform failed (attempt ${attempt}) — schema host likely throttling; retrying"
+            sleep 20
+          done
+          exit 1
