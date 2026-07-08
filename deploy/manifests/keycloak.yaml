@@ -5,6 +5,18 @@ metadata:
   namespace: default
 spec:
   replicas: 1
+  # Recreate (NOT the default RollingUpdate): terminate the old Keycloak pod
+  # BEFORE starting the new one. Keycloak 26 forms a clustered Infinispan session
+  # cache and discovers peers via JDBC_PING (a table in the DB). A RollingUpdate
+  # surges a second pod, so the old + new pods briefly cluster; when the old one
+  # leaves, its distributed session shards are lost and a stale JDBC_PING entry
+  # lingers (the survivor loops on "Connection refused"), so live SSO sessions
+  # become unretrievable → prompt=none returns login_required and the silent org
+  # switch (and any active login) breaks. With a single replica we never want two
+  # nodes clustering; Recreate guarantees exactly one node, at the cost of a brief
+  # IdP blip on redeploy (acceptable for a single-replica IdP).
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: keycloak
