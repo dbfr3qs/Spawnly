@@ -6,15 +6,10 @@ metadata:
 spec:
   replicas: 1
   # Recreate (NOT the default RollingUpdate): terminate the old Keycloak pod
-  # BEFORE starting the new one. Keycloak 26 forms a clustered Infinispan session
-  # cache and discovers peers via JDBC_PING (a table in the DB). A RollingUpdate
-  # surges a second pod, so the old + new pods briefly cluster; when the old one
-  # leaves, its distributed session shards are lost and a stale JDBC_PING entry
-  # lingers (the survivor loops on "Connection refused"), so live SSO sessions
-  # become unretrievable → prompt=none returns login_required and the silent org
-  # switch (and any active login) breaks. With a single replica we never want two
-  # nodes clustering; Recreate guarantees exactly one node, at the cost of a brief
-  # IdP blip on redeploy (acceptable for a single-replica IdP).
+  # BEFORE starting the new one, so a redeploy never runs two pods at once.
+  # Belt-and-suspenders alongside the local cache below (see `--cache=local` in
+  # args): with local caching there is no cluster to corrupt, but Recreate still
+  # avoids a redeploy blip and keeps exactly one node.
   strategy:
     type: Recreate
   selector:
@@ -32,7 +27,20 @@ spec:
           # starts with `start --optimized`.
           image: agent-keycloak:latest
           imagePullPolicy: Never
-          args: ["start", "--optimized"]
+          # --cache=local: run a LOCAL (non-clustered) Infinispan cache. This is
+          # the fix for the silent-org-switch / prompt=none=login_required bug.
+          # Keycloak 26 AUTO-enables clustered caching with JDBC_PING peer
+          # discovery whenever a real JDBC database is configured (KC_DB=postgres
+          # on AWS/RDS) — nobody configured it explicitly. On a single replica the
+          # clustered distributed session cache loses live SSO sessions (browser
+          # sends a valid KEYCLOAK_IDENTITY, Keycloak finds no session → clears it
+          # → login_required), even on a clean 1-node cluster with 0 restarts.
+          # kind never hit this because dev-file/H2 stays local. Sessions are
+          # DB-backed by KC 26 persistent-user-sessions regardless, so local cache
+          # is correct AND durable for one replica. CAVEAT: to run >1 replica (true
+          # HA) or move Keycloak off EKS, remove this and switch peer discovery to
+          # DNS_PING + a headless Service (see the keycloak-clustering-ha note).
+          args: ["start", "--optimized", "--cache=local"]
           env:
             # Bootstrap admin — created on first start of an empty DB. Comes from
             # the `keycloak-admin` Secret that bootstrap.sh generates (never a
