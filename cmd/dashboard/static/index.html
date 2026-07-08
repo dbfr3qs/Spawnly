@@ -112,6 +112,14 @@
       color: #1a1a2e;
       border-color: rgba(0,0,0,.15);
     }
+    /* The open dropdown's <option> popup is drawn by the browser on a
+       system/opaque surface — without an explicit colour it inherits the
+       switcher's near-white text and renders white-on-white. Pin both to the
+       theme surface so unselected options stay legible in light and dark. */
+    .org-switcher option {
+      background: var(--card);
+      color: var(--text);
+    }
 
     /* Org gate overlay — full-viewport, blocks the dashboard for the no-org and
        picker states. */

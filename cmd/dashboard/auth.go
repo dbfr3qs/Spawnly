@@ -81,6 +81,15 @@ type session struct {
 type pendingLogin struct {
 	verifier  string
 	createdAt time.Time
+	// org is the organization this flow requests (organization:<alias> scope), or
+	// "" for an org-less/global login. Kept so a silent-attempt fallback can
+	// re-drive the SAME org interactively.
+	org string
+	// silent marks an org-switch that tried prompt=none (no user interaction,
+	// reusing the existing Keycloak SSO session). When Keycloak answers that it
+	// can't complete without interaction, the callback falls back to an
+	// interactive login for `org` instead of erroring.
+	silent bool
 }
 
 const (
@@ -150,18 +159,32 @@ func (a *Authenticator) ensure(ctx context.Context) error {
 	return a.initErr
 }
 
-// handleLogin starts the authorization-code+PKCE flow.
+// handleLogin starts the (interactive) authorization-code+PKCE flow, reading the
+// optional ?org=<alias> to request a single-org token.
 func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err := a.ensure(r.Context()); err != nil {
 		http.Error(w, "auth unavailable: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+	org := ""
+	if o := r.URL.Query().Get("org"); o != "" && validOrgAlias.MatchString(o) {
+		org = o
+	}
+	a.startAuth(w, r, org, false, "")
+}
 
+// startAuth begins the auth-code+PKCE flow for org (may be "" for org-less).
+// When silent, it adds prompt=none (+ login_hint) so an EXISTING Keycloak SSO
+// session yields a fresh single-org token with NO user interaction; if Keycloak
+// answers that it can't complete silently, handleCallback falls back to an
+// interactive login for the same org. hint is the login_hint (the current
+// username) — only meaningful when silent.
+func (a *Authenticator) startAuth(w http.ResponseWriter, r *http.Request, org string, silent bool, hint string) {
 	state := randToken()
 	verifier := oauth2.GenerateVerifier()
 
 	a.mu.Lock()
-	a.pending[state] = pendingLogin{verifier: verifier, createdAt: time.Now()}
+	a.pending[state] = pendingLogin{verifier: verifier, createdAt: time.Now(), org: org, silent: silent}
 	a.gcPendingLocked()
 	a.mu.Unlock()
 
@@ -172,43 +195,78 @@ func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 
 	opts := []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier)}
-	// Per-login single-org scope: when the login names an org (?org=<alias>, set by
-	// the picker / auto-select / /switch-org), request organization:<alias> so
-	// Keycloak stamps that single active org into the token. The scope set is thus
-	// per-login (not the static config list): base scopes + this one org. Keycloak
-	// only issues the claim if the user is actually a member — a non-member request
-	// yields an org-less token (verified against a live realm), so this cannot be
-	// used to claim an org the user does not belong to. Overriding the authorize
-	// "scope" param (SetAuthURLParam runs after AuthCodeURL sets it from Scopes) is
-	// what makes the scope per-login; the code exchange + refresh preserve the
-	// granted scopes, so the org rides the whole session without more plumbing.
-	if org := r.URL.Query().Get("org"); org != "" && validOrgAlias.MatchString(org) {
+	// Per-login single-org scope: when the login names an org, request
+	// organization:<alias> so Keycloak stamps that single active org into the
+	// token. The scope set is thus per-login (not the static config list): base
+	// scopes + this one org. Keycloak only issues the claim if the user is actually
+	// a member — a non-member request yields an org-less token (verified against a
+	// live realm), so this cannot be used to claim an org the user does not belong
+	// to. Overriding the authorize "scope" param (SetAuthURLParam runs after
+	// AuthCodeURL sets it from Scopes) is what makes the scope per-login; the code
+	// exchange + refresh preserve the granted scopes, so the org rides the whole
+	// session without more plumbing.
+	if org != "" {
 		scopes := append(append([]string{}, a.oauth.Scopes...), "organization:"+org)
 		opts = append(opts, oauth2.SetAuthURLParam("scope", strings.Join(scopes, " ")))
+	}
+	// Silent org switch: reuse the live Keycloak SSO session for the
+	// already-signed-in user (prompt=none = no UI). login_hint names that user so
+	// Keycloak's identity-first (Organizations) flow can resolve them without the
+	// username screen. If there is no usable session, Keycloak redirects back with
+	// ?error=login_required (or interaction_required/consent_required), which the
+	// callback turns into an interactive retry — so the worst case is today's
+	// prompted login, never a dead end.
+	if silent {
+		opts = append(opts, oauth2.SetAuthURLParam("prompt", "none"))
+		if hint != "" {
+			opts = append(opts, oauth2.SetAuthURLParam("login_hint", hint))
+		}
 	}
 
 	authURL := a.oauth.AuthCodeURL(state, opts...)
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
-// handleSwitchOrg switches the active org by a FULL re-auth (the settled
-// re-auth-per-org decision): it clears the current session — the old-org token
-// must not survive the switch — then re-runs /signin with the new org scope.
-// Keycloak SSO makes the re-auth password-less. An empty/omitted org switches to
-// the org-less (global) session (a realm admin picking "global"). The org alias is
-// validated in handleLogin before it reaches a scope string.
+// handleSwitchOrg switches the active org, minting a NEW single-org token for the
+// same user (the settled re-auth-per-org decision keeps tokens single-org). It
+// clears the current session — the old-org token must not survive the switch —
+// then attempts a SILENT re-auth (prompt=none + login_hint) so the switch needs
+// no username/password: the Keycloak SSO session for the signed-in user is left
+// intact (this never calls end_session), so it can back the silent flow. If
+// Keycloak can't complete silently, the callback falls back to an interactive
+// login for the same org. An empty/omitted org switches to the org-less (global)
+// session (a realm admin picking "global"). The org alias is validated before it
+// reaches a scope string.
+//
+// The silent path engages on HTTPS: Keycloak's SSO cookies are Secure+SameSite=None
+// (SameSite=None mandates Secure), so a browser only sends them over https. Over
+// plain http (a bare kind cluster) they are held but never transmitted, so the
+// silent attempt returns login_required and this gracefully falls back to the
+// interactive login — i.e. no regression anywhere, password-less where TLS is
+// present (the real deploy behind the ALB).
 func (a *Authenticator) handleSwitchOrg(w http.ResponseWriter, r *http.Request) {
+	if err := a.ensure(r.Context()); err != nil {
+		http.Error(w, "auth unavailable: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	// Capture the signed-in user BEFORE dropping the session, to hint the silent
+	// re-auth toward that same user.
+	var hint string
 	if sid, err := r.Cookie(sessionCookie); err == nil && sid.Value != "" {
 		a.mu.Lock()
+		if s, ok := a.sessions[sid.Value]; ok {
+			hint = s.username
+		}
 		delete(a.sessions, sid.Value)
 		a.mu.Unlock()
 	}
 	clearCookie(w, sessionCookie, forwardedHTTPS(r))
-	target := "/signin"
-	if org := r.URL.Query().Get("org"); org != "" && validOrgAlias.MatchString(org) {
-		target += "?org=" + url.QueryEscape(org)
+
+	org := ""
+	if o := r.URL.Query().Get("org"); o != "" && validOrgAlias.MatchString(o) {
+		org = o
 	}
-	http.Redirect(w, r, target, http.StatusFound)
+	a.startAuth(w, r, org, true, hint)
 }
 
 // parseOrgClaim extracts the single active org from a raw JWT's `organization`
@@ -277,6 +335,25 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 	if !ok {
 		http.Error(w, "unknown state", http.StatusBadRequest)
+		return
+	}
+
+	// Keycloak signals a flow it couldn't complete by redirecting back with
+	// ?error= instead of ?code=. For a SILENT org switch (prompt=none) the
+	// expected error is login_required / interaction_required / consent_required
+	// — there was no reusable session, so fall back to an interactive login for
+	// the SAME org (no dead end, no worse than a normal prompted login). For a
+	// non-silent flow an error is a real failure surfaced to the user.
+	if authErr := r.URL.Query().Get("error"); authErr != "" {
+		if pl.silent {
+			target := "/signin"
+			if pl.org != "" {
+				target += "?org=" + url.QueryEscape(pl.org)
+			}
+			http.Redirect(w, r, target, http.StatusFound)
+			return
+		}
+		http.Error(w, "login failed: "+authErr, http.StatusBadRequest)
 		return
 	}
 

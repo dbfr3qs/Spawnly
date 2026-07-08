@@ -591,9 +591,11 @@ func TestHandleLoginOrgScope(t *testing.T) {
 	}
 }
 
-// TestSwitchOrgReAuths asserts /switch-org clears the session and redirects to
-// /signin with the new org, so switching orgs is a full re-auth.
-func TestSwitchOrgReAuths(t *testing.T) {
+// TestSwitchOrgSilent asserts /switch-org drops the old session and drives a
+// SILENT re-auth (prompt=none + login_hint = the signed-in user) for the new org
+// — so switching mints a new single-org token with no username/password prompt
+// when the Keycloak SSO session is live. The old-org token must not survive.
+func TestSwitchOrgSilent(t *testing.T) {
 	a := stubAuth(&oauth2.Config{})
 	a.sessions["sid"] = session{username: "alice", activeOrg: "acme", expiresAt: time.Now().Add(time.Hour)}
 
@@ -605,8 +607,23 @@ func TestSwitchOrgReAuths(t *testing.T) {
 	if rec.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302", rec.Code)
 	}
-	if loc := rec.Header().Get("Location"); loc != "/signin?org=globex" {
-		t.Errorf("redirect = %q, want /signin?org=globex", loc)
+	loc, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("bad redirect: %v", err)
+	}
+	// It must go to the IdP authorize flow (silent), NOT the interactive /signin.
+	if loc.Path == "/signin" {
+		t.Errorf("switch-org went to interactive /signin; want a silent authorize redirect (%q)", loc)
+	}
+	q := loc.Query()
+	if q.Get("prompt") != "none" {
+		t.Errorf("prompt = %q, want none (silent re-auth)", q.Get("prompt"))
+	}
+	if q.Get("login_hint") != "alice" {
+		t.Errorf("login_hint = %q, want alice (the signed-in user)", q.Get("login_hint"))
+	}
+	if sc := q.Get("scope"); !strings.Contains(sc, "organization:globex") {
+		t.Errorf("scope = %q, want it to contain organization:globex", sc)
 	}
 	if _, ok := a.sessions["sid"]; ok {
 		t.Error("switch-org must delete the old session (its old-org token must not survive)")
@@ -620,6 +637,39 @@ func TestSwitchOrgReAuths(t *testing.T) {
 	}
 	if !cleared {
 		t.Error("session cookie was not cleared on switch-org")
+	}
+}
+
+// TestSilentSwitchFallback asserts the callback falls back to an INTERACTIVE
+// login for the same org when a silent (prompt=none) switch can't complete —
+// Keycloak redirects back with ?error=login_required and no code. A non-silent
+// flow surfaces the error instead.
+func TestSilentSwitchFallback(t *testing.T) {
+	a := stubAuth(&oauth2.Config{})
+
+	newReq := func(state string) (*http.Request, *httptest.ResponseRecorder) {
+		req := httptest.NewRequest("GET", "/callback?state="+state+"&error=login_required", nil)
+		req.AddCookie(&http.Cookie{Name: stateCookie, Value: state})
+		return req, httptest.NewRecorder()
+	}
+
+	// Silent attempt for globex → interactive retry at /signin?org=globex.
+	a.pending["s1"] = pendingLogin{verifier: "v", createdAt: time.Now(), org: "globex", silent: true}
+	req, rec := newReq("s1")
+	a.handleCallback(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("silent-fallback status = %d, want 302", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/signin?org=globex" {
+		t.Errorf("silent-fallback redirect = %q, want /signin?org=globex", loc)
+	}
+
+	// A non-silent error is a real failure (surfaced, not a redirect loop).
+	a.pending["s2"] = pendingLogin{verifier: "v", createdAt: time.Now(), org: "acme", silent: false}
+	req, rec = newReq("s2")
+	a.handleCallback(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("non-silent error status = %d, want 400", rec.Code)
 	}
 }
 
