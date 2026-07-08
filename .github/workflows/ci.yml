@@ -116,16 +116,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Version PINNED: installing `latest` broke when v0.8.0 started treating a
+      # failed schema download as a hard error instead of a missing schema, so
+      # kinds absent from the strict schema catalog went from silently skipped
+      # (-ignore-missing-schemas) to failing the build.
       - name: install kubeconform
         run: |
           curl -sSLf \
-            https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz \
             | tar -xz kubeconform
           sudo mv kubeconform /usr/local/bin/
       # -ignore-missing-schemas: the CRD-typed AgentWorkload resources have no
       # published schema. -strict catches unknown fields in the core resources.
+      # -skip: the strict standalone schema catalog has NO schema for
+      # CustomResourceDefinition (a documented kubeconform limitation — CRD
+      # schemas can't be expressed in the strict variant) or for Kustomization
+      # (kustomization.yaml is kustomize build input, not a cluster resource),
+      # so those two kinds are unvalidatable here by construction and must be
+      # skipped explicitly rather than relying on 404s being soft errors.
       - name: kubeconform deploy/
         run: |
           kubeconform -strict -summary -ignore-missing-schemas \
             -kubernetes-version 1.31.0 \
+            -skip CustomResourceDefinition,Kustomization \
             deploy/crds/ deploy/manifests/
