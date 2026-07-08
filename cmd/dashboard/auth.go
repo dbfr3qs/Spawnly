@@ -218,6 +218,10 @@ func (a *Authenticator) startAuth(w http.ResponseWriter, r *http.Request, org st
 	// callback turns into an interactive retry — so the worst case is today's
 	// prompted login, never a dead end.
 	if silent {
+		// Logged so its ABSENCE in the dashboard log means this build predates the
+		// silent-switch support (an old image) — vs. present-but-failing, which the
+		// callback logs with the Keycloak error.
+		log.Printf("switch-org: attempting silent re-auth (prompt=none) for org=%q hint=%q", org, hint)
 		opts = append(opts, oauth2.SetAuthURLParam("prompt", "none"))
 		if hint != "" {
 			opts = append(opts, oauth2.SetAuthURLParam("login_hint", hint))
@@ -347,6 +351,18 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// non-silent flow an error is a real failure surfaced to the user.
 	if authErr := r.URL.Query().Get("error"); authErr != "" {
 		if pl.silent {
+			// Diagnostic for "org switch still asks for a password". The error names
+			// WHY the silent (prompt=none) switch couldn't complete:
+			//   login_required        → Keycloak found NO reusable SSO session (its
+			//                            session cookie wasn't sent — e.g. dropped
+			//                            over plain http, or a cross-site/proxy cookie
+			//                            issue on https);
+			//   interaction_required  → a session EXISTS but the login flow demands
+			//   / consent_required       UI (the org identity-first execution) — which
+			//                            means prompt=none can't be silent for orgs and
+			//                            the browser flow needs reconfiguring.
+			// Either way we fall back to an interactive login (no dead end).
+			log.Printf("switch-org: silent re-auth for org=%q could not complete (error=%q) → interactive fallback", pl.org, authErr)
 			target := "/signin"
 			if pl.org != "" {
 				target += "?org=" + url.QueryEscape(pl.org)
