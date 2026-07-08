@@ -340,7 +340,13 @@
 
     .agent-row {
       display: grid;
-      grid-template-columns: minmax(180px, 250px) 130px 120px 130px 110px 1fr;
+      /* id | type | status | tenant | owner | actions. The action buttons column
+         is `auto` (sized to its content) so the buttons ALWAYS fit inline instead
+         of overflowing the card (which has overflow:hidden and would clip the last
+         button — e.g. Kill). The id and the text columns are shrinkable
+         (minmax(0,…)/1fr) so they ellipsis first when space is tight; the status
+         badge keeps its natural width (auto). */
+      grid-template-columns: minmax(120px, 1fr) minmax(0, 130px) auto minmax(0, 130px) minmax(0, 110px) auto;
       align-items: center;
       gap: 12px;
       padding: 16px 20px;
@@ -365,14 +371,15 @@
       text-overflow: ellipsis;
     }
 
-    /* Actions stay on a single line (side by side); the agent-id column and the
-       data columns shrink/ellipsis first so the buttons always fit inline. */
+    /* Actions sit side by side; the id + data columns shrink/ellipsis first (see
+       the grid template) so the buttons normally fit inline. As a last resort on a
+       very narrow viewport they WRAP to a second (right-aligned) line rather than
+       being clipped by the card's overflow:hidden. */
     .agent-actions {
       display: flex;
       gap: 6px;
       justify-content: flex-end;
-      flex-wrap: nowrap;
-      white-space: nowrap;
+      flex-wrap: wrap;
       position: relative;
     }
     /* Uniform, compact sizing for in-row action buttons (Events, Chat, Revoke/
