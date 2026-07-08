@@ -1211,6 +1211,10 @@
         <p class="form-error" id="create-org-error" data-testid="create-org-error" hidden></p>
         <button id="create-org-submit" class="btn btn-primary" type="submit" data-testid="create-org-submit">Create organization</button>
       </form>
+      <!-- Realm-admin-only escape: an admin legitimately works org-less (Global),
+           so they aren't forced to create an org here. Shown only when the app
+           routes an org-less ADMIN to this screen (see the /api/me handler). -->
+      <button id="noorg-continue-global" class="btn btn-ghost" type="button" data-testid="noorg-continue-global" hidden>Continue to Global (no organization)</button>
       <hr class="org-gate-sep" />
       <form method="post" action="/logout" class="logout-form">
         <button class="btn btn-ghost" type="submit" data-testid="no-org-logout">Log out</button>
@@ -3311,14 +3315,37 @@
       return; // dashboard proceeds
     }
 
-    // Org-less session.
-    if (me.isAdmin) {
-      // Realm admin: the Global (org-less) view is legitimate. Label it + let them
-      // switch into any org via the dropdown.
+    // Global (org-less) view for a realm admin: label the header + offer a
+    // switcher into any org. Factored so both the "admin has orgs" and the
+    // "admin escaped the create screen" paths land the same way.
+    const proceedGlobal = () => {
       const ind = document.getElementById('org-indicator');
       ind.textContent = ORG_LABEL_GLOBAL;
       ind.hidden = false;
       renderOrgSwitcher(orgs, '', true);
+    };
+
+    // Org-less session.
+    if (me.isAdmin) {
+      if (orgs.length === 0) {
+        // A realm admin with NO orgs yet — e.g. a fresh public deploy that seeds
+        // none (kind seeds acme; deploy.sh deliberately doesn't). Global is still
+        // legitimate for an admin, but there was previously no way to CREATE the
+        // first org from the dashboard (the create form was gated to non-admins).
+        // Show it, with a "Continue to Global" escape so the admin isn't forced.
+        showGate('noorg');
+        const esc = document.getElementById('noorg-continue-global');
+        if (esc) {
+          esc.hidden = false;
+          esc.addEventListener('click', () => {
+            document.getElementById('org-gate').hidden = true;
+            proceedGlobal();
+          }, { once: true });
+        }
+        return;
+      }
+      // Admin who belongs to org(s): Global view + a switcher to jump into them.
+      proceedGlobal();
       return; // dashboard proceeds (global)
     }
 
