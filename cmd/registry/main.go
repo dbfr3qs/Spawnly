@@ -1598,16 +1598,18 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			if err := sdb.DeleteAgentRelationships(ctx, agentID, resTypes); err != nil {
 				log.Printf("spicedb cleanup error for %s: %v", agentID, err)
 			}
-			// The agent's own lifecycle tuples (enabled, owner, org — all with
-			// "agent:<id>" as the RESOURCE) are swept in ONE resource-scoped delete,
-			// collapsing what used to be three per-tuple DeleteRelationship calls
-			// (Phase-4 follow-up). This is also robust to a drifted record: every
-			// tuple on the agent resource goes, without reconstructing each exact
-			// (possibly encoded) subject. Revoke/resume need no such cleanup — they
-			// only toggle `enabled`, leaving owner/org intact so a resumed agent
-			// keeps its authority.
-			if err := sdb.DeleteResourceRelationships(ctx, "agent:"+agentID); err != nil {
-				log.Printf("spicedb agent-resource cleanup error for %s: %v", agentID, err)
+			// Drop ONLY the `enabled` status tuple (a terminal agent isn't runnable),
+			// exactly like revoke. The `owner` and `org` tuples are DELIBERATELY left
+			// in place: they are the agent's HUMAN lifecycle authority (view/manage),
+			// and a terminal agent still has a record a human must be able to view
+			// and DISMISS. The record is never hard-deleted (dismiss is a soft flag;
+			// nothing removes it from the store), so these tuples live with the
+			// record — removing them here would 404 the owner's own dismiss/view of a
+			// completed/failed/killed org-scoped agent (org authz checks manage/view =
+			// owner + org->admin/view_agents against SpiceDB). This mirrors the schema
+			// note that view/manage must stay checkable on a non-active agent.
+			if err := sdb.DeleteRelationship(ctx, "agent:"+agentID, "enabled", "agent:"+agentID); err != nil {
+				log.Printf("spicedb terminal enabled-tuple delete error for %s: %v", agentID, err)
 			}
 		}
 		w.WriteHeader(http.StatusOK)

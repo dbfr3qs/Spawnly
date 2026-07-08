@@ -660,11 +660,14 @@ func TestRegister_BodyUserIDCannotOverridePreregisteredOwner(t *testing.T) {
 	}
 }
 
-// TestTerminalStatus_DeletesOwnerAndOrgTuples proves the owner+org lifecycle
-// tuples are cleaned up on a terminal (completed) status — the write/cleanup
-// symmetry that stops stale SpiceDB authority outliving the agent. The `enabled`
-// tuple is deleted too (pre-existing); owner/org join that cleanup here.
-func TestTerminalStatus_DeletesOwnerAndOrgTuples(t *testing.T) {
+// TestTerminalStatus_PreservesOwnerOrgTuples proves that going terminal drops
+// ONLY the `enabled` tuple (a terminal agent isn't runnable) while KEEPING the
+// owner+org tuples — the human lifecycle authority a user needs to still view and
+// DISMISS a completed/failed/killed org-scoped agent. Removing them here used to
+// 404 the owner's own dismiss (org authz checks manage = owner + org->admin
+// against SpiceDB); this test locks that regression down, including that dismiss
+// actually succeeds afterwards.
+func TestTerminalStatus_PreservesOwnerOrgTuples(t *testing.T) {
 	const agentID = "agent-term-org"
 	s := newStore()
 	s.putTemplate(workerTemplate())
@@ -694,7 +697,7 @@ func TestTerminalStatus_DeletesOwnerAndOrgTuples(t *testing.T) {
 		t.Fatal("precondition: owner+org tuples should exist after registration")
 	}
 
-	// Terminal status → cleanup deletes owner, org, and enabled tuples.
+	// Terminal status → cleanup drops ONLY `enabled`; owner+org stay.
 	patchBody, _ := json.Marshal(map[string]string{"status": "completed"})
 	patchReq := httptest.NewRequest("PATCH", "/v1/agents/"+agentID, bytes.NewReader(patchBody))
 	patchReq.Header.Set("Content-Type", "application/json")
@@ -703,14 +706,23 @@ func TestTerminalStatus_DeletesOwnerAndOrgTuples(t *testing.T) {
 	if patchRec.Code != http.StatusOK {
 		t.Fatalf("PATCH status: got %d, want 200", patchRec.Code)
 	}
-	if sdb.HasRelationship("agent:"+agentID, "owner", "user:user-1") {
-		t.Error("owner tuple not cleaned up on terminal status")
+	if !sdb.HasRelationship("agent:"+agentID, "owner", "user:user-1") {
+		t.Error("owner tuple must PERSIST on terminal status (needed for dismiss/view)")
 	}
-	if sdb.HasRelationship("agent:"+agentID, "org", "organization:acme-org") {
-		t.Error("org tuple not cleaned up on terminal status")
+	if !sdb.HasRelationship("agent:"+agentID, "org", "organization:acme-org") {
+		t.Error("org tuple must PERSIST on terminal status (needed for dismiss/view)")
 	}
 	if sdb.HasRelationship("agent:"+agentID, "enabled", "agent:"+agentID) {
-		t.Error("enabled tuple not cleaned up on terminal status")
+		t.Error("enabled tuple should be cleaned up on terminal status (agent isn't runnable)")
+	}
+
+	// The regression itself: the owner can still DISMISS the terminal org agent
+	// (manage = owner + org->admin_agents; owner tuple survived, so it authorizes).
+	disReq := httptest.NewRequest("POST", "/v1/agents/"+agentID+"/dismiss?userId=user-1", nil)
+	disRec := httptest.NewRecorder()
+	mux.ServeHTTP(disRec, disReq)
+	if disRec.Code != http.StatusNoContent {
+		t.Fatalf("dismiss of terminal org agent by owner: got %d, want 204 (was 404 before the fix)", disRec.Code)
 	}
 }
 
