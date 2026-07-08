@@ -54,7 +54,6 @@ test.describe('self-serve signup', () => {
     const username = `signup-${suffix}`;
     const password = `Pw-${suffix}-9`;
     const email = `${username}@example.test`;
-    const orgSlug = `org-${suffix}`;
     const orgName = `Org ${suffix}`;
 
     const ctx = await browser.newContext({ storageState: { cookies: [], origins: [] } });
@@ -92,11 +91,12 @@ test.describe('self-serve signup', () => {
       // No org yet, so no agents.
       expect(await listAgents(page)).toEqual([]);
 
-      // 4) Create the org. On success the page re-auths through /switch-org into
-      //    the new org. Sync on the signup response so the re-auth handling can't
-      //    race the async redirect the form issues.
-      await page.locator('[data-testid="create-org-slug"]').fill(orgSlug);
-      await page.locator('#create-org-name').fill(orgName);
+      // 4) Create the org — the user supplies ONLY a display name; the registry
+      //    mints the org's opaque GUID id. On success the form reloads, /api/me
+      //    reports the user's single new org, and the dashboard auto-selects it via
+      //    a /switch-org re-auth. Sync on the signup response so the re-auth handling
+      //    can't race the async redirect the form issues.
+      await page.locator('[data-testid="create-org-name"]').fill(orgName);
       const [signupResp] = await Promise.all([
         page.waitForResponse(
           (r) => r.url().includes('/api/signup/org') && r.request().method() === 'POST',

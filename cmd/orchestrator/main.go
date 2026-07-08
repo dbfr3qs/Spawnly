@@ -1501,17 +1501,18 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	mux.HandleFunc("POST /v1/signup/org", requireToken(validator, audience, writeScope, func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		caller := userIDFrom(ctx)
+		// The user supplies only a display Name; the registry mints the org's opaque
+		// GUID id (no orgId in the body). adminUser is the token sub, stamped
+		// server-side; any orgId/adminUser in the body is structurally ignored (not
+		// decoded).
 		var body struct {
-			OrgID string `json:"orgId"`
-			Name  string `json:"name"`
+			Name string `json:"name"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
-		// adminUser is the token sub, stamped server-side; any adminUser in the body
-		// is structurally ignored (it is not a field we decode).
-		payload, err := json.Marshal(map[string]string{"orgId": body.OrgID, "name": body.Name, "adminUser": caller})
+		payload, err := json.Marshal(map[string]string{"name": body.Name, "adminUser": caller})
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return

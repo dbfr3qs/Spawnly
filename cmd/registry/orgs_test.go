@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/spawnly/platform/internal/controlplane"
 	"github.com/spawnly/platform/internal/orgdirectory"
 	"github.com/spawnly/platform/internal/registrant"
@@ -479,10 +480,48 @@ func TestSelfServeCreate_ReservedSlugRejected(t *testing.T) {
 
 func TestSelfServeCreate_InvalidSlugRejected(t *testing.T) {
 	mux := orgMux(newStore(), spicedb.NewMock(), newFakeDirectory())
-	for _, slug := range []string{"Acme", "-acme", "acme-", "a_b", ""} {
+	// A PROVIDED-but-malformed slug is rejected. (An EMPTY orgId is NOT invalid —
+	// it's the auto-GUID path, covered in TestSelfServeCreate_AutoGeneratesGuid.)
+	for _, slug := range []string{"Acme", "-acme", "acme-", "a_b"} {
 		if rec := selfServeCreate(t, mux, slug, "alice"); rec.Code != http.StatusBadRequest {
 			t.Errorf("invalid slug %q: status=%d, want 400", slug, rec.Code)
 		}
+	}
+}
+
+// TestSelfServeCreate_AutoGeneratesGuid pins the new contract: user-facing
+// creation supplies only a display Name and omits orgId, so the registry mints an
+// opaque GUID id. The Name is what the UI shows; with no slug to fall back to it
+// is required.
+func TestSelfServeCreate_AutoGeneratesGuid(t *testing.T) {
+	s := newStore()
+	sdb := spicedb.NewMock()
+	dir := newFakeDirectory()
+	mux := orgMux(s, sdb, dir)
+
+	rec := doReq(t, mux, "POST", "/v1/orgs?selfServe=1", map[string]string{"name": "Acme Inc.", "adminUser": "alice"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	orgs, err := s.ListOrgs(context.Background())
+	if err != nil || len(orgs) != 1 {
+		t.Fatalf("want exactly 1 org (err=%v), got %d", err, len(orgs))
+	}
+	got := orgs[0]
+	if got.Name != "Acme Inc." {
+		t.Errorf("name = %q, want %q", got.Name, "Acme Inc.")
+	}
+	if _, perr := uuid.Parse(got.OrgID); perr != nil {
+		t.Errorf("orgId %q is not a generated GUID: %v", got.OrgID, perr)
+	}
+	// The admin tuple + directory calls key on the GENERATED id.
+	if !sdb.HasRelationship("organization:"+got.OrgID, "admin", "user:alice") {
+		t.Error("caller should be admin of the generated-id org")
+	}
+
+	// No orgId AND no name → 400 (a GUID org has no other human-readable label).
+	if rec := doReq(t, mux, "POST", "/v1/orgs?selfServe=1", map[string]string{"adminUser": "bob"}); rec.Code != http.StatusBadRequest {
+		t.Errorf("no orgId + no name: status=%d, want 400", rec.Code)
 	}
 }
 

@@ -6,8 +6,10 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/spawnly/platform/internal/orgdirectory"
 	"github.com/spawnly/platform/internal/registry"
 	"github.com/spawnly/platform/internal/spicedb"
@@ -90,13 +92,29 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if !validOrgID.MatchString(body.OrgID) {
-			http.Error(w, "invalid orgId", http.StatusBadRequest)
-			return
-		}
-		if reservedOrgIDs[body.OrgID] {
-			http.Error(w, "orgId is reserved", http.StatusBadRequest)
-			return
+		body.Name = strings.TrimSpace(body.Name)
+		// orgId is OPTIONAL. User-facing creation (self-serve signup, the create-org
+		// form) omits it: the registry mints an opaque GUID so a user never has to
+		// invent a permanent slug — they supply a display Name (which is what the org
+		// switcher shows). With no slug to fall back to, that Name is REQUIRED here.
+		// Internal seed/admin tooling MAY still pin a readable, validated orgId for
+		// stable references (e.g. the demo acme/globex), in which case Name stays
+		// optional (the UI falls back to the id).
+		if body.OrgID == "" {
+			if body.Name == "" {
+				http.Error(w, "organization name is required", http.StatusBadRequest)
+				return
+			}
+			body.OrgID = uuid.NewString()
+		} else {
+			if !validOrgID.MatchString(body.OrgID) {
+				http.Error(w, "invalid orgId", http.StatusBadRequest)
+				return
+			}
+			if reservedOrgIDs[body.OrgID] {
+				http.Error(w, "orgId is reserved", http.StatusBadRequest)
+				return
+			}
 		}
 		if !registry.ValidUserID(body.AdminUser) {
 			http.Error(w, "invalid adminUser", http.StatusBadRequest)

@@ -1200,14 +1200,11 @@
            re-auth into the new org so the session token carries its claim. -->
       <form id="create-org-form" class="create-org-form" data-testid="create-org-form">
         <label>Organization name
-          <input id="create-org-name" type="text" placeholder="Acme Inc." autocomplete="organization" />
+          <input id="create-org-name" type="text" required placeholder="Acme Inc."
+                 autocomplete="organization" maxlength="120" data-testid="create-org-name" />
         </label>
-        <label>Organization ID
-          <input id="create-org-slug" type="text" required placeholder="acme"
-                 maxlength="63" data-testid="create-org-slug" />
-        </label>
-        <p class="create-org-hint">Lowercase letters, numbers and hyphens. This is
-           your organization's permanent identifier.</p>
+        <p class="create-org-hint">This is how your organization appears in Spawnly. Its
+           unique ID is generated automatically.</p>
         <p class="form-error" id="create-org-error" data-testid="create-org-error" hidden></p>
         <button id="create-org-submit" class="btn btn-primary" type="submit" data-testid="create-org-submit">Create organization</button>
       </form>
@@ -3247,18 +3244,25 @@
       const errEl = document.getElementById('create-org-error');
       const btn = document.getElementById('create-org-submit');
       errEl.hidden = true;
-      const slug = document.getElementById('create-org-slug').value.trim();
       const name = document.getElementById('create-org-name').value.trim();
-      if (!slug) return;
+      if (!name) return;
       btn.disabled = true;
       try {
         const r = await fetch('/api/signup/org', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ orgId: slug, name: name || slug }),
+          // Only the display name — the registry mints the org's opaque GUID id.
+          body: JSON.stringify({ name }),
         });
         if (r.ok) {
-          window.location = `/switch-org?org=${encodeURIComponent(slug)}`;
+          // Switch straight into the just-created org (a re-auth into its scope) so
+          // the user lands INSIDE it as its admin — not on the org-less Global view,
+          // which is where a realm admin would otherwise land. The response echoes
+          // the server-minted GUID id; fall back to a plain reload if it's absent.
+          const created = await r.json().catch(() => ({}));
+          window.location = created.orgId
+            ? `/switch-org?org=${encodeURIComponent(created.orgId)}`
+            : '/';
           return;
         }
         const msg = (await r.text()).trim();
