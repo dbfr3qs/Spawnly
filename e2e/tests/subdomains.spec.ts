@@ -137,13 +137,18 @@ test.describe('organization subdomains', () => {
       expect(me.hostOrg, 'host resolves to acme').toBe('acme');
       expect(me.isApex, 'a satellite is not the apex').toBe(false);
 
-      // The scoped list shows the acme agent (member visibility) — a real proof the
-      // satellite session reaches acme's data.
+      // The session genuinely reaches acme's data plane: /api/agents authenticates
+      // (200) on the satellite. But tenant-visibility Phase 2 makes a plain MEMBER
+      // own-only — viewer does NOT see alice's acme agent (she owns none here), so
+      // it must be ABSENT from her scoped list (session scoping already proven via
+      // /api/me above).
+      const listResp = await page.request.get(`${orgOrigin('acme')}/api/agents`);
+      expect(listResp.status(), 'the satellite session authenticates to acme data').toBe(200);
       await expect
         .poll(async () => (await agentsAt(page, orgOrigin('acme'))).some((a) => a.agentId === acmeAgentId), {
-          timeout: 30_000,
+          timeout: 15_000,
         })
-        .toBe(true);
+        .toBe(false);
     } finally {
       await ctx.close();
     }
@@ -229,8 +234,13 @@ test.describe('organization subdomains', () => {
     try {
       const viewer = await viewerCtx.newPage();
       await loginAt(viewer, orgOrigin('acme'), 'viewer', 'viewer');
-      // Token-scoped read works on the matching host: acme session sees acme's agent.
-      expect((await agentsAt(viewer, orgOrigin('acme'))).some((a) => a.agentId === acmeAgentId)).toBe(true);
+      // Token-scoped read works on the matching host: acme session authenticates
+      // (200). Under tenant-visibility Phase 2 the member is own-only, so alice's
+      // acme agent is NOT in viewer's list — the session reaching acme's data plane
+      // is proven by the authenticated 200, not by seeing a co-member's agent.
+      const acmeRead = await viewer.request.get(`${orgOrigin('acme')}/api/agents`);
+      expect(acmeRead.status(), 'acme session authenticates on the matching host').toBe(200);
+      expect((await agentsAt(viewer, orgOrigin('acme'))).some((a) => a.agentId === acmeAgentId)).toBe(false);
 
       // Replay that SAME context against the globex host. The acme session cookie is
       // host-scoped (acme.localtest.me), so the browser refuses to send it to globex:

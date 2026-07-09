@@ -146,8 +146,10 @@ func isContainerNotReadyErr(err error) bool {
 }
 
 // SpiceDB agent permissions (schema.zed): view = read (events/logs/chain);
-// manage = mutate (message/revoke/resume/dismiss/delete). Same names the
-// registry checks — kept here so the orchestrator-tier gate matches.
+// manage = mutate (message/revoke/resume/dismiss/delete). Both are now
+// owner + org admin (tenant-visibility Phase 2): a plain member sees ONLY the
+// agents they own. Same names the registry checks — kept here so the
+// orchestrator-tier gate matches.
 const (
 	actionView   = "view"
 	actionManage = "manage"
@@ -775,15 +777,16 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		orgID := orgIDFrom(ctx)
 
 		// The caller's org authority is resolved against SpiceDB ONCE per request
-		// (not per agent): two facts drive the whole list — is the caller a current
-		// MEMBER of their active org (org read-visibility) and are they an ADMIN
-		// (manage over every org agent). Deriving visibility from SpiceDB, not the
-		// bare `organization` claim, keeps the list consistent with the per-agent
-		// gates: when a member is removed their SpiceDB tuples drop immediately, so
-		// a still-unexpired org token can no longer enumerate the org's agents
-		// (closing a stale-token metadata leak). admin ⊇ member in the schema, so an
-		// admin need not be re-checked for membership.
-		isOrgMember, isOrgAdmin := false, false
+		// (not per agent): a single fact drives the whole list — is the caller an
+		// ADMIN of their active org (view + manage over EVERY org agent, tenant-
+		// visibility Phase 2). A plain member is NOT org-wide visible: a member sees
+		// only agents they own (the own-agent term below), matching the tightened
+		// `agent.view = owner + org->admin_agents` schema and the per-agent gates.
+		// Deriving visibility from SpiceDB, not the bare `organization` claim, keeps
+		// the list consistent with those gates: when an admin is demoted their
+		// SpiceDB tuple drops immediately, so a still-unexpired org token can no
+		// longer enumerate the org's agents (closing a stale-token metadata leak).
+		isOrgAdmin := false
 		if userID != "" && orgID != "" {
 			orgObj := "organization:" + spicedb.EncodeObjectID(orgID)
 			userObj := "user:" + spicedb.EncodeObjectID(userID)
@@ -794,26 +797,17 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 				log.Printf("list: org-admin check for user %s org %s failed (treating as non-admin): %v", userID, orgID, cerr)
 			}
 			isOrgAdmin = adminOK
-			if isOrgAdmin {
-				isOrgMember = true
-			} else {
-				memberOK, merr := sdb.CheckPermission(ctx, orgObj, "view_agents", userObj)
-				if merr != nil {
-					log.Printf("list: org-member check for user %s org %s failed (treating as non-member): %v", userID, orgID, merr)
-				}
-				isOrgMember = memberOK
-			}
 		}
 
 		// Visibility (spec matrix): a caller sees their OWN agents (org-scoped or
-		// org-less, always — the record UserID is the owner) PLUS every agent in
-		// their ACTIVE org when SpiceDB confirms membership. Cross-org agents and
-		// other users' org-less agents are invisible. The own-agent term keeps the
-		// list consistent with the per-agent gates: canView/canManage still succeed
-		// on your own org agent via its owner tuple even in a removed-member window,
-		// so it must still appear here. Per-agent canManage: owner always; org
+		// org-less, always — the record UserID is the owner) PLUS, for an org
+		// ADMIN, every agent in their ACTIVE org. A plain member sees only their
+		// own agents; cross-org agents and other users' org-less agents are always
+		// invisible. The own-agent term keeps the list consistent with the per-agent
+		// gates: canView/canManage still succeed on your own org agent via its owner
+		// tuple, so it must appear here. Per-agent canManage: owner always; org
 		// admins over any agent in their org. Record-field equality on the rows —
-		// no PER-ROW SpiceDB (the two org checks above are per-request).
+		// no PER-ROW SpiceDB (the org-admin check above is per-request).
 		type agentListItem struct {
 			registry.AgentRecord
 			CanManage bool `json:"canManage"`
@@ -821,11 +815,11 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		items := make([]agentListItem, 0, len(agents))
 		for _, a := range agents {
 			own := a.UserID != "" && a.UserID == userID
-			inOrg := isOrgMember && a.OrgID != "" && a.OrgID == orgID
+			inOrg := isOrgAdmin && a.OrgID != "" && a.OrgID == orgID
 			if !own && !inOrg {
 				continue
 			}
-			canManage := own || (inOrg && isOrgAdmin)
+			canManage := own || inOrg
 			items = append(items, agentListItem{AgentRecord: a, CanManage: canManage})
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -834,7 +828,8 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	mux.HandleFunc("GET /v1/agents/{id}/events", requireToken(validator, audience, readScope, func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		// events are a read → view authority (owner or any same-org member).
+		// events are a read → view authority (owner or org admin; a plain member
+		// sees only agents they own, so a non-owned org agent 404s here).
 		if !canView(r.Context(), regClient, sdb, id, userIDFrom(r.Context())) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -850,7 +845,8 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	mux.HandleFunc("GET /v1/agents/{id}/logs", requireToken(validator, audience, readScope, func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		// logs are a read → view authority (owner or any same-org member).
+		// logs are a read → view authority (owner or org admin; a plain member
+		// sees only agents they own, so a non-owned org agent 404s here).
 		if !canView(r.Context(), regClient, sdb, id, userIDFrom(r.Context())) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return

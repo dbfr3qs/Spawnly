@@ -51,11 +51,12 @@ async function waitForListedStatus(
 //   carol  = member of BOTH acme and globex
 //   nomad  = member of NO org
 // alice is acme's ORG admin ONLY — she is NOT the realm admin (that is root), so
-// she has no Global view. The matrix (spec §Authorization matrix):
-//   • a member sees every org agent but manages only their own (read-only on
-//     others) — and CANNOT mutate another's agent (UI absent AND the direct API
-//     404s);
-//   • an org admin manages every agent in the org;
+// she has no Global view. The matrix (spec §Authorization matrix, tightened by
+// tenant-visibility Phase 2 — least-privilege member visibility):
+//   • a member sees ONLY the agents they OWN — a co-member's org agent is
+//     invisible: absent from the member's list AND its direct events/logs GET
+//     404s (no existence oracle);
+//   • an org admin sees + manages every agent in the org;
 //   • a user in another org sees none of it (empty list, 404s);
 //   • switching orgs is a SILENT re-auth (prompt=none on the SSO session — no
 //     password): proven for a multi-org MEMBER (carol: acme ↔ globex);
@@ -98,26 +99,27 @@ test.describe('organization isolation matrix', () => {
     await bobCtx?.close();
   });
 
-  test('a same-org member sees the agent READ-ONLY and cannot mutate it', async () => {
-    // Visible in the member's list, flagged canManage=false.
+  test('a same-org member does NOT see another member’s agent (own-only list + detail 404)', async () => {
+    // tenant-visibility Phase 2: a plain member sees ONLY the agents they own.
+    // alice's acme agent is owned by alice, so it must NEVER appear in viewer's
+    // list — viewer owns none of acme's agents here, so the list excludes it.
+    // Poll a few times to prove it stays absent (not merely slow to appear).
     await expect
       .poll(async () => (await listAgents(viewer)).some((a) => a.agentId === acmeAgentId), {
-        timeout: 30_000,
+        timeout: 15_000,
       })
-      .toBe(true);
-    const row = (await listAgents(viewer)).find((a) => a.agentId === acmeAgentId)!;
-    expect(row.canManage, 'a member must see another owner’s agent as read-only').toBeFalsy();
+      .toBe(false);
 
-    // Render the card and assert the mutating controls are ABSENT (cosmetic gate).
+    // The card is likewise absent from viewer's rendered dashboard.
     await viewer.reload();
-    const card = viewer.locator(`[id="card-${acmeAgentId}"]`);
-    await expect(card).toBeVisible({ timeout: 30_000 });
-    await expect(card.locator('[data-testid="revoke"]')).toHaveCount(0);
-    await expect(card.locator('[data-testid="kill"]')).toHaveCount(0);
+    await expect(viewer.locator('#agent-list')).toBeVisible({ timeout: 30_000 });
+    await expect(viewer.locator(`[id="card-${acmeAgentId}"]`)).toHaveCount(0);
 
-    // The REAL boundary: direct API calls must 404 (no existence oracle), so a
-    // tampered client that forges the buttons still can't mutate the agent.
+    // The REAL boundary: viewer's direct reads AND mutations of a non-owned org
+    // agent all 404 (no existence oracle) — a member has neither view nor manage.
     for (const path of [
+      { method: 'get', url: `/api/agents/${acmeAgentId}/events` },
+      { method: 'get', url: `/api/agents/${acmeAgentId}/logs` },
       { method: 'post', url: `/api/agents/${acmeAgentId}/revoke` },
       { method: 'post', url: `/api/agents/${acmeAgentId}/dismiss` },
       { method: 'delete', url: `/api/agents/${acmeAgentId}` },
@@ -125,11 +127,13 @@ test.describe('organization isolation matrix', () => {
       const resp =
         path.method === 'delete'
           ? await viewer.request.delete(path.url)
-          : await viewer.request.post(path.url);
-      expect(resp.status(), `${path.method} ${path.url} must 404 for a member`).toBe(404);
+          : path.method === 'get'
+            ? await viewer.request.get(path.url)
+            : await viewer.request.post(path.url);
+      expect(resp.status(), `${path.method} ${path.url} must 404 for a non-owning member`).toBe(
+        404,
+      );
     }
-    // ...and the agent is untouched.
-    expect((await listAgents(viewer)).some((a) => a.agentId === acmeAgentId)).toBe(true);
   });
 
   test('the org admin manages every agent in the org', async () => {

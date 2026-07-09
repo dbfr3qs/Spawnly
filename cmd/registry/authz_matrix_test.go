@@ -71,7 +71,9 @@ func TestAgentAllowed_Matrix(t *testing.T) {
 	}{
 		{"owner is member: full control", "agent-acme", "alice", true, true, true},
 		{"org admin (not owner): full control", "agent-acme", "carol", true, true, true},
-		{"other member: read-only", "agent-acme", "dave", true, false, true},
+		// tenant-visibility Phase 2: a plain member no longer views a non-owned org
+		// agent — view == manage == owner + org admin.
+		{"other member: no view (own-only)", "agent-acme", "dave", false, false, true},
 		{"cross-org member: invisible", "agent-acme", "eve", false, false, true},
 		{"exotic-id org admin: full control", "agent-acme", "gina@corp.io", true, true, true},
 		{"empty user: denied", "agent-acme", "", false, false, true},

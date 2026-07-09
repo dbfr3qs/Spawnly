@@ -67,7 +67,9 @@ func TestCanViewCanManage_Matrix(t *testing.T) {
 	}{
 		{"owner+member", "agent-acme", "alice", true, true},
 		{"org admin (not owner)", "agent-acme", "carol", true, true},
-		{"other member: read-only", "agent-acme", "dave", true, false},
+		// tenant-visibility Phase 2: a plain member no longer views a non-owned org
+		// agent — view == manage == owner + org admin.
+		{"other member: no view (own-only)", "agent-acme", "dave", false, false},
 		{"cross-org: invisible", "agent-acme", "eve", false, false},
 		{"empty user", "agent-acme", "", false, false},
 		{"org-less owner", "agent-less", "frank", true, true},
@@ -342,14 +344,19 @@ func TestListAgents_OrgVisibilityAndCanManage(t *testing.T) {
 		return got
 	}
 
-	// bob: SpiceDB member of acme. Sees BOTH acme agents; manages only his own.
-	// Does NOT see globex or other users' org-less agents.
+	// bob: SpiceDB member (NOT admin) of acme. tenant-visibility Phase 2: a plain
+	// member sees ONLY the agents they own — so bob sees his own acme-bob and NOT
+	// alice's acme-alice. He manages his own. He never sees globex or other users'
+	// org-less agents.
 	bob := list("bob", "acme", "member")
-	if len(bob) != 2 {
-		t.Fatalf("bob should see exactly the 2 acme agents, got %v", bob)
+	if len(bob) != 1 {
+		t.Fatalf("bob (member) should see exactly his own acme agent, got %v", bob)
 	}
-	if !bob["acme-bob"] || bob["acme-alice"] {
+	if !bob["acme-bob"] {
 		t.Errorf("bob canManage: want own acme-bob only, got %v", bob)
+	}
+	if _, ok := bob["acme-alice"]; ok {
+		t.Error("bob (plain member) must NOT see another member's org agent (Phase 2)")
 	}
 	if _, ok := bob["globex-x"]; ok {
 		t.Error("bob must not see cross-org globex agent")
@@ -385,5 +392,61 @@ func TestListAgents_OrgVisibilityAndCanManage(t *testing.T) {
 	dave := list("dave", "", "")
 	if len(dave) != 1 || !dave["less-dave"] {
 		t.Errorf("org-less dave should see & manage only less-dave, got %v", dave)
+	}
+}
+
+// TestListAgents_IsolationInvariant is the security core (spec criterion 7): a
+// NON-realm-admin caller CANNOT widen their scope by supplying an org to the
+// orchestrator. The active org is taken ONLY from the token's `organization`
+// claim (orgIDFrom); a client-supplied `?org=<other>` query is ignored, so the
+// response is byte-identical to omitting it. Today the handler never reads
+// `?org=` at all — this test LOCKS that and becomes the permanent guard once
+// Phase 3 introduces the realm-admin-only viewing-org param (which must remain
+// asymmetric: honored for a realm admin, ignored for everyone else).
+func TestListAgents_IsolationInvariant(t *testing.T) {
+	all := []registry.AgentRecord{
+		{AgentID: "acme-bob", UserID: "bob", OrgID: "acme"},
+		{AgentID: "acme-alice", UserID: "alice", OrgID: "acme"},
+		{AgentID: "globex-x", UserID: "zed", OrgID: "globex"},
+	}
+	reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/agents" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(all)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer reg.Close()
+
+	// bob is a plain MEMBER of acme (a non-realm-admin). He owns acme-bob.
+	sdb := spicedb.NewMock()
+	enc := spicedb.EncodeObjectID
+	sdb.WriteRelationship(context.Background(), "organization:"+enc("acme"), "member", "user:"+enc("bob"))
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, reg.URL,
+		fakeValidator{claims: humanOrgClaims("bob", "acme", nil, "orchestrator:read")},
+		"orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
+
+	get := func(target string) string {
+		req := httptest.NewRequest("GET", target, nil)
+		req.Header.Set("Authorization", "Bearer t")
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("list %s: got %d", target, rr.Code)
+		}
+		return rr.Body.String()
+	}
+
+	base := get("/v1/agents")
+	// A forged/extra org param naming ANOTHER org must NOT widen scope.
+	widened := get("/v1/agents?org=globex")
+	if base != widened {
+		t.Errorf("non-admin ?org= must be ignored (org from token claim only)\n base    = %s\n ?org=   = %s", base, widened)
+	}
+	// Sanity: bob (member) sees ONLY his own agent — never acme-alice or globex-x.
+	if !strings.Contains(base, "acme-bob") || strings.Contains(base, "acme-alice") || strings.Contains(base, "globex-x") {
+		t.Errorf("member list must be own-only, got %s", base)
 	}
 }
