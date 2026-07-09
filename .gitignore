@@ -50,6 +50,13 @@ dotnet/
 kubeconfig
 *.kubeconfig
 
+# org-subdomains local TLS mimic (Phase 3) — Caddy internal-CA state, certs, and
+# the runtime port-forward pid. Never commit CA/cert material.
+deploy/local-tls/data/
+deploy/local-tls/config/
+deploy/local-tls/certs/
+deploy/local-tls/.port-forward.pid
+
 # Local secrets / env (keep .env.example tracked)
 .env
 .env.local

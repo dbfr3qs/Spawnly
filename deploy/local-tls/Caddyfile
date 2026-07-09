@@ -1,0 +1,50 @@
+# deploy/local-tls/Caddyfile — full-fidelity TLS mimic for the org-subdomains
+# feature (Phase 3). Fronts the running kind stack so a browser can drive the
+# whole subdomain flow over real HTTPS:
+#
+#   https://localtest.me            → apex (Global/picker/signup + KC proxy)
+#   https://<slug>.localtest.me     → org satellite (scoped dashboard)
+#
+# `localtest.me` and `*.localtest.me` already resolve to 127.0.0.1, so no
+# /etc/hosts edits are needed. Run via `make tls-mimic` (scripts/local-tls.sh),
+# NOT standalone — the script also flips the cluster into apex=localtest.me mode.
+# This is a MODE-SWITCH: it is mutually exclusive with the default localhost:8090
+# dev loop (`make dash`/`make e2e`). See scripts/local-tls.sh.
+{
+	# Caddy's own internal CA mints the localtest.me / *.localtest.me leaf certs
+	# (no mkcert, no host installs). scripts/local-tls.sh exports the root to
+	# deploy/local-tls/certs/root.crt — import it into your browser, or (Phase 4)
+	# let Playwright's ignoreHTTPSErrors skip trust. No public ACME.
+	auto_https disable_redirects
+	# Disable Caddy's admin API. With --network host it would otherwise be
+	# reachable on localhost:2019 to any local process (reconfigure the proxy /
+	# read internal-CA material). The up/down lifecycle only uses docker
+	# start/rm, never the admin API, so it is safe to turn off.
+	admin off
+	# Quieter logs.
+	log {
+		level ERROR
+	}
+}
+
+# One site block serves the apex and every satellite — the dashboard resolves the
+# org from the (preserved) Host header, so Caddy is a dumb TLS terminator + proxy.
+localtest.me, *.localtest.me {
+	tls internal
+
+	reverse_proxy {$DASH_UPSTREAM:localhost:8090} {
+		# Preserve the browser's Host: the dashboard keys host→org resolution on
+		# r.Host (TRUST_FORWARDED_HOST stays OFF locally, so it ignores
+		# X-Forwarded-Host). Caddy preserves Host by default; set it explicitly.
+		header_up Host {host}
+		# Tell the dashboard the browser hop was HTTPS — forwardedHTTPS()
+		# (cmd/dashboard/auth.go) keys Secure cookies + the satellite redirect
+		# scheme on this. TLS terminates here, so the hop to the port-forward is
+		# plain http; the header carries the real browser scheme.
+		header_up X-Forwarded-Proto https
+		# Do NOT forward X-Forwarded-Host: the local dashboard must read r.Host,
+		# not a proxy header (TRUST_FORWARDED_HOST is off). Caddy sets this header
+		# by default, so strip it explicitly.
+		header_up -X-Forwarded-Host
+	}
+}
