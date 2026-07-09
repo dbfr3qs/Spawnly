@@ -17,9 +17,11 @@ import { spawn, type AgentSummary } from '../helpers/dashboard';
 // baseURL https://localtest.me; the default `make e2e` never picks it up.
 //
 // Seed matrix (deploy/keycloak/users.tf + scripts/reseed-orgs.sh):
+//   root   = PLATFORM master admin (realm `admin`, member of NO org) — case (f)
 //   acme   = alice (org admin) + viewer (member) + carol (member)
 //   globex = bob   (org admin) + carol (member)
 //   nomad  = member of NO org
+// alice is acme's ORG admin only — NOT the realm admin (that is root).
 // carol is the two-org fixture that exists ONLY to prove silent cross-subdomain
 // SSO (case b); she is seeded LAST so she never perturbs the single-org matrix.
 //
@@ -287,14 +289,16 @@ test.describe('organization subdomains', () => {
     const ctx = await browser.newContext();
     try {
       const page = await ctx.newPage();
-      // alice (realm admin) at the apex lands on the org-less Global view.
-      await loginAt(page, APEX_ORIGIN, 'alice', 'alice');
+      // root (the platform master admin — realm `admin`, member of no org) at the
+      // apex lands on the org-less Global view. (alice is only an org admin now and
+      // has no Global view.)
+      await loginAt(page, APEX_ORIGIN, 'root', 'root');
       expect(hostOf(page.url())).toBe(APEX_HOST);
       await expect(page.locator('[data-testid="active-org"]')).toContainText(/global/i, { timeout: 30_000 });
       const me = await apiMe(page, APEX_ORIGIN);
       expect(me.isApex, 'the apex is the apex').toBe(true);
       expect(me.activeOrg, 'the Global view is org-less').toBeFalsy();
-      expect(me.isAdmin, 'alice is a realm admin').toBe(true);
+      expect(me.isAdmin, 'root is a realm admin').toBe(true);
 
       // The apex proxies Keycloak (single OIDC issuer lives here)...
       const apexKc = await page.request.get(`${APEX_ORIGIN}/realms/spawnly/.well-known/openid-configuration`);
@@ -334,14 +338,22 @@ test.describe('organization subdomains', () => {
     }
   });
 
-  test('(g) picking an org from the apex switcher NAVIGATES to its subdomain (silently)', async ({ browser }) => {
+  // FIXME(tenant-visibility Phase 3): this asserts the master admin's APEX Global
+  // switcher lists other orgs to jump into. In Phase 1 the ONLY realm admin is
+  // root, who is a member of NO org, so its Phase-1 switcher offers just "Global"
+  // (renderOrgSwitcher only lists the user's member orgs + Global) and stays
+  // hidden — there is no `acme` option to select. Phase 3 makes the realm-admin
+  // switcher enumerate ALL orgs (directory data); this case goes green then. alice
+  // no longer fits (she is not a realm admin and lands on the org picker, not a
+  // Global view with a header switcher).
+  test.fixme('(g) picking an org from the apex switcher NAVIGATES to its subdomain (silently)', async ({ browser }) => {
     // Each org's home is its subdomain, so choosing an org from the header switcher
     // must take the browser to <slug>.<apex> — from the apex too, not only from a
-    // satellite. alice (realm admin) starts on the apex Global view.
+    // satellite. root (realm admin) starts on the apex Global view.
     const ctx = await browser.newContext();
     try {
       const page = await ctx.newPage();
-      await loginAt(page, APEX_ORIGIN, 'alice', 'alice');
+      await loginAt(page, APEX_ORIGIN, 'root', 'root');
       expect(hostOf(page.url()), 'starts on the apex').toBe(APEX_HOST);
       const switcher = page.locator('#org-switcher');
       await expect(switcher, 'the apex Global view offers the org switcher').toBeVisible({ timeout: 30_000 });

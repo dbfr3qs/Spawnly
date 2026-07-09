@@ -1,6 +1,7 @@
 import { test, expect, type BrowserContext, type Page } from '@playwright/test';
 import {
   contextFor,
+  reachDashboardShell,
   LOGIN_USERNAME,
   LOGIN_PASSWORD,
   LOGIN_SUBMIT,
@@ -44,18 +45,23 @@ async function waitForListedStatus(
 // Scenario — the org authorization matrix, proven end-to-end through the REAL
 // dashboard → orchestrator → registry → SpiceDB path with SINGLE-ORG tokens (the
 // Phase-5 UX). Seed contract (deploy/keycloak/users.tf + scripts/reseed-orgs.sh):
+//   root   = PLATFORM master admin (realm `admin` role, member of NO org)
 //   acme   = alice (org admin) + viewer (member)
 //   globex = bob (org admin)
+//   carol  = member of BOTH acme and globex
 //   nomad  = member of NO org
-// The matrix (spec §Authorization matrix):
+// alice is acme's ORG admin ONLY — she is NOT the realm admin (that is root), so
+// she has no Global view. The matrix (spec §Authorization matrix):
 //   • a member sees every org agent but manages only their own (read-only on
 //     others) — and CANNOT mutate another's agent (UI absent AND the direct API
 //     404s);
 //   • an org admin manages every agent in the org;
 //   • a user in another org sees none of it (empty list, 404s);
-//   • switching orgs is a SILENT re-auth (prompt=none on the SSO session — no password);
+//   • switching orgs is a SILENT re-auth (prompt=none on the SSO session — no
+//     password): proven for a multi-org MEMBER (carol: acme ↔ globex);
 //   • an org-less non-admin gets the "no organization" screen and cannot spawn;
-//   • a realm admin keeps the org-less (Global) spawn path.
+//   • the platform master admin (root) lands org-less on the Global view and
+//     keeps the org-less (Global) spawn path.
 
 const acmeMember = (a: AgentSummary, id: string) => a.agentId === id;
 
@@ -147,40 +153,64 @@ test.describe('organization isolation matrix', () => {
     expect((await bob.request.delete(`/api/agents/${acmeAgentId}`)).status()).toBe(404);
   });
 
-  test('switching orgs is a silent re-auth (acme ↔ Global for the realm admin)', async () => {
-    // alice starts in acme.
-    await alice.goto('/');
-    await expect(alice.locator('[data-testid="active-org"]')).toContainText(/acme/i, {
-      timeout: 30_000,
-    });
+  test('switching between member orgs is a silent re-auth (carol: acme ↔ globex)', async ({
+    browser,
+  }) => {
+    // carol is a plain MEMBER of both acme and globex — the switcher offers her
+    // both, and switching between them must be a SILENT (password-less) re-auth on
+    // the live Keycloak SSO session. (alice is no longer a realm admin, so her
+    // switcher offers NO Global option — only her member orgs; the Global
+    // destination is exercised by root below, not here.)
+    const carolCtx = await contextFor(browser, 'carol', 'acme');
+    try {
+      const carol = await carolCtx.newPage();
+      await carol.goto('/');
+      await expect(carol.locator('[data-testid="active-org"]')).toContainText(/acme/i, {
+        timeout: 30_000,
+      });
 
-    // Switch to Global (org-less) — a silent (password-less) re-auth through /switch-org.
-    await switchOrg(alice);
-    await expect(alice.locator('[data-testid="active-org"]')).toContainText(/global/i, {
-      timeout: 30_000,
-    });
+      await switchOrg(carol, 'globex');
+      await expect(carol.locator('[data-testid="active-org"]')).toContainText(/globex/i, {
+        timeout: 30_000,
+      });
 
-    // Switch back into acme so the rest of the suite/cleanup runs as the acme admin.
-    await switchOrg(alice, 'acme');
-    await expect(alice.locator('[data-testid="active-org"]')).toContainText(/acme/i, {
-      timeout: 30_000,
-    });
+      await switchOrg(carol, 'acme');
+      await expect(carol.locator('[data-testid="active-org"]')).toContainText(/acme/i, {
+        timeout: 30_000,
+      });
+    } finally {
+      await carolCtx.close();
+    }
   });
 
-  test('a realm admin keeps the org-less (Global) spawn path', async () => {
-    await switchOrg(alice); // Global
-    await expect(alice.locator('[data-testid="active-org"]')).toContainText(/global/i, {
-      timeout: 30_000,
-    });
-    const globalId = await spawn(alice, 'weather-monitor');
+  test('the platform master admin (root) lands org-less on Global and keeps the Global spawn path', async ({
+    browser,
+  }) => {
+    // root holds the realm `admin` role and is a member of NO org, so it lands
+    // org-less on the Global view (the login helper clicks through the org-less
+    // admin "Continue to Global" landing). alice — an org admin only — never sees
+    // this view.
+    const rootCtx = await contextFor(browser, 'root');
     try {
-      await waitForListedStatus(alice, globalId, /active|pending/i, 60_000);
-      // A global (org-less) agent carries no orgId; the admin owns and manages it.
-      const rec = (await listAgents(alice)).find((a) => a.agentId === globalId)!;
-      expect(rec.canManage).toBeTruthy();
+      const root = await rootCtx.newPage();
+      await root.goto('/');
+      // A fresh page load re-shows the org-less admin gate — click through to Global.
+      await reachDashboardShell(root);
+      await expect(root.locator('[data-testid="active-org"]')).toContainText(/global/i, {
+        timeout: 30_000,
+      });
+
+      const globalId = await spawn(root, 'weather-monitor');
+      try {
+        await waitForListedStatus(root, globalId, /active|pending/i, 60_000);
+        // A global (org-less) agent carries no orgId; the admin owns and manages it.
+        const rec = (await listAgents(root)).find((a) => a.agentId === globalId)!;
+        expect(rec.canManage).toBeTruthy();
+      } finally {
+        await killAgent(root, globalId);
+      }
     } finally {
-      await killAgent(alice, globalId);
-      await switchOrg(alice, 'acme');
+      await rootCtx.close();
     }
   });
 });

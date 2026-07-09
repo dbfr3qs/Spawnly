@@ -1,6 +1,7 @@
 import { test as teardown } from '@playwright/test';
 import { listAgents } from '../helpers/dashboard';
 import { clearDemoAnchors, sweepOrgs, sweepRemotePods } from '../helpers/cleanup';
+import { contextFor } from '../helpers/auth';
 
 // Runs once after the whole suite (wired as the `setup` project's teardown in
 // playwright.config.ts). Sweeps the residue every kind of spec leaves behind so
@@ -17,7 +18,14 @@ import { clearDemoAnchors, sweepOrgs, sweepRemotePods } from '../helpers/cleanup
 // admin route, or an unreachable kubectl can't fail the run.
 teardown('remove all agents and org/anchor/remote residue', async ({ page, browser }) => {
   sweepRemotePods();
-  await sweepOrgs(page);
+  // org-<suffix> DELETE cascade is realm-admin gated — run it as root (the platform
+  // master admin); the default `page` (alice) is only an org admin now.
+  const rootCtx = await contextFor(browser, 'root');
+  try {
+    await sweepOrgs(await rootCtx.newPage());
+  } finally {
+    await rootCtx.close();
+  }
   await clearDemoAnchors(browser);
 
   let agents = [];

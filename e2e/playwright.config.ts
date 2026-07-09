@@ -32,8 +32,11 @@ export default defineConfig({
     // teardown (cleanup) runs after setup and all its dependents finish.
     { name: 'setup', testMatch: /auth\.setup\.ts/, teardown: 'cleanup' },
     {
-      // Sweeps all agents at the very end so the dashboard is left empty.
-      // Reuses the cached session to reach the (authenticated) API.
+      // Sweeps all agents + per-run org/anchor residue at the very end so the
+      // cluster is left at its seed. Runs as the default alice@acme session, which
+      // OWNS the bare-suite agent residue (the agent sweep is owner-scoped). The
+      // org DELETE cascade needs the realm `admin` role, so global.teardown runs
+      // sweepOrgs in a dedicated `root` context (alice is only an org admin now).
       name: 'cleanup',
       testMatch: /global\.teardown\.ts/,
       use: { storageState: 'playwright/.auth/user.json' },

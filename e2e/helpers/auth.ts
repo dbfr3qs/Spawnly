@@ -4,14 +4,19 @@ import { expect, type Browser, type Page } from '@playwright/test';
 // (see auth.setup.ts and the `setup` project dependency in playwright.config.ts).
 export const AUTH_FILE = 'playwright/.auth/user.json';
 
-// The seeded demo user in the Keycloak realm (deploy/keycloak/, provisioned by
-// scripts/bootstrap.sh as alice/alice — the admin).
+// The default demo user the shared storage state / bare-{page} suites run as
+// (deploy/keycloak/, provisioned by scripts/bootstrap.sh as alice/alice). alice
+// is acme's ORG admin — she is NOT the realm/platform admin (that is `root`); the
+// setup logs her in scoped to acme (see auth.setup.ts), since as a member of
+// multiple orgs an org-less login would land her on the org picker, not the shell.
 export const DEMO_USER = 'alice';
 export const DEMO_PASS = 'alice';
 
 // Seeded users for the multi-user / multi-org matrix (deploy/keycloak/users.tf +
 // scripts/reseed-orgs.sh). password == username for every demo user.
-//   alice  — realm admin; org admin of acme
+//   root   — PLATFORM master admin: holds the realm `admin` role, member of NO
+//            org (the cross-org/Global persona). The ONLY realm admin.
+//   alice  — non-realm-admin; ORG admin of acme (SpiceDB tuple, not a realm role)
 //   viewer — non-admin; member of acme
 //   bob    — non-admin; org admin of globex (cross-org isolation)
 //   carol  — non-admin; member of BOTH acme and globex (silent cross-subdomain
@@ -19,6 +24,7 @@ export const DEMO_PASS = 'alice';
 //            never perturbs the single-org isolation matrix)
 //   nomad  — non-admin; member of NO org (drives the "no organization" screen)
 export const USERS: Record<string, { pass: string }> = {
+  root: { pass: 'root' },
   alice: { pass: 'alice' },
   viewer: { pass: 'viewer' },
   bob: { pass: 'bob' },
@@ -46,6 +52,43 @@ export const LOGIN_SUBMIT = '#kc-login';
 // confirm a logged-out / rejected state.
 export async function expectLoginForm(page: Page): Promise<void> {
   await expect(page.locator(LOGIN_USERNAME)).toBeVisible({ timeout: 30_000 });
+}
+
+// reachDashboardShell waits for the dashboard shell (#agent-list) after the OIDC
+// redirect chain settles, transparently clicking through the org-less realm-admin
+// landing. A realm admin who belongs to NO org (i.e. `root`) lands on the
+// "no organization" gate — which, for an admin, carries a "Continue to Global
+// (no organization)" escape — instead of straight on the shell. Click it so the
+// master admin reaches the org-less Global dashboard. For every org-scoped user
+// the escape button never appears (it ships hidden and is only un-hidden for an
+// org-less admin), so this is a no-op on their normal landing.
+// (Phase 3 of tenant-visibility replaces this Global landing with a dedicated
+// org-directory view; this helper is the Phase-1-appropriate hook.)
+//
+// NOTE: the Global escape is a per-page-load client action — it sets no cookie,
+// so a fresh navigation to '/' re-shows the gate. login()/loginAt() call this on
+// their landing; a test that navigates root to '/' again must call it too (see
+// the `root` cases in orgs.spec.ts / admin-agent-types.spec.ts).
+export async function reachDashboardShell(page: Page): Promise<void> {
+  const gate = page.locator('#org-gate');
+  const escape = page.locator('[data-testid="noorg-continue-global"]');
+  const indicator = page.locator('[data-testid="active-org"]');
+  const list = page.locator('#agent-list');
+  // #agent-list sits BEHIND the org-gate overlay and is "visible" to Playwright
+  // even while the gate covers it, so waiting on it alone races the /api/me
+  // routing. Poll until the org UX has actually SETTLED into one of its terminal
+  // states: the active-org indicator is shown (an org or Global session) OR the
+  // org-less realm-admin "no organization" gate has surfaced its Global escape.
+  await expect(async () => {
+    const settled = (await indicator.isVisible()) || (await escape.isVisible());
+    expect(settled, 'org UX did not settle (no active-org indicator or Global escape)').toBe(true);
+  }).toPass({ timeout: 30_000 });
+  if (await escape.isVisible()) {
+    await escape.click();
+    // Wait for the overlay to fully dismiss so it can't intercept later clicks.
+    await expect(gate).toBeHidden({ timeout: 30_000 });
+  }
+  await expect(list).toBeVisible({ timeout: 30_000 });
 }
 
 // Drive the real OIDC login UI: navigating to the dashboard while logged out
@@ -87,6 +130,10 @@ export async function login(
       page.locator('#current-user'),
       `silent SSO login landed as the wrong user (wanted ${user}) — use a fresh context to log in as someone else`,
     ).toHaveText(user, { timeout: 10_000 });
+    // #agent-list is 'visible' to Playwright even behind the org-gate overlay, so a
+    // silent completion can land on the org-less admin gate — settle it (click the
+    // Global escape when present) before returning so the shell is actually usable.
+    await reachDashboardShell(page);
     return;
   }
   await page.locator(LOGIN_USERNAME).fill(user);
@@ -99,7 +146,7 @@ export async function login(
   }
   await password.fill(pass);
   await page.locator(LOGIN_SUBMIT).click();
-  await expect(page.locator('#agent-list')).toBeVisible({ timeout: 30_000 });
+  await reachDashboardShell(page);
 }
 
 // ── org-subdomains (satellite) helpers ──────────────────────────────────────
@@ -141,6 +188,10 @@ export async function loginAt(
       page.locator('#current-user'),
       `silent SSO login landed as the wrong user (wanted ${user}) — use a fresh context to log in as someone else`,
     ).toHaveText(user, { timeout: 10_000 });
+    // #agent-list is 'visible' to Playwright even behind the org-gate overlay, so a
+    // silent completion can land on the org-less admin gate — settle it (click the
+    // Global escape when present) before returning so the shell is actually usable.
+    await reachDashboardShell(page);
     return;
   }
   await uname.fill(user);
@@ -153,7 +204,8 @@ export async function loginAt(
   await password.fill(pass);
   await page.locator(LOGIN_SUBMIT).click();
   // The redirect chain lands back on the satellite /callback → the scoped shell.
-  await expect(list).toBeVisible({ timeout: 30_000 });
+  // (Or, for an org-less realm admin at the apex, the Global escape — handled here.)
+  await reachDashboardShell(page);
 }
 
 // contextFor logs a user in (into org, if given) in a FRESH browser context and

@@ -95,14 +95,19 @@ event row. Keep those when editing
 
 ## Seeded users & orgs (the multi-user matrix)
 
-The org suites drive four seeded identities (`deploy/keycloak/users.tf` +
-`scripts/reseed-orgs.sh`; **password == username** for every demo user):
+The org suites drive several seeded identities (`deploy/keycloak/users.tf` +
+`scripts/reseed-orgs.sh`; **password == username** for every demo user). The
+realm `admin` role — the platform master admin, with the org-less Global view —
+is held ONLY by `root`; `alice` is an ORG admin (a SpiceDB tuple), not the realm
+admin:
 
 | User | Realm role | Org membership |
 | --- | --- | --- |
-| `alice` | `admin` (platform) | org **admin** of `acme` |
+| `root` | `admin` (platform) | **no org** (the platform master admin / Global) |
+| `alice` | — | org **admin** of `acme` |
 | `viewer` | — | **member** of `acme` |
 | `bob` | — | org **admin** of `globex` (cross-org isolation) |
+| `carol` | — | **member** of both `acme` and `globex` (silent org switch) |
 | `nomad` | — | **no org** (drives the "no organization" screen) |
 
 Helpers live in [`helpers/auth.ts`](helpers/auth.ts): `login(page, user, pass,

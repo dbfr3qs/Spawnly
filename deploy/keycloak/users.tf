@@ -1,5 +1,11 @@
 # ===========================================================================
-# Users — mirror identityserver/TestUsers.cs (alice = admin, viewer = no role).
+# Users — the demo persona set for the multi-tenancy / visibility matrix.
+#
+#   root  = PLATFORM master admin: holds the realm `admin` role, member of NO
+#           org (the cross-org/Global persona).
+#   alice = acme ORG admin only (SpiceDB org-admin tuple via reseed-orgs.sh) —
+#           she does NOT hold the realm `admin` role.
+#   viewer/bob/carol/nomad = non-admin org members (see each block).
 #
 # Passwords come from TF variables; nothing is committed. Fail-closed: each
 # user is created ONLY when its password var is non-empty (count = 0 otherwise),
@@ -7,14 +13,60 @@
 # "absent password => no user" posture.
 # ===========================================================================
 
-# Realm role `admin`; alice is a member, viewer is not.
+# Realm role `admin` — the PLATFORM master admin role. Held ONLY by root; NO
+# demo org admin (alice/bob) holds it. Org-admin authority is a SpiceDB tuple,
+# a separate concept from this realm role.
 resource "keycloak_role" "admin" {
   realm_id    = keycloak_realm.spawnly.id
   name        = "admin"
   description = "Spawnly administrator (gates the admin UI and orchestrator template management)."
 }
 
-# ---- alice: admin user -----------------------------------------------------
+# ---- root: platform master admin (realm `admin`, member of NO org) ---------
+# The dedicated platform-operator persona: holds the realm `admin` role and is
+# NEVER added to any org (reseed-orgs.sh does not touch root — same posture as
+# nomad), so its token stays org-less. This is the ONLY user with the realm
+# `admin` role and thus the only cross-org/Global persona. Same fail-closed
+# count pattern as every other seeded user.
+resource "keycloak_user" "root" {
+  count = var.root_password != "" ? 1 : 0
+
+  realm_id = keycloak_realm.spawnly.id
+  username = "root"
+  enabled  = true
+
+  email          = "root@example.com"
+  email_verified = true
+  first_name     = "Root"
+  last_name      = "Admin"
+
+  initial_password {
+    value     = var.root_password
+    temporary = false
+  }
+}
+
+resource "keycloak_user_roles" "root_admin" {
+  count = var.root_password != "" ? 1 : 0
+
+  realm_id = keycloak_realm.spawnly.id
+  user_id  = keycloak_user.root[0].id
+
+  role_ids = [keycloak_role.admin.id]
+
+  # NON-EXHAUSTIVE: only ensure `admin` is present, do not manage the user's
+  # full role set. Exhaustive (the default) would STRIP the built-in
+  # `default-roles-spawnly` composite role that carries `offline_access` /
+  # `uma_authorization`, which would silently kill offline_access tokens for
+  # root. See finding #4.
+  exhaustive = false
+}
+
+# ---- alice: acme org admin (NO realm role) ---------------------------------
+# alice's admin authority is scoped to acme via the SpiceDB org-admin tuple
+# written by reseed-orgs.sh (`create_org acme "Acme" alice`), NOT a realm role —
+# she is deliberately NOT granted `keycloak_role.admin`, so she has no cross-org
+# Global view. Same fail-closed count pattern as the other users.
 resource "keycloak_user" "alice" {
   count = var.alice_password != "" ? 1 : 0
 
@@ -25,28 +77,14 @@ resource "keycloak_user" "alice" {
   email          = "alice@example.com"
   email_verified = true
   first_name     = "Alice"
-  last_name      = "Admin"
+  last_name      = "Acme"
 
   initial_password {
     value     = var.alice_password
     temporary = false
   }
-}
-
-resource "keycloak_user_roles" "alice_admin" {
-  count = var.alice_password != "" ? 1 : 0
-
-  realm_id = keycloak_realm.spawnly.id
-  user_id  = keycloak_user.alice[0].id
-
-  role_ids = [keycloak_role.admin.id]
-
-  # NON-EXHAUSTIVE: only ensure `admin` is present, do not manage the user's
-  # full role set. Exhaustive (the default) would STRIP the built-in
-  # `default-roles-spawnly` composite role that carries `offline_access` /
-  # `uma_authorization`, which would silently kill offline_access tokens for
-  # alice. See finding #4.
-  exhaustive = false
+  # No realm admin role — alice's authority over acme is a SpiceDB org-admin
+  # tuple (reseed-orgs.sh), not the realm `admin` role. Only root is realm admin.
 }
 
 # ---- viewer: non-admin user ------------------------------------------------
