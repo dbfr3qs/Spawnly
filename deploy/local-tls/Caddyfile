@@ -5,8 +5,11 @@
 #   https://localtest.me            → apex (Global/picker/signup + KC proxy)
 #   https://<slug>.localtest.me     → org satellite (scoped dashboard)
 #
-# `localtest.me` and `*.localtest.me` already resolve to 127.0.0.1, so no
-# /etc/hosts edits are needed. Run via `make tls-mimic` (scripts/local-tls.sh),
+# On a native host `localtest.me` and `*.localtest.me` resolve to 127.0.0.1
+# publicly, so no /etc/hosts edits are needed. Inside a devcontainer (Docker's
+# embedded DNS doesn't resolve them) scripts/local-tls.sh adds the apex + demo
+# satellites to /etc/hosts and runs Caddy in the devcontainer's own netns.
+# Run via `make tls-mimic` (scripts/local-tls.sh),
 # NOT standalone — the script also flips the cluster into apex=localtest.me mode.
 # This is a MODE-SWITCH: it is mutually exclusive with the default localhost:8090
 # dev loop (`make dash`/`make e2e`). See scripts/local-tls.sh.

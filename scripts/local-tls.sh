@@ -97,10 +97,55 @@ stop_port_forward() {
   rm -f "$PF_PID_FILE"
 }
 
+# ── host resolution + network mode (devcontainer vs native host) ──────────────
+# The satellite flow needs `localtest.me` + `*.localtest.me` to resolve to
+# 127.0.0.1 AND Caddy's :443 to be reachable from wherever the browser runs.
+#
+#  • Native host: `localtest.me` resolves publicly to 127.0.0.1 (no /etc/hosts),
+#    and Caddy with `--network host` binds the host's :443 + reaches the host's
+#    localhost:8090 port-forward. This is the default.
+#  • Devcontainer (docker-outside-of-docker, `/.dockerenv` present): the container
+#    is on a bridge network with its OWN loopback, and Docker's embedded DNS does
+#    NOT resolve `*.localtest.me`. A `--network host` Caddy would bind the HOST
+#    netns (unreachable from here). So we (a) run Caddy in the DEVCONTAINER's own
+#    netns (`--network container:<id>`) — it then binds this container's 127.0.0.1
+#    :443 and reaches this container's localhost:8090 port-forward — and (b) add
+#    the apex + demo-org satellite names to /etc/hosts. Mirrors the Makefile
+#    `kubeconfig` target's `[ -f /.dockerenv ]` devcontainer detection.
+IN_DEVCONTAINER() { [ -f /.dockerenv ]; }
+
+# The Host names the e2e satellites need resolvable in a devcontainer (the demo
+# orgs seeded by reseed-orgs.sh, plus the apex).
+HOSTS_NAMES="${APEX} acme.${APEX} globex.${APEX}"
+
+# ensure_hosts — in a devcontainer, point the apex + demo satellites at 127.0.0.1
+# in /etc/hosts (public *.localtest.me DNS isn't reachable through Docker's
+# embedded resolver). Idempotent; a no-op on a native host (public DNS covers it).
+ensure_hosts() {
+  if ! IN_DEVCONTAINER; then return; fi
+  if getent hosts "acme.${APEX}" >/dev/null 2>&1; then
+    log "/etc/hosts already resolves the satellites (${APEX})"
+    return
+  fi
+  log "adding ${APEX} + demo satellites to /etc/hosts (devcontainer)"
+  printf '127.0.0.1 %s\n' "$HOSTS_NAMES" | sudo tee -a /etc/hosts >/dev/null \
+    || warn "could not edit /etc/hosts — add '127.0.0.1 $HOSTS_NAMES' manually."
+}
+
+# caddy_network — the docker --network value for Caddy (see the block comment).
+caddy_network() {
+  if IN_DEVCONTAINER; then
+    printf 'container:%s' "$(cat /etc/hostname)"
+  else
+    printf 'host'
+  fi
+}
+
 # ── Caddy TLS terminator ──────────────────────────────────────────────────────
-# --network host: Caddy binds host :443 directly and reaches the port-forward at
-# localhost:8090 with no host.docker.internal plumbing (this is a Linux
-# devcontainer). On Docker Desktop / macOS, swap to
+# Network mode is chosen by caddy_network() (host on a native host; the
+# devcontainer's own netns inside a devcontainer). Either way Caddy binds the
+# browser-visible :443 and reaches the dashboard port-forward at localhost:8090.
+# On Docker Desktop / macOS, swap to
 #   -p 443:443 --add-host=host.docker.internal:host-gateway
 # and set DASH_UPSTREAM=host.docker.internal:8090. Root in the container binds the
 # privileged :443.
@@ -114,8 +159,10 @@ start_caddy() {
   docker rm -f "$CADDY_NAME" >/dev/null 2>&1 || true
   log "starting Caddy TLS terminator ($CADDY_IMAGE) on :443"
   # Least privilege: drop all caps, keep only NET_BIND_SERVICE for the :443 bind.
+  local net; net="$(caddy_network)"
+  log "Caddy network mode: $net"
   docker create --name "$CADDY_NAME" \
-    --network host \
+    --network "$net" \
     --cap-drop ALL --cap-add NET_BIND_SERVICE \
     -v "$CADDY_VOLUME:/data" \
     "$CADDY_IMAGE" >/dev/null
@@ -220,6 +267,10 @@ cmd_up() {
   # (b) dashboard port-forward that Caddy proxies to.
   ensure_port_forward
 
+  # (b2) resolve the apex + demo satellites to 127.0.0.1 in a devcontainer
+  #      (public *.localtest.me DNS isn't reachable through Docker's resolver).
+  ensure_hosts
+
   # (c) TLS terminator.
   start_caddy
 
@@ -277,6 +328,13 @@ cmd_down() {
   kubectl set env deployment/registry  ORG_APEX_DOMAIN="" >/dev/null
   kubectl rollout restart deployment/registry >/dev/null
   kubectl rollout status  deployment/registry --timeout=120s
+
+  # Re-apply the realm for the localhost origin + reseed. The KC_HOSTNAME set env
+  # above ROLLS Keycloak, and on kind Keycloak's dev-file DB is WIPED on restart
+  # (KC_DB_URL empty → ephemeral H2), so the realm must be re-created — symmetric
+  # with `up`'s apply_realm. Without this, `make tls-mimic-down && make e2e` fails
+  # at login with "Realm does not exist" (the Phase-3 reversibility invariant).
+  apply_realm "$LOCAL_ORIGIN"
 
   # Wait out the resource-server issuer-flip rollouts before declaring default
   # mode restored (the port-forward is dropped by the EXIT trap above).
