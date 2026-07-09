@@ -78,4 +78,12 @@ type Directory interface {
 	// unknown user — never an error, so a "which orgs am I in" read fails open to
 	// "none" rather than leaking existence).
 	ListUserOrgs(ctx context.Context, user string) ([]string, error)
+
+	// RegisterOrgRedirectURIs adds redirectURI + postLogoutURI to the dashboard OIDC
+	// client (a per-org satellite callback + post-logout origin). Idempotent. The
+	// registry builds the URLs (platform owns the apex-domain shape); the adapter is
+	// host-blind — dependency-direction rule.
+	RegisterOrgRedirectURIs(ctx context.Context, redirectURI, postLogoutURI string) error
+	// RemoveOrgRedirectURIs removes them. Idempotent (absent = success).
+	RemoveOrgRedirectURIs(ctx context.Context, redirectURI, postLogoutURI string) error
 }

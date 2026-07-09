@@ -1024,7 +1024,11 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	// Org onboarding + membership control-plane API (multi-tenancy Phase 3). All
 	// org/membership mutation flows through here (registry = the single dual-write
 	// choke point over Keycloak + SpiceDB); every route is cp-gated.
-	registerOrgRoutes(mux, s, sdb, dir, cp)
+	// ORG_APEX_DOMAIN (org-subdomains Phase 2): the apex under which each org's
+	// satellite lives (e.g. spawnly.run / localtest.me). Empty = feature off →
+	// org create/delete skip registering satellite redirect URIs on the dashboard
+	// client.
+	registerOrgRoutes(mux, s, sdb, dir, getEnv("ORG_APEX_DOMAIN", ""), cp)
 
 	// Template management (create/disable/delete) is a control-plane operation,
 	// so it sits behind the same control-plane authenticator as the consent
@@ -2524,7 +2528,7 @@ func buildOrgDirectory() orgdirectory.Directory {
 	realm := getEnv("KEYCLOAK_REALM", "spawnly")
 	clientID := getEnv("ORG_ADMIN_CLIENT_ID", "org-admin")
 	log.Printf("org directory: keycloak admin-REST (base=%s realm=%s client=%s)", base, realm, clientID)
-	return keycloak.New(base, realm, clientID, secret, nil)
+	return keycloak.New(base, realm, clientID, secret, getEnv("DASHBOARD_CLIENT_ID", "dashboard"), nil)
 }
 
 // disabledDirectory is the org directory when no org-admin credential is
@@ -2552,4 +2556,10 @@ func (disabledDirectory) ListMembers(context.Context, string) ([]orgdirectory.Me
 }
 func (disabledDirectory) ListUserOrgs(context.Context, string) ([]string, error) {
 	return nil, errOrgDirectoryDisabled
+}
+func (disabledDirectory) RegisterOrgRedirectURIs(context.Context, string, string) error {
+	return errOrgDirectoryDisabled
+}
+func (disabledDirectory) RemoveOrgRedirectURIs(context.Context, string, string) error {
+	return errOrgDirectoryDisabled
 }

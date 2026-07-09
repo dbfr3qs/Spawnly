@@ -222,9 +222,11 @@ resource "keycloak_openid_client_optional_scopes" "idp_consent" {
 # The registry's org onboarding + membership API (multi-tenancy Phase 3) writes
 # Keycloak Organizations/Users through THIS service-account client — the single
 # dual-write choke point over Keycloak + SpiceDB. It is LEAST-PRIVILEGE: its
-# service account is granted exactly two realm-management client roles
-# (manage-users, manage-realm), never the master/realm admin. The secret arrives
-# at runtime from the bootstrap-generated Secret (never baked into an image).
+# service account is granted exactly three realm-management client roles
+# (manage-users, manage-realm, manage-clients), never the master/realm admin. The
+# secret arrives at runtime from the bootstrap-generated Secret (never baked into
+# an image). The manage-clients role (org-subdomains Phase 2) is the narrowest
+# widening that lets it edit the dashboard client's satellite redirect URIs.
 resource "keycloak_openid_client" "org_admin" {
   realm_id  = keycloak_realm.spawnly.id
   client_id = "org-admin"
@@ -243,10 +245,10 @@ resource "keycloak_openid_client" "org_admin" {
   # assigned roles when full scope is allowed — with it false, Keycloak filters
   # the realm-management roles OUT of the token and every admin call 403s
   # (verified against a live realm). Least privilege is preserved a different way
-  # here: the service account is assigned ONLY manage-users + manage-realm below,
-  # so full scope still admits just those two roles (plus the harmless default
-  # realm roles). This client never lists roles/orchestrator:* among any scope,
-  # so it cannot mint a human/agent-shaped token.
+  # here: the service account is assigned ONLY manage-users + manage-realm +
+  # manage-clients below, so full scope still admits just those three roles (plus
+  # the harmless default realm roles). This client never lists roles/orchestrator:*
+  # among any scope, so it cannot mint a human/agent-shaped token.
   full_scope_allowed = true
 }
 
@@ -257,8 +259,11 @@ data "keycloak_openid_client" "realm_management" {
 }
 
 # manage-users: create users (unknown-member invite), find users, org member
-# add/remove/list. manage-realm: organization CRUD. These two — and only these —
-# are the minimal set that authorizes every org-directory operation.
+# add/remove/list. manage-realm: organization CRUD. manage-clients: read + edit
+# the dashboard client's redirect/post-logout URIs (org-subdomains Phase 2 —
+# NOT covered by manage-users/manage-realm; without it the PUT /clients 403s).
+# These three — and only these — are the minimal set that authorizes every
+# org-directory operation.
 resource "keycloak_openid_client_service_account_role" "org_admin_manage_users" {
   realm_id                = keycloak_realm.spawnly.id
   service_account_user_id = keycloak_openid_client.org_admin.service_account_user_id
@@ -271,6 +276,30 @@ resource "keycloak_openid_client_service_account_role" "org_admin_manage_realm" 
   service_account_user_id = keycloak_openid_client.org_admin.service_account_user_id
   client_id               = data.keycloak_openid_client.realm_management.id
   role                    = "manage-realm"
+}
+
+# manage-clients: edit the dashboard OIDC client's redirect + post-logout URIs so
+# org create/delete can register/remove each org's satellite callback
+# (https://<slug>.<apex>/callback). This is the least-privilege widening for
+# org-subdomains Phase 2 — it grants client CRUD across the realm, which is why
+# the adapter only ever GET/PUTs the single dashboard client and never mints
+# credentials from it.
+#
+# SECURITY CAVEAT (second-order): manage-clients is realm-WIDE. The org-admin
+# TOKEN still cannot be human/agent-shaped (no orchestrator scopes; see above),
+# but a holder of the org-admin SECRET could read any client's secret or re-point
+# an agent client OFF the spawnly-attestation authenticator onto a known
+# client-secret and mint agent-shaped tokens — bypassing SPIFFE/STS attestation.
+# Keycloak has no narrower built-in realm-management role; the true least-
+# privilege fix is fine-grained admin permissions scoped to ONLY the dashboard
+# client (enable + scope if/when available). Until then: protect the
+# bootstrap-generated org-admin secret as tightly as any minting credential and
+# consider alerting on admin-REST client edits other than the dashboard client.
+resource "keycloak_openid_client_service_account_role" "org_admin_manage_clients" {
+  realm_id                = keycloak_realm.spawnly.id
+  service_account_user_id = keycloak_openid_client.org_admin.service_account_user_id
+  client_id               = data.keycloak_openid_client.realm_management.id
+  role                    = "manage-clients"
 }
 
 # ===========================================================================

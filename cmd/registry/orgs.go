@@ -69,7 +69,7 @@ func requireOrg(w http.ResponseWriter, ctx context.Context, s registry.Store, id
 // deploy/keycloak/README.md). These endpoints are platform-admin only in Phase 3
 // (the orchestrator gates them with requireAdmin); org-admin self-service arrives
 // in Phase 6.
-func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client, dir orgdirectory.Directory, cp func(http.HandlerFunc) http.HandlerFunc) {
+func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client, dir orgdirectory.Directory, apexDomain string, cp func(http.HandlerFunc) http.HandlerFunc) {
 	// Per-org attestation-anchor lifecycle (Phase 8): PUT/DELETE .../anchor and
 	// POST .../anchor/activate. Same org-endpoints family, same cp gate; the
 	// anchor is also visible read-only in GET /v1/orgs/{id} below.
@@ -195,13 +195,11 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 		// both view_agents and admin_agents in the schema), so no separate member
 		// tuple is needed.
 		res, rel, sub := orgTuple(body.OrgID, orgdirectory.RoleAdmin, body.AdminUser)
-		tupleErr := sdb.WriteRelationship(ctx, res, rel, sub)
-		var memberErr error
-		if tupleErr == nil {
-			memberErr = dir.AddMember(ctx, body.OrgID, body.AdminUser)
-		}
-		if tupleErr != nil || memberErr != nil {
-			log.Printf("org create: admin wiring for %s failed (tuple=%v member=%v) — unwinding", body.OrgID, tupleErr, memberErr)
+		// unwindCreate reverses steps 1–3 best-effort (admin tuple + first-admin
+		// membership, and — only when we created it this call — the store record and
+		// Keycloak org). Shared by the step-3 and step-4 failure paths; every step is
+		// idempotent so a retry converges rather than double-writing.
+		unwindCreate := func() {
 			uctx := context.WithoutCancel(ctx)
 			if derr := sdb.DeleteRelationship(uctx, res, rel, sub); derr != nil {
 				log.Printf("org create unwind: delete admin tuple: %v", derr)
@@ -217,8 +215,40 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 					log.Printf("org create unwind: keycloak DeleteOrg: %v", derr)
 				}
 			}
+		}
+
+		tupleErr := sdb.WriteRelationship(ctx, res, rel, sub)
+		var memberErr error
+		if tupleErr == nil {
+			memberErr = dir.AddMember(ctx, body.OrgID, body.AdminUser)
+		}
+		if tupleErr != nil || memberErr != nil {
+			log.Printf("org create: admin wiring for %s failed (tuple=%v member=%v) — unwinding", body.OrgID, tupleErr, memberErr)
+			unwindCreate()
 			http.Error(w, "org create failed", http.StatusInternalServerError)
 			return
+		}
+
+		// Step 4 (org-subdomains Phase 2): register the org's satellite callback +
+		// post-logout origin on the dashboard client so a fresh login at
+		// https://<org>.<apex>/ can complete its own OIDC redirect. Feature-gated on
+		// ORG_APEX_DOMAIN; the registry OWNS the URL shape (the adapter is host-blind).
+		// A failure unwinds steps 1–3 exactly like the admin-wiring failure above.
+		if apexDomain != "" {
+			redirectURI := "https://" + body.OrgID + "." + apexDomain + "/callback"
+			postLogoutURI := "https://" + body.OrgID + "." + apexDomain + "/"
+			if err := dir.RegisterOrgRedirectURIs(ctx, redirectURI, postLogoutURI); err != nil {
+				log.Printf("org create: register satellite redirect URIs for %s failed: %v — unwinding", body.OrgID, err)
+				// The PUT may have LANDED before the response was lost (timeout), so
+				// best-effort remove the URIs too — completing the "unwind reverses
+				// everything" contract. Idempotent: a no-op when nothing was written.
+				if derr := dir.RemoveOrgRedirectURIs(context.WithoutCancel(ctx), redirectURI, postLogoutURI); derr != nil {
+					log.Printf("org create unwind: RemoveOrgRedirectURIs: %v", derr)
+				}
+				unwindCreate()
+				http.Error(w, "org create failed", http.StatusInternalServerError)
+				return
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -344,6 +374,17 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 				if derr := sdb.DeleteRelationship(ctx, res, rel, sub); derr != nil {
 					log.Printf("org delete: drop %s tuple for %s: %v", role, m.UserID, derr)
 				}
+			}
+		}
+		// Remove the org's satellite redirect URIs from the dashboard client
+		// (org-subdomains Phase 2). Best-effort, mirroring the tuple cleanup above:
+		// a stale redirect URI for a deleted org is harmless (no org means no
+		// satellite to redirect to), so it must not block the delete.
+		if apexDomain != "" {
+			redirectURI := "https://" + id + "." + apexDomain + "/callback"
+			postLogoutURI := "https://" + id + "." + apexDomain + "/"
+			if derr := dir.RemoveOrgRedirectURIs(ctx, redirectURI, postLogoutURI); derr != nil {
+				log.Printf("org delete: remove satellite redirect URIs for %s: %v", id, derr)
 			}
 		}
 		if derr := dir.DeleteOrg(ctx, id); derr != nil {
