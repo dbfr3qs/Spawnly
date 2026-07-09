@@ -41,8 +41,10 @@ spec:
             # = single-origin mode: every Host resolves to the apex, preserving
             # today's localhost:8090 behavior. Set to the apex (spawnly.run /
             # localtest.me) to enable <slug>.<apex> per-org routing; the AWS
-            # deploy.sh sets it plus TRUST_FORWARDED_HOST=true so the dashboard
-            # reads the ALB's X-Forwarded-Host. Empty/false uses the request Host.
+            # deploy.sh sets APEX_DOMAIN=spawnly.run. TRUST_FORWARDED_HOST stays
+            # OFF: the ALB preserves the browser's original Host, so the dashboard
+            # reads r.Host directly (the unforgeable routing signal). Only set it
+            # true behind a proxy that rewrites Host into X-Forwarded-Host.
             - name: APEX_DOMAIN
               value: ""
             - name: TRUST_FORWARDED_HOST
