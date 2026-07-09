@@ -1670,7 +1670,11 @@
   // (Phase 6): a REALM admin manages the GLOBAL catalog (/api/admin/templates); an
   // ORG admin manages only their org's templates (/api/org/templates). Server gates
   // are authoritative — this only decides which endpoint the UI reads.
-  const ME = { isAdmin: false, isOrgAdmin: false, activeOrg: '' };
+  // hostOrg/isApex/apexDomain describe the browser's host topology (org-subdomains):
+  // on a satellite (<slug>.<apex>) hostOrg names that org and isApex is false; on the
+  // apex or in single-origin mode (apexDomain === '') isApex is true. The org switcher
+  // reads these to navigate to another org's subdomain instead of /switch-org.
+  const ME = { isAdmin: false, isOrgAdmin: false, activeOrg: '', hostOrg: '', isApex: true, apexDomain: '' };
 
   async function fetchAdminTemplates() {
     // Realm admin → global + every org's (full catalog). Org admin (non-realm) →
@@ -3226,7 +3230,23 @@
     sel.hidden = false;
     sel.addEventListener('change', () => {
       const v = sel.value;
-      // A full re-auth into the chosen org (or Global when empty).
+      // Org-subdomains topology: each org lives at its OWN subdomain, so picking an
+      // org NAVIGATES to its satellite (which then silently re-auths from its own
+      // host via the shared apex SSO session — no password). This applies from BOTH
+      // the apex picker and a satellite switcher, so the URL always reflects the
+      // active org. "Global" (empty v) is org-less and lives on the apex: from a
+      // satellite navigate to the apex; on the apex do the in-place org-less re-auth.
+      if (ME.apexDomain) {
+        const proto = window.location.protocol;
+        if (v) {
+          window.location = `${proto}//${v}.${ME.apexDomain}/`;
+        } else {
+          window.location = ME.isApex ? '/switch-org' : `${proto}//${ME.apexDomain}/`;
+        }
+        return;
+      }
+      // Single-origin mode (feature off): a full in-place re-auth into the chosen
+      // org (or Global when empty) — no subdomains, so the origin never changes.
       window.location = v ? `/switch-org?org=${encodeURIComponent(v)}` : '/switch-org';
     });
   }
@@ -3294,6 +3314,11 @@
     ME.isAdmin = !!me.isAdmin;
     ME.isOrgAdmin = !!me.isOrgAdmin;
     ME.activeOrg = me.activeOrg || '';
+    // Host topology (org-subdomains): drives the switcher's navigate-to-subdomain
+    // behavior. Defaults keep single-origin mode (isApex true, apexDomain '').
+    ME.hostOrg = me.hostOrg || '';
+    ME.isApex = me.isApex !== false;
+    ME.apexDomain = me.apexDomain || '';
     if (me.isAdmin || me.isOrgAdmin) document.getElementById('open-agent-types-btn').hidden = false;
     // Any member of an active org can open the Organization view (members list +
     // settings + anchor) — read-only for non-admins (loadOrgSettings hides the

@@ -33,7 +33,14 @@ func main() {
 	identityInternalURL := getenv("IDENTITY_INTERNAL_URL", "http://keycloak:8080/realms/spawnly")
 	clientID := getenv("OIDC_CLIENT_ID", "dashboard")
 	clientSecret := getenv("OIDC_CLIENT_SECRET", "dashboard-secret")
-	auth := NewAuthenticator(authority, identityInternalURL, clientID, clientSecret)
+	// Host-aware org subdomains. APEX_DOMAIN empty = single-origin mode: every Host
+	// resolves to the apex, so the dashboard behaves exactly as before (today's
+	// localhost:8090). Set to the apex (spawnly.run / localtest.me) to enable
+	// <slug>.<apex> per-org routing. TRUST_FORWARDED_HOST=true makes the dashboard
+	// read the ALB's X-Forwarded-Host (the AWS deploy); otherwise it uses r.Host.
+	apexDomain := os.Getenv("APEX_DOMAIN")
+	trustForwardedHost := os.Getenv("TRUST_FORWARDED_HOST") == "true"
+	auth := NewAuthenticator(authority, identityInternalURL, clientID, clientSecret, apexDomain, trustForwardedHost)
 
 	// Browser-facing docs link target. Local dev runs the docs site on :4321;
 	// the AWS/prod deploy.sh sets this to the public docs origin.
@@ -134,8 +141,22 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	if rp := auth.realmPath(); rp != "" {
 		realmPrefix = rp + "/"
 	}
-	mux.Handle(realmPrefix, idProxy)
-	mux.Handle("/resources/", idProxy)
+	// Single-issuer invariant: ONLY the apex reverse-proxies Keycloak's browser
+	// paths. A satellite (<slug>.<apex>) must never serve /realms/… or /resources/
+	// — that would mint a second issuer origin — so it 404s. In single-origin mode
+	// (APEX_DOMAIN unset) every host is the apex, so this passes through unchanged.
+	// /admin is not proxied on ANY host (it isn't registered here at all).
+	apexOnly := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, isApex := auth.hosts.resolveOrg(auth.hosts.requestHost(r)); !isApex {
+				http.NotFound(w, r)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	mux.Handle(realmPrefix, apexOnly(idProxy))
+	mux.Handle("/resources/", apexOnly(idProxy))
 	// Pending spawn-consent is served by the registry-native broker via the
 	// /api/consent-requests routes below (Phase 5b); Keycloak's own consent UI is
 	// not used.
@@ -222,12 +243,21 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	// so the UI can show a soft retry rather than a false "no organization" screen.
 	mux.Handle("GET /api/me", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, _ := auth.user(r)
+		// Host topology for the UI: hostOrg is the org named by the browser's
+		// subdomain (""/isApex on the apex or in single-origin mode), apexDomain is
+		// the configured apex ("" = single-origin). The static UI reads these to
+		// render the scoped satellite view and to make the org switcher NAVIGATE to
+		// <scheme>://<other-slug>.<apex>/ on a satellite. Not an authorization signal.
+		hostOrg, isApex := auth.hosts.resolveOrg(auth.hosts.requestHost(r))
 		out := map[string]any{
 			"user":       user,
 			"isAdmin":    auth.isAdmin(r),
 			"activeOrg":  auth.activeOrg(r),
 			"orgs":       []any{},
 			"isOrgAdmin": false,
+			"hostOrg":    hostOrg,
+			"isApex":     isApex,
+			"apexDomain": auth.hosts.apexDomain,
 		}
 		token, err := auth.orchestratorToken(r.Context(), r)
 		if err != nil {

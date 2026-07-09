@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
@@ -36,6 +37,7 @@ type fakeDirectory struct {
 	failDeleteOrg    error
 	failSetRole      error
 	failListMembers  error
+	failRegisterURIs error
 }
 
 func newFakeDirectory() *fakeDirectory {
@@ -53,6 +55,17 @@ func (f *fakeDirectory) hasCall(s string) bool {
 	defer f.mu.Unlock()
 	for _, c := range f.calls {
 		if c == s {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeDirectory) hasCallPrefix(prefix string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, c := range f.calls {
+		if strings.HasPrefix(c, prefix) {
 			return true
 		}
 	}
@@ -143,6 +156,20 @@ func (f *fakeDirectory) ListUserOrgs(_ context.Context, user string) ([]string, 
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+func (f *fakeDirectory) RegisterOrgRedirectURIs(_ context.Context, redirectURI, postLogoutURI string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("RegisterOrgRedirectURIs:" + redirectURI + "|" + postLogoutURI)
+	return f.failRegisterURIs
+}
+
+func (f *fakeDirectory) RemoveOrgRedirectURIs(_ context.Context, redirectURI, postLogoutURI string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("RemoveOrgRedirectURIs:" + redirectURI + "|" + postLogoutURI)
+	return nil
 }
 
 // flakySpice wraps spicedb.Mock to inject a WriteRelationship failure, so the
@@ -583,6 +610,85 @@ func TestAdminCreate_AllowsExistingSlugConverge(t *testing.T) {
 	rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "acme", "adminUser": "alice"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin re-create status = %d, want 200 (converge)", rec.Code)
+	}
+}
+
+// --- Satellite redirect URIs (org-subdomains Phase 2) -----------------------
+
+func TestCreateOrg_RegistersSatelliteRedirectURIs(t *testing.T) {
+	t.Setenv("ORG_APEX_DOMAIN", "localtest.me")
+	s := newStore()
+	sdb := spicedb.NewMock()
+	dir := newFakeDirectory()
+	mux := orgMux(s, sdb, dir)
+
+	rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "acme", "adminUser": "alice"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	want := "RegisterOrgRedirectURIs:https://acme.localtest.me/callback|https://acme.localtest.me/"
+	if !dir.hasCall(want) {
+		t.Fatalf("expected register call %q; calls=%v", want, dir.calls)
+	}
+}
+
+func TestCreateOrg_UnwindsWhenRedirectURIRegistrationFails(t *testing.T) {
+	t.Setenv("ORG_APEX_DOMAIN", "localtest.me")
+	s := newStore()
+	sdb := spicedb.NewMock()
+	dir := newFakeDirectory()
+	dir.failRegisterURIs = errors.New("keycloak PUT /clients failed")
+	mux := orgMux(s, sdb, dir)
+
+	rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "acme", "adminUser": "alice"})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	// Steps 1–3 must be fully unwound (store, admin tuple, keycloak org + membership).
+	if _, ok, _ := s.GetOrg(context.Background(), "acme"); ok {
+		t.Error("store record should have been unwound")
+	}
+	if sdb.HasRelationship("organization:acme", "admin", "user:alice") {
+		t.Error("admin tuple should have been unwound")
+	}
+	if !dir.hasCall("RemoveMember:acme/alice") {
+		t.Errorf("first-admin membership should have been unwound; calls=%v", dir.calls)
+	}
+	if !dir.hasCall("DeleteOrg:acme") {
+		t.Errorf("keycloak org should have been unwound; calls=%v", dir.calls)
+	}
+}
+
+func TestDeleteOrg_RemovesSatelliteRedirectURIs(t *testing.T) {
+	t.Setenv("ORG_APEX_DOMAIN", "localtest.me")
+	s := newStore()
+	sdb := spicedb.NewMock()
+	dir := newFakeDirectory()
+	mux := orgMux(s, sdb, dir)
+	doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "acme", "adminUser": "alice"})
+
+	rec := doReq(t, mux, "DELETE", "/v1/orgs/acme", nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	want := "RemoveOrgRedirectURIs:https://acme.localtest.me/callback|https://acme.localtest.me/"
+	if !dir.hasCall(want) {
+		t.Fatalf("expected remove call %q; calls=%v", want, dir.calls)
+	}
+}
+
+func TestCreateAndDeleteOrg_ApexUnsetSkipsRegistration(t *testing.T) {
+	// ORG_APEX_DOMAIN unset (feature off) → no redirect-URI calls at all.
+	t.Setenv("ORG_APEX_DOMAIN", "")
+	s := newStore()
+	sdb := spicedb.NewMock()
+	dir := newFakeDirectory()
+	mux := orgMux(s, sdb, dir)
+
+	doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "acme", "adminUser": "alice"})
+	doReq(t, mux, "DELETE", "/v1/orgs/acme", nil)
+	if dir.hasCallPrefix("RegisterOrgRedirectURIs:") || dir.hasCallPrefix("RemoveOrgRedirectURIs:") {
+		t.Fatalf("redirect-URI ops must be skipped when ORG_APEX_DOMAIN is unset; calls=%v", dir.calls)
 	}
 }
 

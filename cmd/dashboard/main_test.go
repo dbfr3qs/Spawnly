@@ -58,7 +58,7 @@ func TestLogsOpTargetCarriesParams(t *testing.T) {
 // stubAuth returns an Authenticator wired with a no-op ensure() and the given
 // oauth config, so token-handling can be exercised without real OIDC discovery.
 func stubAuth(oauth *oauth2.Config) *Authenticator {
-	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret", "", false)
 	a.once.Do(func() {}) // mark ensure() done so it won't hit the network
 	a.oauth = oauth
 	return a
@@ -198,7 +198,7 @@ func TestKeycloakProxyAllowlist(t *testing.T) {
 	}))
 	defer kc.Close()
 
-	a := NewAuthenticator("http://localhost:8090", kc.URL+"/realms/spawnly", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", kc.URL+"/realms/spawnly", "dashboard", "secret", "", false)
 	// buildMux only needs the auth + a stub upstream for the /api routes.
 	mux := buildMux(a, "http://orch.invalid", kc.URL+"/realms/spawnly", "http://docs", fstest.MapFS{})
 
@@ -250,10 +250,43 @@ func TestKeycloakProxyAllowlist(t *testing.T) {
 	if rec.Code == http.StatusOK {
 		t.Errorf("/admin: status = %d, want a non-200 (not served)", rec.Code)
 	}
+
+	// Single-issuer invariant (org-subdomains): with APEX_DOMAIN set, ONLY the apex
+	// proxies Keycloak. A satellite (<slug>.<apex>) must 404 the KC-proxy paths — a
+	// second issuer origin would break the single-issuer model — while the apex host
+	// keeps proxying. Build a feature-ON mux and drive both hosts.
+	satAuth := NewAuthenticator("http://localtest.me", kc.URL+"/realms/spawnly", "dashboard", "secret", "localtest.me", false)
+	satMux := buildMux(satAuth, "http://orch.invalid", kc.URL+"/realms/spawnly", "http://docs", fstest.MapFS{})
+
+	// Satellite host → /realms/… and /resources/… are NOT proxied (404); Keycloak
+	// is NEVER hit.
+	for _, p := range []string{"/realms/spawnly/protocol/openid-connect/auth", "/resources/abc/login/keycloak/css/login.css"} {
+		gotPath = ""
+		rec = httptest.NewRecorder()
+		req := httptest.NewRequest("GET", p, nil)
+		req.Host = "acme.localtest.me"
+		satMux.ServeHTTP(rec, req)
+		if gotPath != "" {
+			t.Fatalf("SECURITY: satellite proxied %q to Keycloak (path %q) — only the apex may proxy Keycloak", p, gotPath)
+		}
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("satellite %s: status = %d, want 404", p, rec.Code)
+		}
+	}
+
+	// Apex host on the SAME feature-on mux → still proxied verbatim.
+	gotPath = ""
+	rec = httptest.NewRecorder()
+	apexReq := httptest.NewRequest("GET", "/realms/spawnly/protocol/openid-connect/auth", nil)
+	apexReq.Host = "localtest.me"
+	satMux.ServeHTTP(rec, apexReq)
+	if rec.Code != http.StatusOK || gotPath != "/realms/spawnly/protocol/openid-connect/auth" {
+		t.Errorf("apex authorize on feature-on mux: status=%d path=%q, want 200 + proxied verbatim", rec.Code, gotPath)
+	}
 }
 
 func TestRequireUnauthenticated(t *testing.T) {
-	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret", "", false)
 	h := a.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("next should not run without a session")
 	}))
@@ -291,7 +324,7 @@ func TestRequireUnauthenticated(t *testing.T) {
 }
 
 func TestRequireAuthenticated(t *testing.T) {
-	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret", "", false)
 	a.sessions["sid-1"] = session{username: "alice", expiresAt: time.Now().Add(time.Hour)}
 
 	called := false
@@ -317,7 +350,7 @@ func TestRequireAuthenticated(t *testing.T) {
 }
 
 func TestExpiredSessionRejected(t *testing.T) {
-	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret", "", false)
 	a.sessions["old"] = session{username: "alice", expiresAt: time.Now().Add(-time.Minute)}
 
 	req := httptest.NewRequest("GET", "/api/agents", nil)
@@ -739,7 +772,7 @@ func TestParseOrgClaim(t *testing.T) {
 // through to the wrapped handler. This is the dashboard-BFF enforcement; the
 // orchestrator enforces the same role independently (defense in depth).
 func TestRequireAdmin(t *testing.T) {
-	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
+	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret", "", false)
 	a.sessions["admin-sid"] = session{username: "alice", isAdmin: true, expiresAt: time.Now().Add(time.Hour)}
 	a.sessions["viewer-sid"] = session{username: "viewer", isAdmin: false, expiresAt: time.Now().Add(time.Hour)}
 

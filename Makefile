@@ -18,7 +18,7 @@ EXTRA_AGENTS  := keycloak weather-monitor
 MCP_SERVERS   := travel-tools
 SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS) $(EXTRA_AGENTS) $(MCP_SERVERS)
 
-.PHONY: build test test-provider test-dynamodb docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed reseed-orgs print-% e2e-setup e2e-anchor-setup e2e mobile-dev
+.PHONY: build test test-provider test-dynamodb docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed reseed-orgs print-% e2e-setup e2e-anchor-setup e2e e2e-subdomains mobile-dev tls-mimic tls-mimic-down
 
 # print-<VAR> — echo a make variable so shell scripts can read the authoritative
 # lists instead of re-declaring them. e.g. `make -s print-SERVICES`.
@@ -212,3 +212,37 @@ e2e-anchor-setup:
 # first so the anchor suite has an STS to prove control against.
 e2e: e2e-anchor-setup
 	cd e2e && npm test
+
+# ── org-subdomains local TLS mimic (feature: org-subdomains, Phase 3) ─────────
+# tls-mimic stands up full-fidelity HTTPS for the apex + satellites over the
+# running kind stack so the whole subdomain flow works in a browser:
+#     https://localtest.me         → apex (Global / picker / signup + KC proxy)
+#     https://<slug>.localtest.me  → org satellite (scoped dashboard)
+# A host-side Caddy container terminates TLS (its own internal CA — no host
+# installs) and the cluster is flipped into apex=localtest.me issuer mode.
+#
+# MODE-SWITCH — MUTUALLY EXCLUSIVE with the default localhost:8090 loop
+# (`make dash` / `make e2e`). Keycloak's issuer is a single string, so the
+# cluster serves EITHER origin at a time. Opt in with `make tls-mimic`; ALWAYS
+# return to the default mode with `make tls-mimic-down` before running the
+# standard e2e suite. Both directions are idempotent and reversible.
+tls-mimic:
+	./scripts/local-tls.sh up
+
+tls-mimic-down:
+	./scripts/local-tls.sh down
+
+# e2e-subdomains — the org-subdomains Playwright suite (Phase 4). Brings up the
+# Phase-3 TLS mimic (make tls-mimic), then runs the `subdomains` project against
+# https://<slug>.localtest.me. This is a LOCAL gate ONLY — like the weekly-cron
+# `make e2e`, it is deliberately NOT wired into per-push CI.
+#
+# MODE-SWITCH: this flips the cluster into apex=localtest.me mode (same as
+# `make tls-mimic`) and MUTUALLY EXCLUSIVE with the default `make e2e`. The
+# harness is left UP for iteration — return to the default localhost:8090 mode
+# (and the standard `make e2e`) with `make tls-mimic-down` when you're done.
+e2e-subdomains: tls-mimic
+	cd e2e && SUBDOMAIN_E2E=1 npx playwright test --project=subdomains
+	@echo ""
+	@echo "==> subdomains suite done. The TLS mimic is STILL UP (apex=localtest.me)."
+	@echo "    Return to the default localhost:8090 mode with:  make tls-mimic-down"

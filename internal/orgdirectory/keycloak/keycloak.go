@@ -28,33 +28,46 @@ import (
 
 // Client is the Keycloak-backed orgdirectory.Directory.
 type Client struct {
-	base         string // Keycloak base URL, e.g. http://keycloak:8080 (no trailing slash)
-	realm        string // realm name, e.g. spawnly
-	clientID     string // service-account client id, e.g. org-admin
-	clientSecret string
+	base              string // Keycloak base URL, e.g. http://keycloak:8080 (no trailing slash)
+	realm             string // realm name, e.g. spawnly
+	clientID          string // service-account client id, e.g. org-admin
+	clientSecret      string
+	dashboardClientID string // OIDC client whose redirect URIs the satellite feature edits, e.g. dashboard
 
 	hc *http.Client
 
-	mu          sync.Mutex // guards the cached token
+	mu          sync.Mutex // guards the cached token AND the cached dashboard client UUID
 	cachedToken string
 	tokenExp    time.Time
+
+	dashboardUUID string // resolved dashboard client UUID, cached (see resolveDashboardClientID)
+
+	// editMu serializes the read-modify-write of the dashboard client rep
+	// (resolve -> GET -> PUT). Keycloak's client PUT has no optimistic locking, so
+	// two concurrent org creates could otherwise each GET the same rep, add their
+	// own URI, and PUT-clobber each other (a lost update — one org's satellite
+	// login silently breaks). The registry runs single-replica, so a process-local
+	// mutex is sufficient; a multi-replica registry would need a distributed lock.
+	editMu sync.Mutex
 }
 
 var _ orgdirectory.Directory = (*Client)(nil)
 
 // New builds a Keycloak directory client. httpClient may be nil (a 15s-timeout
 // default is used) — a bounded timeout matters here because these calls sit
-// inline on the org control-plane path.
-func New(base, realm, clientID, clientSecret string, httpClient *http.Client) *Client {
+// inline on the org control-plane path. dashboardClientID is the OIDC client
+// (e.g. "dashboard") whose redirect/post-logout URIs the satellite feature edits.
+func New(base, realm, clientID, clientSecret, dashboardClientID string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
 	return &Client{
-		base:         strings.TrimRight(base, "/"),
-		realm:        realm,
-		clientID:     clientID,
-		clientSecret: clientSecret,
-		hc:           httpClient,
+		base:              strings.TrimRight(base, "/"),
+		realm:             realm,
+		clientID:          clientID,
+		clientSecret:      clientSecret,
+		dashboardClientID: dashboardClientID,
+		hc:                httpClient,
 	}
 }
 
@@ -445,4 +458,186 @@ func (c *Client) ListUserOrgs(ctx context.Context, user string) ([]string, error
 		}
 	}
 	return aliases, nil
+}
+
+// ---- satellite redirect-URI editing (org-subdomains) ----------------------
+
+// postLogoutSep is how Keycloak serializes multiple post-logout redirect URIs
+// into the single `post.logout.redirect.uris` client attribute string — the same
+// `##` join deploy/keycloak/clients.tf (valid_post_logout_redirect_uris) uses.
+const postLogoutSep = "##"
+
+// clientRep is a partial view of a Keycloak client representation. The full
+// representation is round-tripped as a map (see editDashboardClient) so unknown
+// fields survive the PUT; this typed view is only used to resolve the client id.
+type clientRep struct {
+	ID       string `json:"id"`
+	ClientID string `json:"clientId"`
+}
+
+// resolveDashboardClientID resolves and caches the dashboard OIDC client's UUID.
+// The client's redirect-URI edits address it by UUID (like org ops address orgs
+// by UUID). A missing client is a hard error — the feature cannot register a
+// satellite callback without it. Cached under c.mu like the token.
+func (c *Client) resolveDashboardClientID(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	if c.dashboardUUID != "" {
+		id := c.dashboardUUID
+		c.mu.Unlock()
+		return id, nil
+	}
+	c.mu.Unlock()
+
+	var reps []clientRep
+	if err := c.do(ctx, http.MethodGet,
+		c.adminURL("/clients?clientId=%s", url.QueryEscape(c.dashboardClientID)), nil, &reps); err != nil {
+		return "", err
+	}
+	for _, r := range reps {
+		if r.ClientID == c.dashboardClientID {
+			c.mu.Lock()
+			c.dashboardUUID = r.ID
+			c.mu.Unlock()
+			return r.ID, nil
+		}
+	}
+	return "", fmt.Errorf("dashboard client %q not found", c.dashboardClientID)
+}
+
+// editDashboardClient reads the FULL dashboard client representation, applies mut
+// to it (mut mutates redirectUris / attributes in place), and PUTs the whole rep
+// back. Keycloak's PUT REPLACES the representation, so the full map is preserved
+// and only the fields mut touches change. mut reports whether anything changed;
+// when nothing changed the PUT is skipped (idempotent no-op).
+func (c *Client) editDashboardClient(ctx context.Context, mut func(rep map[string]any) bool) error {
+	c.editMu.Lock()
+	defer c.editMu.Unlock()
+
+	uuid, err := c.resolveDashboardClientID(ctx)
+	if err != nil {
+		return err
+	}
+	var rep map[string]any
+	if err := c.do(ctx, http.MethodGet, c.adminURL("/clients/%s", uuid), nil, &rep); err != nil {
+		// A 404 means the cached UUID is stale (the dashboard client was recreated —
+		// e.g. a realm wipe/re-apply while the registry stayed up). Drop the cache so
+		// the caller's retry re-resolves the fresh UUID rather than 404ing forever.
+		if statusIs(err, http.StatusNotFound) {
+			c.invalidateDashboardCache(uuid)
+		}
+		return err
+	}
+	if !mut(rep) {
+		return nil // already in the desired state — idempotent
+	}
+	if err := c.do(ctx, http.MethodPut, c.adminURL("/clients/%s", uuid), rep, nil); err != nil {
+		if statusIs(err, http.StatusNotFound) {
+			c.invalidateDashboardCache(uuid)
+		}
+		return err
+	}
+	return nil
+}
+
+// invalidateDashboardCache clears the cached dashboard UUID iff it still equals
+// stale (so a concurrent re-resolve to a fresh UUID isn't wiped).
+func (c *Client) invalidateDashboardCache(stale string) {
+	c.mu.Lock()
+	if c.dashboardUUID == stale {
+		c.dashboardUUID = ""
+	}
+	c.mu.Unlock()
+}
+
+// asStringSlice reads a JSON array field (unmarshaled to []any of strings).
+func asStringSlice(v any) []string {
+	arr, _ := v.([]any)
+	out := make([]string, 0, len(arr))
+	for _, e := range arr {
+		if s, ok := e.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// clientAttrs returns the client's attributes map (values are strings), creating
+// it on the rep when absent so callers can write into it.
+func clientAttrs(rep map[string]any) map[string]any {
+	attrs, ok := rep["attributes"].(map[string]any)
+	if !ok || attrs == nil {
+		attrs = map[string]any{}
+		rep["attributes"] = attrs
+	}
+	return attrs
+}
+
+// splitPostLogout parses the `##`-joined post-logout attribute string, dropping
+// empties and the `+` sentinel (Keycloak's "same as redirect URIs" marker).
+func splitPostLogout(v any) []string {
+	s, _ := v.(string)
+	var out []string
+	for _, p := range strings.Split(s, postLogoutSep) {
+		if p == "" || p == "+" {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// addURI returns uris with want appended iff absent, and whether it was added.
+func addURI(uris []string, want string) ([]string, bool) {
+	for _, u := range uris {
+		if u == want {
+			return uris, false
+		}
+	}
+	return append(uris, want), true
+}
+
+// removeURI returns uris without want, and whether it was present.
+func removeURI(uris []string, want string) ([]string, bool) {
+	out := make([]string, 0, len(uris))
+	removed := false
+	for _, u := range uris {
+		if u == want {
+			removed = true
+			continue
+		}
+		out = append(out, u)
+	}
+	return out, removed
+}
+
+func (c *Client) RegisterOrgRedirectURIs(ctx context.Context, redirectURI, postLogoutURI string) error {
+	return c.editDashboardClient(ctx, func(rep map[string]any) bool {
+		changed := false
+		if uris, added := addURI(asStringSlice(rep["redirectUris"]), redirectURI); added {
+			rep["redirectUris"] = uris
+			changed = true
+		}
+		attrs := clientAttrs(rep)
+		if pl, added := addURI(splitPostLogout(attrs["post.logout.redirect.uris"]), postLogoutURI); added {
+			attrs["post.logout.redirect.uris"] = strings.Join(pl, postLogoutSep)
+			changed = true
+		}
+		return changed
+	})
+}
+
+func (c *Client) RemoveOrgRedirectURIs(ctx context.Context, redirectURI, postLogoutURI string) error {
+	return c.editDashboardClient(ctx, func(rep map[string]any) bool {
+		changed := false
+		if uris, removed := removeURI(asStringSlice(rep["redirectUris"]), redirectURI); removed {
+			rep["redirectUris"] = uris
+			changed = true
+		}
+		attrs := clientAttrs(rep)
+		if pl, removed := removeURI(splitPostLogout(attrs["post.logout.redirect.uris"]), postLogoutURI); removed {
+			attrs["post.logout.redirect.uris"] = strings.Join(pl, postLogoutSep)
+			changed = true
+		}
+		return changed
+	})
 }

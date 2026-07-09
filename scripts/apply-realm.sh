@@ -38,7 +38,10 @@ echo "==> Applying Keycloak realm via Terraform..."
   export TF_VAR_keycloak_url="http://localhost:${KC_LOCAL_PORT}"
   export TF_VAR_keycloak_admin_username="admin"
   export TF_VAR_keycloak_admin_password="${KC_ADMIN_PASSWORD}"
-  export TF_VAR_dashboard_origin="http://localhost:8090"
+  # Default to the localhost dev origin, but honor a pre-set value so the
+  # org-subdomains TLS mimic (scripts/local-tls.sh) can re-apply the realm for
+  # https://localtest.me. Unset = today's behavior, byte-identical.
+  export TF_VAR_dashboard_origin="${TF_VAR_dashboard_origin:-http://localhost:8090}"
   export TF_VAR_dashboard_client_secret="dashboard-secret"
   export TF_VAR_orchestrator_client_secret="orchestrator-secret"
   export TF_VAR_idp_consent_client_secret="idp-consent-secret"
@@ -47,6 +50,7 @@ echo "==> Applying Keycloak realm via Terraform..."
   export TF_VAR_alice_password="alice"
   export TF_VAR_viewer_password="viewer"
   export TF_VAR_bob_password="bob"
+  export TF_VAR_carol_password="carol"
   export TF_VAR_nomad_password="nomad"
 
   terraform -chdir="$KC_TF_DIR" init -input=false >/dev/null

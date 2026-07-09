@@ -14,11 +14,15 @@ export const DEMO_PASS = 'alice';
 //   alice  — realm admin; org admin of acme
 //   viewer — non-admin; member of acme
 //   bob    — non-admin; org admin of globex (cross-org isolation)
+//   carol  — non-admin; member of BOTH acme and globex (silent cross-subdomain
+//            SSO fixture — org-subdomains e2e case b only; seeded last so she
+//            never perturbs the single-org isolation matrix)
 //   nomad  — non-admin; member of NO org (drives the "no organization" screen)
 export const USERS: Record<string, { pass: string }> = {
   alice: { pass: 'alice' },
   viewer: { pass: 'viewer' },
   bob: { pass: 'bob' },
+  carol: { pass: 'carol' },
   nomad: { pass: 'nomad' },
 };
 
@@ -96,6 +100,60 @@ export async function login(
   await password.fill(pass);
   await page.locator(LOGIN_SUBMIT).click();
   await expect(page.locator('#agent-list')).toBeVisible({ timeout: 30_000 });
+}
+
+// ── org-subdomains (satellite) helpers ──────────────────────────────────────
+// The apex the local TLS mimic serves (scripts/local-tls.sh flips the cluster
+// into APEX_DOMAIN=localtest.me mode). The subdomains suite runs against HTTPS
+// under this apex; the default suite (localhost:8090) never touches these.
+export const APEX_HOST = 'localtest.me';
+export const APEX_ORIGIN = `https://${APEX_HOST}`;
+
+// orgOrigin(slug) → the org's satellite origin, e.g. https://acme.localtest.me.
+export function orgOrigin(slug: string): string {
+  return `https://${slug}.${APEX_HOST}`;
+}
+
+// loginAt drives the OIDC login STARTING at a satellite origin (or the apex),
+// tolerating the cross-origin hop to the apex-hosted Keycloak login form and the
+// redirect back to the satellite's own /callback. It mirrors login()'s three
+// outcomes — the identity-first (username-first) form, a SILENT SSO completion
+// (the context already holds a live apex SSO session, so a satellite visit lands
+// straight on the scoped shell), and the wrong-user guard — but never assumes the
+// baseURL, so it works when `origin` differs from the project baseURL.
+//
+// `origin` is the FULL origin to start at (use orgOrigin(slug) or APEX_ORIGIN).
+// On success the browser is on `origin` showing #agent-list scoped to that org.
+export async function loginAt(
+  page: Page,
+  origin: string,
+  user: string = DEMO_USER,
+  pass: string = DEMO_PASS,
+): Promise<void> {
+  await page.goto(`${origin}/`);
+  // Either the (apex-origin) Keycloak login form, or a silent landing on the
+  // satellite shell (a live apex SSO cookie completes the flow with no prompt).
+  const uname = page.locator(LOGIN_USERNAME);
+  const list = page.locator('#agent-list');
+  await expect(uname.or(list).first()).toBeVisible({ timeout: 30_000 });
+  if (await list.isVisible()) {
+    await expect(
+      page.locator('#current-user'),
+      `silent SSO login landed as the wrong user (wanted ${user}) — use a fresh context to log in as someone else`,
+    ).toHaveText(user, { timeout: 10_000 });
+    return;
+  }
+  await uname.fill(user);
+  const password = page.locator(LOGIN_PASSWORD);
+  if (!(await password.isVisible())) {
+    // Identity-first: submit the username to advance to the password screen.
+    await page.locator(LOGIN_SUBMIT).click();
+    await expect(password).toBeVisible({ timeout: 30_000 });
+  }
+  await password.fill(pass);
+  await page.locator(LOGIN_SUBMIT).click();
+  // The redirect chain lands back on the satellite /callback → the scoped shell.
+  await expect(list).toBeVisible({ timeout: 30_000 });
 }
 
 // contextFor logs a user in (into org, if given) in a FRESH browser context and

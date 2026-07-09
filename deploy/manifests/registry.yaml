@@ -81,6 +81,19 @@ spec:
                   name: org-admin-auth
                   key: secret
                   optional: true
+            # Org subdomains (org-subdomains Phase 2): the apex domain under which
+            # each org's satellite lives. When set, org create/delete registers /
+            # removes https://<slug>.<apex>/callback + post-logout https://<slug>.<apex>/
+            # on the dashboard client. Empty (the default) = feature off, no URIs
+            # registered. Set to `localtest.me` locally (Phase 3) / the public apex on
+            # AWS (Phase 5).
+            - name: ORG_APEX_DOMAIN
+              value: ""
+            # DASHBOARD_CLIENT_ID (org-subdomains Phase 2): the OIDC client whose
+            # redirect/post-logout URIs the satellite feature edits. Defaults to
+            # `dashboard` (matches deploy/keycloak/clients.tf); only set to override.
+            # - name: DASHBOARD_CLIENT_ID
+            #   value: "dashboard"
             # --- oidc tier ---
             # - name: CONTROL_PLANE_OIDC_JWKS_URL
             #   value: "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs"
