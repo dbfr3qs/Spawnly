@@ -1670,7 +1670,11 @@
   // (Phase 6): a REALM admin manages the GLOBAL catalog (/api/admin/templates); an
   // ORG admin manages only their org's templates (/api/org/templates). Server gates
   // are authoritative — this only decides which endpoint the UI reads.
-  const ME = { isAdmin: false, isOrgAdmin: false, activeOrg: '' };
+  // hostOrg/isApex/apexDomain describe the browser's host topology (org-subdomains):
+  // on a satellite (<slug>.<apex>) hostOrg names that org and isApex is false; on the
+  // apex or in single-origin mode (apexDomain === '') isApex is true. The org switcher
+  // reads these to navigate to another org's subdomain instead of /switch-org.
+  const ME = { isAdmin: false, isOrgAdmin: false, activeOrg: '', hostOrg: '', isApex: true, apexDomain: '' };
 
   async function fetchAdminTemplates() {
     // Realm admin → global + every org's (full catalog). Org admin (non-realm) →
@@ -3226,6 +3230,15 @@
     sel.hidden = false;
     sel.addEventListener('change', () => {
       const v = sel.value;
+      // On a satellite topology, NAVIGATE to the chosen org's subdomain (which then
+      // silently re-auths from its own host); Global (empty v) goes to the apex. The
+      // apex switcher — and single-origin mode (apexDomain === '') — keeps the
+      // in-place /switch-org re-auth unchanged.
+      if (ME.apexDomain && !ME.isApex) {
+        const proto = window.location.protocol;
+        window.location = v ? `${proto}//${v}.${ME.apexDomain}/` : `${proto}//${ME.apexDomain}/`;
+        return;
+      }
       // A full re-auth into the chosen org (or Global when empty).
       window.location = v ? `/switch-org?org=${encodeURIComponent(v)}` : '/switch-org';
     });
@@ -3294,6 +3307,11 @@
     ME.isAdmin = !!me.isAdmin;
     ME.isOrgAdmin = !!me.isOrgAdmin;
     ME.activeOrg = me.activeOrg || '';
+    // Host topology (org-subdomains): drives the switcher's navigate-to-subdomain
+    // behavior. Defaults keep single-origin mode (isApex true, apexDomain '').
+    ME.hostOrg = me.hostOrg || '';
+    ME.isApex = me.isApex !== false;
+    ME.apexDomain = me.apexDomain || '';
     if (me.isAdmin || me.isOrgAdmin) document.getElementById('open-agent-types-btn').hidden = false;
     // Any member of an active org can open the Organization view (members list +
     // settings + anchor) — read-only for non-admins (loadOrgSettings hides the

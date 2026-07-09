@@ -36,10 +36,14 @@ var errNoSession = errors.New("no dashboard session")
 // dashboard, which reverse-proxies Keycloak's browser-facing paths (/realms,
 // /resources) so the browser never has to reach the cluster-internal name.
 type Authenticator struct {
-	authority    string // browser-facing dashboard origin, e.g. http://localhost:8090
+	authority    string // fixed apex/auth origin, e.g. http://localhost:8090 — where Keycloak is proxied and the issuer/authorize/logout live
 	internalURL  string // in-cluster Keycloak realm issuer, e.g. http://keycloak:8080/realms/spawnly
 	clientID     string
 	clientSecret string
+	// hosts resolves the per-request org from the browser Host (the org-subdomains
+	// feature). Its zero value (empty apexDomain) is single-origin mode: every host
+	// is the apex, so authority stays the sole origin and behavior is unchanged.
+	hosts hostConfig
 
 	once     sync.Once
 	initErr  error
@@ -91,19 +95,30 @@ type pendingLogin struct {
 	// can't complete without interaction, the callback falls back to an
 	// interactive login for `org` instead of erroring.
 	silent bool
+	// redirectURI is the redirect_uri sent on the authorize request, recorded so
+	// the code exchange passes the SAME value (RFC 6749 §4.1.3 requires them to
+	// match). "" means the flow used the config default (the apex /callback); a
+	// non-empty value is a satellite's own origin /callback (<scheme>://<host>/callback).
+	redirectURI string
 }
 
 const (
 	sessionCookie = "dash_session"
 	stateCookie   = "dash_oidc_state"
+	// orgHealCookie is the short-lived loop guard for the host↔claim self-heal
+	// (require): it records the host org a silent re-auth was just attempted for,
+	// so a persistent mismatch (a non-member landing org-less) falls through to the
+	// denied screen instead of redirecting forever.
+	orgHealCookie = "dash_org_heal"
 )
 
-func NewAuthenticator(authority, internalURL, clientID, clientSecret string) *Authenticator {
+func NewAuthenticator(authority, internalURL, clientID, clientSecret, apexDomain string, trustForwardedHost bool) *Authenticator {
 	return &Authenticator{
 		authority:    strings.TrimRight(authority, "/"),
 		internalURL:  strings.TrimRight(internalURL, "/"),
 		clientID:     clientID,
 		clientSecret: clientSecret,
+		hosts:        hostConfig{apexDomain: strings.TrimSpace(apexDomain), trustForwardedHost: trustForwardedHost},
 		sessions:     map[string]session{},
 		pending:      map[string]pendingLogin{},
 	}
@@ -182,7 +197,32 @@ func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if o := r.URL.Query().Get("org"); o != "" && validOrgAlias.MatchString(o) {
 		org = o
 	}
+	// On a satellite the Host is authoritative for the org: default to it so a
+	// fresh visit to <slug>.<apex> logs in scoped to that org. An explicit ?org=
+	// only wins on the apex (where the host names no org); on a satellite the host
+	// org overrides it, so you cannot request another org's scope from acme's URL.
+	if hostOrg, isApex := a.hosts.resolveOrg(a.hosts.requestHost(r)); !isApex && hostOrg != "" {
+		org = hostOrg
+	}
 	a.startAuth(w, r, org, false, "")
+}
+
+// satelliteOrigin returns the per-request satellite origin (<scheme>://<host>)
+// when the request Host resolves to an org, or "" on the apex / in single-origin
+// mode (use the config's apex RedirectURL). The scheme comes from forwardedHTTPS
+// (https under the TLS mimic / ALB, http on plain kind). The port is stripped so
+// the origin matches the registered redirect URI (https://<slug>.<apex>).
+func (a *Authenticator) satelliteOrigin(r *http.Request) string {
+	host := a.hosts.requestHost(r)
+	org, isApex := a.hosts.resolveOrg(host)
+	if isApex || org == "" {
+		return ""
+	}
+	scheme := "http"
+	if forwardedHTTPS(r) {
+		scheme = "https"
+	}
+	return scheme + "://" + stripPort(host)
 }
 
 // startAuth begins the auth-code+PKCE flow for org (may be "" for org-less).
@@ -195,8 +235,16 @@ func (a *Authenticator) startAuth(w http.ResponseWriter, r *http.Request, org st
 	state := randToken()
 	verifier := oauth2.GenerateVerifier()
 
+	// On a satellite, the browser must return to the satellite's OWN /callback, not
+	// the apex default. Compute it once and record it so the code exchange replays
+	// the SAME redirect_uri (RFC 6749 §4.1.3). "" keeps the config's apex default.
+	redirectURI := ""
+	if sat := a.satelliteOrigin(r); sat != "" {
+		redirectURI = sat + "/callback"
+	}
+
 	a.mu.Lock()
-	a.pending[state] = pendingLogin{verifier: verifier, createdAt: time.Now(), org: org, silent: silent}
+	a.pending[state] = pendingLogin{verifier: verifier, createdAt: time.Now(), org: org, silent: silent, redirectURI: redirectURI}
 	a.gcPendingLocked()
 	a.mu.Unlock()
 
@@ -220,6 +268,19 @@ func (a *Authenticator) startAuth(w http.ResponseWriter, r *http.Request, org st
 	if org != "" {
 		scopes := append(append([]string{}, a.oauth.Scopes...), "organization:"+org)
 		opts = append(opts, oauth2.SetAuthURLParam("scope", strings.Join(scopes, " ")))
+	}
+	// On a satellite, return to the satellite's own /callback (recorded above so the
+	// exchange matches) and route Keycloak straight to the host's org via the
+	// `organization` authorize parameter (its Organizations flow — the foundation for
+	// a future per-org federated IdP). BOTH fire ONLY on a satellite flow: with the
+	// feature off (or an apex login) redirectURI is "", so the authorize request is
+	// byte-identical to before — keeping the just-settled apex silent org-switch
+	// untouched. The static RedirectURL (the apex /callback) is the default.
+	if redirectURI != "" {
+		opts = append(opts, oauth2.SetAuthURLParam("redirect_uri", redirectURI))
+		if org != "" {
+			opts = append(opts, oauth2.SetAuthURLParam("organization", org))
+		}
 	}
 	// Silent org switch: reuse the live Keycloak SSO session for the
 	// already-signed-in user (prompt=none = no UI). login_hint names that user so
@@ -392,7 +453,14 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tok, err := a.oauth.Exchange(r.Context(), code, oauth2.VerifierOption(pl.verifier))
+	// Replay the SAME redirect_uri the authorize request used (RFC 6749 §4.1.3):
+	// the apex default when empty, or the satellite's own /callback when the login
+	// started on a satellite. A mismatch here would make Keycloak reject the code.
+	exchangeOpts := []oauth2.AuthCodeOption{oauth2.VerifierOption(pl.verifier)}
+	if pl.redirectURI != "" {
+		exchangeOpts = append(exchangeOpts, oauth2.SetAuthURLParam("redirect_uri", pl.redirectURI))
+	}
+	tok, err := a.oauth.Exchange(r.Context(), code, exchangeOpts...)
 	if err != nil {
 		http.Error(w, "token exchange failed: "+err.Error(), http.StatusBadGateway)
 		return
@@ -488,6 +556,11 @@ func (a *Authenticator) realmPath() string {
 func (a *Authenticator) require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := a.user(r); ok {
+			// Host↔claim consistency: on a satellite whose org differs from the
+			// session's, drive a silent re-scope into the host's org before serving.
+			if a.selfHeal(w, r) {
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -516,6 +589,48 @@ func (a *Authenticator) require(next http.Handler) http.Handler {
 		}
 		http.Redirect(w, r, "/signin", http.StatusFound)
 	})
+}
+
+// selfHeal keeps the browser's subdomain and the session's active org consistent.
+// For an AUTHENTICATED page navigation on a satellite whose host org differs from
+// the session's activeOrg, it drives the existing silent re-auth (/switch-org) into
+// the host's org and returns true (response handled). A member lands re-scoped with
+// no password; a non-member gets an org-less token, so the mismatch persists — the
+// loop guard (a short-lived cookie) then lets the request fall through so the static
+// UI renders the existing no-org/denied screen instead of redirecting forever.
+//
+// It returns false (no self-heal) for: /api/* and subresource requests (host is
+// never authorization — the orchestrator enforces the org from the token, so API
+// calls keep today's behavior), the apex / single-origin mode (no host org to
+// reconcile), and an already-consistent session. This is a UX/consistency guard
+// ONLY; it grants no access the token doesn't already carry.
+func (a *Authenticator) selfHeal(w http.ResponseWriter, r *http.Request) bool {
+	if strings.HasPrefix(r.URL.Path, "/api/") || !isPageNavigation(r) {
+		return false
+	}
+	hostOrg, isApex := a.hosts.resolveOrg(a.hosts.requestHost(r))
+	if isApex || hostOrg == "" {
+		return false // apex or feature off — nothing to reconcile
+	}
+	if a.activeOrg(r) == hostOrg {
+		// Consistent: clear any stale guard from a just-completed heal and proceed.
+		clearCookie(w, orgHealCookie, forwardedHTTPS(r))
+		return false
+	}
+	// Mismatch. If we already tried to heal into THIS host org and are still
+	// mismatched, the user is not a member (org-less/other token) — stop the loop
+	// and let the app render the denied/not-a-member path.
+	if ck, err := r.Cookie(orgHealCookie); err == nil && ck.Value == hostOrg {
+		clearCookie(w, orgHealCookie, forwardedHTTPS(r))
+		return false
+	}
+	// First attempt: mark it, then silently re-scope into the host's org.
+	http.SetCookie(w, &http.Cookie{
+		Name: orgHealCookie, Value: hostOrg, Path: "/",
+		HttpOnly: true, Secure: forwardedHTTPS(r), SameSite: http.SameSiteLaxMode, MaxAge: 120,
+	})
+	http.Redirect(w, r, "/switch-org?org="+url.QueryEscape(hostOrg), http.StatusFound)
+	return true
 }
 
 // sessionTTL is the dashboard session's SLIDING idle window. Every authenticated
