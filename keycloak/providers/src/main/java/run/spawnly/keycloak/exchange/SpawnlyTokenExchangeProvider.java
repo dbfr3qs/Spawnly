@@ -22,8 +22,8 @@ import org.keycloak.services.Urls;
 import org.keycloak.services.cors.Cors;
 import org.keycloak.util.JsonSerialization;
 
-import run.spawnly.keycloak.attestor.AgentCredentialVerifier;
 import run.spawnly.keycloak.attestor.AgentIdentity;
+import run.spawnly.keycloak.attestor.OrgAwareVerifier;
 import run.spawnly.keycloak.registry.AgentRecord;
 import run.spawnly.keycloak.registry.AgentRegistryClient;
 import run.spawnly.keycloak.registry.DelegationPolicy;
@@ -107,6 +107,7 @@ public class SpawnlyTokenExchangeProvider implements TokenExchangeProvider {
     private static final String JWT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:jwt";
     private static final String ACT_CLAIM = "act";
     private static final String TOKEN_USE_CLAIM = "token_use";
+    private static final String ORGANIZATION_CLAIM = "organization";
 
     // Access-token lifetime for the exchanged token, in seconds. Matches the
     // 120s the C#/Config.cs machine clients use; a delegated token is short-lived
@@ -114,14 +115,18 @@ public class SpawnlyTokenExchangeProvider implements TokenExchangeProvider {
     private static final long EXCHANGED_TOKEN_LIFESPAN_SECONDS = 120L;
 
     private final KeycloakSession session;
-    private final AgentCredentialVerifier verifier;
+    // Per-org resolution (Phase 9): the actor_token (the delegating agent's
+    // credential) is verified org-bound, so a remote (STS) agent can delegate too
+    // — an STS actor_token binds to the anchor of the org owning the actor's
+    // record, exactly as on the client-authentication mint path.
+    private final OrgAwareVerifier verifier;
     private final AgentRegistryClient registry;
     // scope -> audience (resource) name, mirroring deploy/keycloak/scopes.tf's
     // scope_audience map (Config.cs ApiResources). A delegation token requests
     // audience=delegation and carries none of these.
     private final Map<String, String> scopeAudience;
 
-    public SpawnlyTokenExchangeProvider(KeycloakSession session, AgentCredentialVerifier verifier,
+    public SpawnlyTokenExchangeProvider(KeycloakSession session, OrgAwareVerifier verifier,
                                         AgentRegistryClient registry, Map<String, String> scopeAudience) {
         this.session = session;
         this.verifier = verifier;
@@ -186,6 +191,10 @@ public class SpawnlyTokenExchangeProvider implements TokenExchangeProvider {
         }
 
         // ── 2. actor_token: a valid attestation credential (the new actor) ─────
+        //      Verified org-bound (Phase 9): an STS actor_token binds to the anchor
+        //      of the org owning the actor's registry record; a SPIRE actor_token
+        //      goes to the platform default unchanged. Failure ⇒ null ⇒ the same
+        //      invalid_request below (oracle-free).
         AgentIdentity actorIdentity;
         try {
             actorIdentity = verifier.verify(actorToken);
@@ -286,9 +295,41 @@ public class SpawnlyTokenExchangeProvider implements TokenExchangeProvider {
             }
         }
 
+        // ── 6b. Organization: registry-bound, cross-org delegation rejected ────
+        //      The exchanged token's org claim is stamped from the CHILD's
+        //      registry record (childAgent, fetched above) — NEVER copied from
+        //      the subject_token, so a token can't claim an org other than the
+        //      one the child was recorded in. Defense in depth: if the
+        //      subject_token itself names an org that DIFFERS from the child's
+        //      org, this is a cross-org delegation (an org-A token exchanged via
+        //      an org-B actor to reach an org-B token) — never legitimate, so
+        //      reject with invalid_grant.
+        //
+        //      Scope of this guard (intentional): it fires only when BOTH sides
+        //      name a single, unequal org. Cases that pass through:
+        //        - org-less subject token (no org claim) ⇒ no constraint, passes
+        //          (realm-admin / global chains);
+        //        - org-less CHILD ⇒ the exchanged token simply carries no org
+        //          claim (a global token). WHO may create/register an org-less
+        //          (global) child is enforced at the registry spawn/registration
+        //          path (later phases), not at this exchange;
+        //        - a MULTI-org / unparsable subject claim ⇒ orgClaim() returns
+        //          null, so the mismatch check is skipped (fail-open on the CHECK
+        //          only). Safe because the EMITTED org is ALWAYS the child
+        //          record's, never the subject's — the guard is belt-and-braces
+        //          over the already-registry-bound stamp, and single-org tokens
+        //          are the enforced invariant upstream.
+        String childOrg = childAgent.orgId();
+        String subjectOrg = orgClaim(subject);
+        if (subjectOrg != null && !subjectOrg.isEmpty()
+                && childOrg != null && !childOrg.isEmpty()
+                && !subjectOrg.equals(childOrg)) {
+            throw invalidGrant(cors, "cross-org delegation is not permitted");
+        }
+
         // ── 7. Emit the new (signed) token ─────────────────────────────────────
         boolean delegation = DELEGATION_AUDIENCE.equals(requestedAudience);
-        String signed = mintToken(context, sub, actorSpiffe, subject, requestedScopes, delegation);
+        String signed = mintToken(context, sub, actorSpiffe, subject, requestedScopes, delegation, childOrg);
 
         AccessTokenResponse resp = new AccessTokenResponse();
         resp.setToken(signed);
@@ -323,7 +364,8 @@ public class SpawnlyTokenExchangeProvider implements TokenExchangeProvider {
      * this is a delegation-only token (then NO resource aud + token_use).
      */
     private String mintToken(TokenExchangeContext context, String sub, String actorSpiffe,
-                             AccessToken subject, List<String> scopes, boolean delegation) {
+                             AccessToken subject, List<String> scopes, boolean delegation,
+                             String childOrg) {
         long now = System.currentTimeMillis() / 1000L;
         AccessToken out = new AccessToken();
         out.id(org.keycloak.models.utils.KeycloakModelUtils.generateId());
@@ -337,6 +379,13 @@ public class SpawnlyTokenExchangeProvider implements TokenExchangeProvider {
 
         // act = { "sub": "<actor spiffe>", "act": <subject act verbatim> }.
         out.setOtherClaims(ACT_CLAIM, buildActClaim(actorSpiffe, subject));
+
+        // organization = ["<childOrg>"] — the SAME array-of-aliases shape as user
+        // + agent-minted tokens, stamped from the CHILD's registry record (not
+        // copied from the subject_token). Org-less child ⇒ no org claim.
+        if (childOrg != null && !childOrg.isEmpty()) {
+            out.setOtherClaims(ORGANIZATION_CLAIM, List.of(childOrg));
+        }
 
         if (delegation) {
             // Delegation-only token: NO resource audience, token_use=delegation.
@@ -472,6 +521,38 @@ public class SpawnlyTokenExchangeProvider implements TokenExchangeProvider {
             node = ((Map<String, Object>) m).get(ACT_CLAIM);
         }
         return depth;
+    }
+
+    /**
+     * The single active organization named by a token's {@code organization}
+     * claim, or {@code null} when it names none / more than one / is unparsable —
+     * mirroring the Go tokenvalidator's fail-closed {@code parseOrgID}. Shapes:
+     * an ARRAY of aliases ({@code ["acme"]}, the frozen live shape), a MAP keyed
+     * by alias ({@code {"acme": {...}}}), or a bare string. Used ONLY for the
+     * cross-org mismatch check; the emitted token's org is always the child
+     * record's, never this value.
+     */
+    static String orgClaim(AccessToken token) {
+        Object v = token.getOtherClaims().get(ORGANIZATION_CLAIM);
+        if (v instanceof List<?> list) {
+            if (list.size() == 1 && list.get(0) instanceof String s && !s.isEmpty()) {
+                return s;
+            }
+            return null;
+        }
+        if (v instanceof Map<?, ?> map) {
+            if (map.size() == 1) {
+                Object k = map.keySet().iterator().next();
+                if (k instanceof String s && !s.isEmpty()) {
+                    return s;
+                }
+            }
+            return null;
+        }
+        if (v instanceof String s && !s.isEmpty()) {
+            return s;
+        }
+        return null;
     }
 
     /**

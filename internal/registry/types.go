@@ -1,12 +1,81 @@
 // internal/registry/types.go
 package registry
 
+import "time"
+
 // Template status values. An empty Status is treated as active/spawnable.
 // "deprecated" is tolerated for backward compatibility but never enforced.
 const (
 	TemplateStatusActive   = "active"
 	TemplateStatusDisabled = "disabled"
 )
+
+// Attestation anchor status values. An anchor registers Pending and only
+// becomes Active after the org proves control of the AWS account (Phase 8);
+// until then no credential resolves against it.
+const (
+	AnchorPending = "pending"
+	AnchorActive  = "active"
+)
+
+// Removal disposition values — what happens to a removed member's running
+// agents (Phase 6). The default is RemovalOrphanToAdmin, the non-destructive
+// choice: agents keep running and management passes to the org's admins.
+const (
+	RemovalAutoRevoke    = "auto-revoke"
+	RemovalOrphanToAdmin = "orphan-to-admin"
+)
+
+// Placement values for an AgentRecord (Phase 10). Empty (the zero value) and
+// PlacementK8s both mean a platform-hosted agent backed by an AgentWorkload CR
+// in Spawnly's own cluster — today's only kind. PlacementRemote marks a
+// CONSUMER-hosted agent that runs on the consumer's own compute via the
+// SDK/sidecar and authenticates with the org's anchored STS identity; such an
+// agent has NO AgentWorkload by design, so it MUST be excluded from the
+// operator's stale sweep (which fails every workload-less record). Placement is
+// set SERVER-SIDE (from the preregistered record), never from a sidecar's
+// self-register body — a client cannot promote a k8s agent to remote to dodge
+// the sweep.
+const (
+	PlacementK8s    = "k8s"
+	PlacementRemote = "remote"
+)
+
+// Organization is the SaaS business account — the NEW multi-tenancy primitive,
+// deliberately distinct from the existing per-consumer tenant primitive
+// (tenantId/requiresTenant). The OrgID is the single identifier threaded across
+// the layers this feature touches: Keycloak org alias/ID == this OrgID ==
+// SpiceDB `organization:` object id.
+//
+// Membership (who is in the org, member vs admin) is deliberately NOT stored
+// here: Keycloak is the source of truth for membership, and SpiceDB is the
+// source of truth for authorization decisions. The registry only persists the
+// org's own record (name, settings, optional attestation anchor).
+type Organization struct {
+	OrgID string `json:"orgId"`
+	Name  string `json:"name,omitempty"`
+	// RemovalDisposition governs a removed member's running agents; empty is
+	// treated as the non-destructive RemovalOrphanToAdmin default (Phase 6).
+	RemovalDisposition string `json:"removalDisposition,omitempty"`
+	// Anchor is the org's optional attestation anchor. Absent (nil) = the org's
+	// agents attest via the platform default (in-cluster SPIRE), exactly as
+	// today. The lifecycle (pending->active proof-of-control) lands in Phase 8;
+	// Phase 1 only persists the record shape.
+	Anchor    *AttestationAnchor `json:"anchor,omitempty"`
+	CreatedAt time.Time          `json:"createdAt,omitempty"`
+}
+
+// AttestationAnchor is an org's per-org trust anchor (first mode: STS trust
+// federation with the consumer's AWS account). Status starts AnchorPending and
+// flips to AnchorActive only on a successful proof-of-control presentation
+// (Phase 8) — Phase 1 persists the shape but nothing verifies against it yet.
+type AttestationAnchor struct {
+	Type           string     `json:"type"` // e.g. "sts"
+	AWSAccountID   string     `json:"awsAccountId,omitempty"`
+	RoleArnPattern string     `json:"roleArnPattern,omitempty"`
+	Status         string     `json:"status"` // AnchorPending | AnchorActive
+	ActivatedAt    *time.Time `json:"activatedAt,omitempty"`
+}
 
 type AgentTemplate struct {
 	AgentType string `json:"agentType"`
@@ -26,6 +95,13 @@ type AgentTemplate struct {
 	// {{tenant_id}}, so a tenant-less spawn fails fast instead of silently
 	// coming up "global" with no tenant grant.
 	RequiresTenant bool `json:"requiresTenant"`
+	// OrgID scopes a UI-created template to one organization; absent = a global
+	// template, visible and spawnable in every org (the seeded platform
+	// catalog). This is ORTHOGONAL to RequiresTenant (the tenant primitive): a
+	// template can be org-scoped and require a tenant, or either, or neither.
+	// Enforcement (org-scoped visibility/authz) lands in Phase 6; Phase 1 only
+	// carries the field.
+	OrgID string `json:"orgId,omitempty"`
 	// OAuthScopes declares the OAuth2 scopes this agent type requests at
 	// runtime. When a parent spawns this type behind requireUserConsent, these
 	// are the scopes of the CIBA consent request — and the set a stored
@@ -116,4 +192,18 @@ type AgentRecord struct {
 	SupportsChat bool   `json:"supportsChat,omitempty"`
 	Dismissed    bool   `json:"dismissed,omitempty"`
 	ParentID     string `json:"parentId,omitempty"`
+	// OrgID binds the agent to an organization (the SaaS account authorization
+	// boundary). Set server-side at spawn — from the preregistered record for a
+	// self-registering sidecar, never from its request body — and inherited by
+	// child agents from their parent's record. Absent = an org-less (global)
+	// agent, today's behaviour. Distinct from TenantID (the consumer primitive).
+	OrgID string `json:"orgId,omitempty"`
+	// Placement records WHERE the agent runs (Phase 10): "" / PlacementK8s is a
+	// platform-hosted agent backed by an AgentWorkload CR (the default, so it is
+	// omitempty); PlacementRemote is a consumer-hosted agent with no CR. Set
+	// server-side at preregistration and IMMUTABLE thereafter (a self-registering
+	// sidecar never sets it from its body) so it cannot be used to make a k8s
+	// agent immortal against the operator's stale sweep. Distinct from OrgID and
+	// TenantID.
+	Placement string `json:"placement,omitempty"`
 }

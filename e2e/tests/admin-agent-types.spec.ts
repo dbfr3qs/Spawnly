@@ -119,9 +119,12 @@ test.describe('admin agent-types UI', () => {
     const ctx = await browser.newContext({ storageState: { cookies: [], origins: [] } });
     const page = await ctx.newPage();
     try {
-      // Real OIDC login as the seeded non-admin viewer (login() drives the
-      // Keycloak login form and waits for the dashboard shell).
-      await login(page, VIEWER_USER, VIEWER_PASS);
+      // Real OIDC login as the seeded non-admin viewer, scoped to their org
+      // (acme). A non-admin MUST resolve to an org as of Phase 5; logging straight
+      // into acme avoids the org-less auto-select redirect (which re-auths and
+      // clears the session mid-request). The admin-gating assertions below are
+      // org-independent — viewer is a non-admin in any org.
+      await login(page, VIEWER_USER, VIEWER_PASS, 'acme');
 
       // /api/me must report the viewer as a non-admin — this is the signal that
       // drives the nav gating, so assert it directly (the button ships `hidden`

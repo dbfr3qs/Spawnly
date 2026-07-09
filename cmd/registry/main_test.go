@@ -48,7 +48,7 @@ func workerTemplate() registry.AgentTemplate {
 // value; the guard fails such requests closed (400) before routing, while a
 // single userId still passes through.
 func TestRejectDuplicateUserID(t *testing.T) {
-	mux := buildMux(newStore(), spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(newStore(), spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	// Two userId params → 400, before the handler ever runs.
 	rec := httptest.NewRecorder()
@@ -69,7 +69,7 @@ func TestTemplateCRUD(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 
 	body, _ := json.Marshal(workerTemplate())
 	rec := httptest.NewRecorder()
@@ -117,7 +117,7 @@ func TestPatchTemplateStatus(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 	seedWorker(t, mux)
 
 	patch := func(agentType, status string) *httptest.ResponseRecorder {
@@ -163,7 +163,7 @@ func TestCreateTemplateInvalidStatus(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 
 	tpl := workerTemplate()
 	tpl.Status = "bogus"
@@ -179,7 +179,7 @@ func TestDisabledTemplateHiddenFromList(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 	seedWorker(t, mux)
 
 	// Visible while active.
@@ -224,7 +224,7 @@ func TestTemplateDetailFullRequiresControlPlaneAuth(t *testing.T) {
 	validator := &spiffe.MockSVIDValidator{}
 	// Use a real (shared-secret) authenticator so the auth gate is exercised,
 	// not AllowAll. Without the bearer, detail=full must 401.
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.NewSharedSecret("sekrit"))
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.NewSharedSecret("sekrit"), testDir())
 
 	// Seed templates directly through the store (not the cp-gated POST route)
 	// so this test is about the GET /v1/templates?detail=full path, not the
@@ -315,7 +315,7 @@ func TestSingleTemplateGetRequiresControlPlaneAuth(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.NewSharedSecret("sekrit"))
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.NewSharedSecret("sekrit"), testDir())
 
 	// Seed directly through the store (bypassing the cp-gated POST) so this test
 	// isolates the GET path. Give it a populated authz template so a leak would
@@ -366,7 +366,7 @@ func TestTemplateDetailSpawn(t *testing.T) {
 	validator := &spiffe.MockSVIDValidator{}
 	// Real shared-secret authenticator: detail=spawn must succeed WITHOUT any
 	// bearer (unlike detail=full), so this proves the route is genuinely public.
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.NewSharedSecret("sekrit"))
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.NewSharedSecret("sekrit"), testDir())
 
 	// A tenanted (requiresTenant=true) active template, a global (false) active
 	// template, and a disabled one that must NOT appear in the spawn list.
@@ -436,7 +436,7 @@ func TestDeleteTemplateGuarded(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 	seedWorker(t, mux)
 
 	del := func(agentType string) *httptest.ResponseRecorder {
@@ -491,7 +491,7 @@ func registerWorker(t *testing.T, tpl registry.AgentTemplate, agentID, tenantID 
 	s.putTemplate(tpl)
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/" + agentID}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 
 	payload := map[string]string{"agentType": tpl.AgentType, "userId": "user-1"}
 	if tenantID != "" {
@@ -545,6 +545,187 @@ func TestRegister_NonTenantRelationAlwaysWritten(t *testing.T) {
 	}
 }
 
+// registerOrgWorker preregisters a record carrying orgId (the trusted,
+// control-plane preregister path the orchestrator uses) and then drives the
+// SVID self-registration, returning the recording mock so the caller can assert
+// the owner/org lifecycle tuples. An empty orgID skips the preregister so the
+// self-register creates a brand-new org-less record — the org-less baseline.
+func registerOrgWorker(t *testing.T, agentID, userID, orgID string) *spicedb.Mock {
+	t.Helper()
+	s := newStore()
+	s.putTemplate(workerTemplate())
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/" + agentID}
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
+
+	if orgID != "" {
+		body, _ := json.Marshal(registry.AgentRecord{
+			AgentID: agentID, AgentType: "worker", UserID: userID, OrgID: orgID,
+		})
+		req := httptest.NewRequest("POST", "/v1/agents/preregister", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("preregister: got %d, want 201", rec.Code)
+		}
+	}
+
+	payload := map[string]string{"agentType": "worker", "userId": userID, "tenantId": "acme"}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest("POST", "/v1/agents", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-svid")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("self-register: got %d, want 201", rec.Code)
+	}
+	return sdb
+}
+
+// TestRegister_OrgTuplesWrittenForOrgAgent proves an org-preregistered agent
+// gets BOTH the owner and org lifecycle tuples (server-derived org from the
+// preregistered record), while an org-less agent gets the owner tuple only —
+// and never a malformed organization: tuple.
+func TestRegister_OrgTuplesWrittenForOrgAgent(t *testing.T) {
+	org := registerOrgWorker(t, "agent-org", "user-1", "acme-org")
+	if !org.HasRelationship("agent:agent-org", "owner", "user:user-1") {
+		t.Error("expected owner tuple for org agent")
+	}
+	if !org.HasRelationship("agent:agent-org", "org", "organization:acme-org") {
+		t.Error("expected org tuple for org-preregistered agent")
+	}
+}
+
+func TestRegister_OrgTupleSkippedForOrglessAgent(t *testing.T) {
+	less := registerOrgWorker(t, "agent-noorg", "user-1", "")
+	if !less.HasRelationship("agent:agent-noorg", "owner", "user:user-1") {
+		t.Error("expected owner tuple for org-less agent")
+	}
+	if less.HasRelationship("agent:agent-noorg", "org", "organization:") {
+		t.Error("org-less agent must not write a malformed organization: tuple")
+	}
+}
+
+// TestRegister_BodyUserIDCannotOverridePreregisteredOwner pins the set-once
+// owner invariant: a self-registering sidecar proves only its own agentId
+// (SVID-pinned), never its owner, so a body userId that differs from the
+// preregistered record's must be ignored — both on the stored record and in
+// the agent#owner tuple. Otherwise a compromised sidecar could repoint its
+// record's owner (and, once Phase 4 flips authz to these tuples, hand
+// lifecycle authority over itself) to an arbitrary user.
+func TestRegister_BodyUserIDCannotOverridePreregisteredOwner(t *testing.T) {
+	const agentID = "agent-owner-pin"
+	s := newStore()
+	s.putTemplate(workerTemplate())
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/" + agentID}
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
+
+	// Trusted preregister (orchestrator path) records alice as owner.
+	preBody, _ := json.Marshal(registry.AgentRecord{AgentID: agentID, AgentType: "worker", UserID: "alice", OrgID: "acme-org"})
+	preReq := httptest.NewRequest("POST", "/v1/agents/preregister", bytes.NewReader(preBody))
+	preReq.Header.Set("Content-Type", "application/json")
+	preRec := httptest.NewRecorder()
+	mux.ServeHTTP(preRec, preReq)
+	if preRec.Code != http.StatusCreated {
+		t.Fatalf("preregister: got %d, want 201", preRec.Code)
+	}
+
+	// The sidecar self-registers claiming a DIFFERENT owner in the body.
+	regBody, _ := json.Marshal(map[string]string{"agentType": "worker", "userId": "mallory", "tenantId": "acme"})
+	regReq := httptest.NewRequest("POST", "/v1/agents", bytes.NewReader(regBody))
+	regReq.Header.Set("Authorization", "Bearer test-svid")
+	regReq.Header.Set("Content-Type", "application/json")
+	regRec := httptest.NewRecorder()
+	mux.ServeHTTP(regRec, regReq)
+	if regRec.Code != http.StatusCreated {
+		t.Fatalf("self-register: got %d, want 201", regRec.Code)
+	}
+
+	// The stored record and the owner tuple keep the preregistered owner.
+	got := s.getAgent(agentID)
+	if got.UserID != "alice" {
+		t.Errorf("stored UserID = %q, want the preregistered alice", got.UserID)
+	}
+	if got.OrgID != "acme-org" {
+		t.Errorf("stored OrgID = %q, want the preregistered acme-org", got.OrgID)
+	}
+	if !sdb.HasRelationship("agent:"+agentID, "owner", "user:alice") {
+		t.Error("expected owner tuple for the preregistered owner alice")
+	}
+	if sdb.HasRelationship("agent:"+agentID, "owner", "user:mallory") {
+		t.Error("body userId mallory must not produce an owner tuple")
+	}
+}
+
+// TestTerminalStatus_PreservesOwnerOrgTuples proves that going terminal drops
+// ONLY the `enabled` tuple (a terminal agent isn't runnable) while KEEPING the
+// owner+org tuples — the human lifecycle authority a user needs to still view and
+// DISMISS a completed/failed/killed org-scoped agent. Removing them here used to
+// 404 the owner's own dismiss (org authz checks manage = owner + org->admin
+// against SpiceDB); this test locks that regression down, including that dismiss
+// actually succeeds afterwards.
+func TestTerminalStatus_PreservesOwnerOrgTuples(t *testing.T) {
+	const agentID = "agent-term-org"
+	s := newStore()
+	s.putTemplate(workerTemplate())
+	sdb := spicedb.NewMock()
+	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/" + agentID}
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
+
+	// Preregister with an org, then self-register so owner+org tuples land.
+	preBody, _ := json.Marshal(registry.AgentRecord{AgentID: agentID, AgentType: "worker", UserID: "user-1", OrgID: "acme-org"})
+	preReq := httptest.NewRequest("POST", "/v1/agents/preregister", bytes.NewReader(preBody))
+	preReq.Header.Set("Content-Type", "application/json")
+	preRec := httptest.NewRecorder()
+	mux.ServeHTTP(preRec, preReq)
+	if preRec.Code != http.StatusCreated {
+		t.Fatalf("preregister: got %d, want 201", preRec.Code)
+	}
+	regBody, _ := json.Marshal(map[string]string{"agentType": "worker", "userId": "user-1", "tenantId": "acme"})
+	regReq := httptest.NewRequest("POST", "/v1/agents", bytes.NewReader(regBody))
+	regReq.Header.Set("Authorization", "Bearer test-svid")
+	regReq.Header.Set("Content-Type", "application/json")
+	regRec := httptest.NewRecorder()
+	mux.ServeHTTP(regRec, regReq)
+	if regRec.Code != http.StatusCreated {
+		t.Fatalf("self-register: got %d, want 201", regRec.Code)
+	}
+	if !sdb.HasRelationship("agent:"+agentID, "owner", "user:user-1") || !sdb.HasRelationship("agent:"+agentID, "org", "organization:acme-org") {
+		t.Fatal("precondition: owner+org tuples should exist after registration")
+	}
+
+	// Terminal status → cleanup drops ONLY `enabled`; owner+org stay.
+	patchBody, _ := json.Marshal(map[string]string{"status": "completed"})
+	patchReq := httptest.NewRequest("PATCH", "/v1/agents/"+agentID, bytes.NewReader(patchBody))
+	patchReq.Header.Set("Content-Type", "application/json")
+	patchRec := httptest.NewRecorder()
+	mux.ServeHTTP(patchRec, patchReq)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("PATCH status: got %d, want 200", patchRec.Code)
+	}
+	if !sdb.HasRelationship("agent:"+agentID, "owner", "user:user-1") {
+		t.Error("owner tuple must PERSIST on terminal status (needed for dismiss/view)")
+	}
+	if !sdb.HasRelationship("agent:"+agentID, "org", "organization:acme-org") {
+		t.Error("org tuple must PERSIST on terminal status (needed for dismiss/view)")
+	}
+	if sdb.HasRelationship("agent:"+agentID, "enabled", "agent:"+agentID) {
+		t.Error("enabled tuple should be cleaned up on terminal status (agent isn't runnable)")
+	}
+
+	// The regression itself: the owner can still DISMISS the terminal org agent
+	// (manage = owner + org->admin_agents; owner tuple survived, so it authorizes).
+	disReq := httptest.NewRequest("POST", "/v1/agents/"+agentID+"/dismiss?userId=user-1", nil)
+	disRec := httptest.NewRecorder()
+	mux.ServeHTTP(disRec, disReq)
+	if disRec.Code != http.StatusNoContent {
+		t.Fatalf("dismiss of terminal org agent by owner: got %d, want 204 (was 404 before the fix)", disRec.Code)
+	}
+}
+
 func TestSpawnPolicy(t *testing.T) {
 	s := newStore()
 	s.putTemplate(registry.AgentTemplate{
@@ -554,7 +735,7 @@ func TestSpawnPolicy(t *testing.T) {
 	s.registerAgent(registry.AgentRecord{AgentID: "parent-1", AgentType: "parent-agent", TenantID: "tenant-1"})
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 
 	check := func(parentID, childType string) registry.SpawnDecision {
 		t.Helper()
@@ -594,7 +775,7 @@ func TestSpawnPolicy_MaxDepth(t *testing.T) {
 	for _, n := range []struct{ id, parent string }{{"root", ""}, {"a", "root"}, {"b", "a"}, {"c", "b"}} {
 		s.registerAgent(registry.AgentRecord{AgentID: n.id, AgentType: "chain-worker", TenantID: "tenant-1", ParentID: n.parent})
 	}
-	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	check := func(parentID string) registry.SpawnDecision {
 		t.Helper()
@@ -620,7 +801,7 @@ func TestAgentSelfRegistration(t *testing.T) {
 	s.putTemplate(workerTemplate())
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/agent-test"}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 
 	body, _ := json.Marshal(map[string]string{
 		"agentType": "worker",
@@ -653,7 +834,7 @@ func TestAgentISBackchannelCheck(t *testing.T) {
 	s.registerAgent(registry.AgentRecord{AgentID: "agent-test", Status: "active"})
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/agent-test", nil))
@@ -676,7 +857,7 @@ func TestAgentCompletion_DeletesSpiceDB(t *testing.T) {
 	sdb := spicedb.NewMock()
 	sdb.WriteRelationship(t.Context(), "tenant:tenant-1", "agent", "agent:agent-test")
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 
 	patchBody, _ := json.Marshal(map[string]string{"status": "completed"})
 	rec := httptest.NewRecorder()
@@ -709,7 +890,7 @@ func TestPatchAgentStatus_ControlPlaneAuth(t *testing.T) {
 	// Validator returns an unrelated SVID id so the SVID-self branch never
 	// authorizes here — isolating the control-plane path under test.
 	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/someone-else"}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.NewSharedSecret("tok"))
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.NewSharedSecret("tok"), testDir())
 
 	patchBody, _ := json.Marshal(map[string]string{"status": "completed"})
 
@@ -750,7 +931,7 @@ func TestPatchAgentStatus_SVIDSelf(t *testing.T) {
 	// MockSVIDValidator returns this fixed SPIFFE id; the verifier derives
 	// AgentID = path.Base = "agent-x".
 	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/agent-x"}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.NewSharedSecret("tok"))
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.NewSharedSecret("tok"), testDir())
 
 	patchBody, _ := json.Marshal(map[string]string{"status": "active"})
 
@@ -781,7 +962,7 @@ func TestPatchAgentStatus_SVIDSelf(t *testing.T) {
 
 func TestPostTemplate_RejectsSchemaMismatch(t *testing.T) {
 	s := newStore() // seeded with the embedded default schema (tenant/agent)
-	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	// "project:" is not a definition in the default schema → must be rejected
 	// before the template is stored.
@@ -801,7 +982,7 @@ func TestPostTemplate_RejectsSchemaMismatch(t *testing.T) {
 
 func TestGetSchema(t *testing.T) {
 	s := newStore()
-	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/schema", nil))
@@ -810,7 +991,7 @@ func TestGetSchema(t *testing.T) {
 	}
 	var resp map[string]string
 	json.NewDecoder(rec.Body).Decode(&resp)
-	if resp["source"] != "default" || resp["version"] != "v1" {
+	if resp["source"] != "default" || resp["version"] != "v2" {
 		t.Fatalf("unexpected schema meta: %+v", resp)
 	}
 	if !strings.Contains(resp["schema"], "definition tenant") {
@@ -836,7 +1017,7 @@ func TestRevoke_CleansNonTenantResourceType(t *testing.T) {
 	s.putTemplate(projectRelationTemplate())
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/proj-1"}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 
 	body, _ := json.Marshal(map[string]string{"agentType": "proj-worker", "userId": "u1", "tenantId": "acme"})
 	req := httptest.NewRequest("POST", "/v1/agents", bytes.NewReader(body))
@@ -876,7 +1057,7 @@ func TestResumeAfterTemplateDeleted(t *testing.T) {
 	s.putTemplate(workerTemplate())
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/w-1"}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 
 	body, _ := json.Marshal(map[string]string{"agentType": "worker", "userId": "u1", "tenantId": "acme"})
 	req := httptest.NewRequest("POST", "/v1/agents", bytes.NewReader(body))
@@ -918,7 +1099,7 @@ func TestCompletion_CleansNonTenantResourceType(t *testing.T) {
 	s.registerAgent(registry.AgentRecord{AgentID: "proj-2", AgentType: "proj-worker", TenantID: "acme", Status: "active"})
 	sdb := spicedb.NewMock()
 	sdb.WriteRelationship(t.Context(), "project:acme", "agent", "agent:proj-2")
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	patchBody, _ := json.Marshal(map[string]string{"status": "completed"})
 	rec := httptest.NewRecorder()
@@ -936,7 +1117,7 @@ func TestCompletion_CleansNonTenantResourceType(t *testing.T) {
 func consentBrokerMux(t *testing.T) (*store, http.Handler) {
 	t.Helper()
 	s := newStore()
-	return s, buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	return s, buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 }
 
 func postJSON(t *testing.T, mux http.Handler, method, path string, body any) *httptest.ResponseRecorder {
@@ -1122,7 +1303,7 @@ func TestPostAndGetEvents(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 
 	payload, _ := json.Marshal(map[string]string{"msg": "hello"})
 	evt := events.Event{
@@ -1175,7 +1356,7 @@ func TestGetEvents_EmptyReturnsArray(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/unknown-agent/events", nil))
@@ -1201,7 +1382,7 @@ func TestListAgents(t *testing.T) {
 	s.registerAgent(registry.AgentRecord{AgentID: "agent-b", AgentType: "worker", Status: "active"})
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents", nil))
@@ -1260,7 +1441,7 @@ func decodeDelegation(t *testing.T, mux http.Handler, query string) struct {
 func TestDelegationPolicy_AllowedChild(t *testing.T) {
 	s := newStore()
 	s.putTemplate(parentTemplate())
-	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	resp := decodeDelegation(t, mux, "?parentType=parent-agent&childType=child-agent")
 	if !resp.Allowed {
@@ -1277,7 +1458,7 @@ func TestDelegationPolicy_AllowedChild(t *testing.T) {
 func TestDelegationPolicy_DisallowedChild(t *testing.T) {
 	s := newStore()
 	s.putTemplate(parentTemplate())
-	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	resp := decodeDelegation(t, mux, "?parentType=parent-agent&childType=worker")
 	if resp.Allowed {
@@ -1293,7 +1474,7 @@ func TestDelegationPolicy_DisallowedChild(t *testing.T) {
 
 func TestDelegationPolicy_MissingParentTemplate(t *testing.T) {
 	s := newStore()
-	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	resp := decodeDelegation(t, mux, "?parentType=does-not-exist&childType=child-agent")
 	if resp.Allowed {
@@ -1310,7 +1491,7 @@ func TestDelegationPolicy_MissingParentTemplate(t *testing.T) {
 func TestDelegationPolicy_NoDelegationConfig(t *testing.T) {
 	s := newStore()
 	s.putTemplate(workerTemplate()) // no delegation block
-	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	resp := decodeDelegation(t, mux, "?parentType=worker&childType=child-agent")
 	if resp.Allowed {
@@ -1332,7 +1513,7 @@ func TestAgentChain_MultiLevel(t *testing.T) {
 	s.registerAgent(registry.AgentRecord{AgentID: "agent-root", AgentType: "parent-agent", Status: "active"})
 	s.registerAgent(registry.AgentRecord{AgentID: "agent-mid", AgentType: "parent-agent", Status: "active", ParentID: "agent-root"})
 	s.registerAgent(registry.AgentRecord{AgentID: "agent-leaf", AgentType: "child-agent", Status: "active", ParentID: "agent-mid"})
-	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/agent-leaf/chain", nil))
@@ -1361,7 +1542,7 @@ func TestAgentChain_MissingParentStops(t *testing.T) {
 	s := newStore()
 	// parent record absent — chain should include only the resolvable node.
 	s.registerAgent(registry.AgentRecord{AgentID: "agent-orphan", AgentType: "child-agent", Status: "active", ParentID: "agent-gone"})
-	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/agent-orphan/chain", nil))
@@ -1379,7 +1560,7 @@ func TestAgentChain_CycleGuard(t *testing.T) {
 	s := newStore()
 	s.registerAgent(registry.AgentRecord{AgentID: "agent-a", AgentType: "x", Status: "active", ParentID: "agent-b"})
 	s.registerAgent(registry.AgentRecord{AgentID: "agent-b", AgentType: "x", Status: "active", ParentID: "agent-a"})
-	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/agent-a/chain", nil))
@@ -1396,7 +1577,7 @@ func TestAgentChain_CycleGuard(t *testing.T) {
 
 func TestAgentChain_UnknownAgent404(t *testing.T) {
 	s := newStore()
-	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/agents/nope/chain", nil))
@@ -1410,7 +1591,7 @@ func TestSelfRegistrationEmitsEvents(t *testing.T) {
 	s.putTemplate(workerTemplate())
 	sdb := spicedb.NewMock()
 	validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/agent-emit"}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 
 	body, _ := json.Marshal(map[string]string{
 		"agentType": "worker",
@@ -1462,7 +1643,7 @@ func TestRevokeResume_AuthZ(t *testing.T) {
 	sdb := spicedb.NewMock()
 	sdb.WriteRelationship(t.Context(), "tenant:tenant-1", "agent", "agent:agent-test")
 	validator := &spiffe.MockSVIDValidator{}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 
 	// revoke: status -> revoked, tuple removed
 	rec := httptest.NewRecorder()
@@ -1534,7 +1715,7 @@ func TestRevokeResume_Cascade(t *testing.T) {
 		sdb.WriteRelationship(t.Context(), "tenant:tenant-1", "agent", "agent:"+n.id)
 		sdb.WriteRelationship(t.Context(), "agent:"+n.id, "enabled", "agent:"+n.id)
 	}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	has := func(id string) bool {
 		ok, _ := sdb.CheckPermission(t.Context(), "tenant:tenant-1", "work_on", "agent:"+id)
@@ -1613,7 +1794,7 @@ func TestRevokeCascade_PreservesTerminalDescendant(t *testing.T) {
 			sdb.WriteRelationship(t.Context(), "agent:"+n.id, "enabled", "agent:"+n.id)
 		}
 	}
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 	has := func(id string) bool {
 		ok, _ := sdb.CheckPermission(t.Context(), "tenant:tenant-1", "work_on", "agent:"+id)
 		return ok
@@ -1668,7 +1849,7 @@ func consentParentTemplate(ttl string) registry.AgentTemplate {
 func TestConsentLifecycle(t *testing.T) {
 	s := newStore()
 	s.putTemplate(consentParentTemplate("720h"))
-	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	check := func(scopes ...string) registry.ConsentDecision {
 		t.Helper()
@@ -1752,7 +1933,7 @@ func TestConsentLifecycle(t *testing.T) {
 func TestConsentExpiryDerivedFromTemplateTTL(t *testing.T) {
 	s := newStore()
 	s.putTemplate(consentParentTemplate("1ns"))
-	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	body := `{"userId":"alice","parentType":"parent-agent","childType":"child-agent","scopes":["openid"]}`
 	rec := httptest.NewRecorder()
@@ -1780,7 +1961,7 @@ func TestSpawnPolicy_ConsentRequired(t *testing.T) {
 	tpl.Delegation.AllowedChildTypes = []string{"child-agent", "other-agent"}
 	s.putTemplate(tpl)
 	s.registerAgent(registry.AgentRecord{AgentID: "parent-1", AgentType: "parent-agent", TenantID: "tenant-1"})
-	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	check := func(childType string) registry.SpawnDecision {
 		t.Helper()
@@ -1811,7 +1992,7 @@ func TestRegister_RefusesToResurrectDroppedAuthority(t *testing.T) {
 			s.putTemplate(workerTemplate())
 			sdb := spicedb.NewMock()
 			validator := &spiffe.MockSVIDValidator{SpiffeID: "spiffe://cluster.local/agent/agent-dead"}
-			mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+			mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 
 			s.registerAgent(registry.AgentRecord{
 				AgentID: "agent-dead", AgentType: "worker", UserID: "user-1", Status: status,
@@ -1842,7 +2023,7 @@ func TestRegister_RefusesToResurrectDroppedAuthority(t *testing.T) {
 func TestConsentRevoke_ScopedToOwner(t *testing.T) {
 	s := newStore()
 	s.putTemplate(consentParentTemplate("720h"))
-	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, spicedb.NewMock(), registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 
 	body := `{"userId":"alice","parentType":"parent-agent","childType":"child-agent","scopes":["openid"]}`
 	rec := httptest.NewRecorder()
@@ -1900,7 +2081,7 @@ func TestSubtreeEndpoint(t *testing.T) {
 	// Linear chain: root -> a -> b -> c.
 	t.Run("linear chain", func(t *testing.T) {
 		s := newStore()
-		mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+		mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 		seed := func(id, parent string) {
 			s.registerAgent(registry.AgentRecord{AgentID: id, AgentType: "chain-worker", TenantID: "tenant-1", UserID: "alice", ParentID: parent})
 		}
@@ -1923,7 +2104,7 @@ func TestSubtreeEndpoint(t *testing.T) {
 	// is not guaranteed, so compare as a set — but the root must come first.
 	t.Run("branching tree", func(t *testing.T) {
 		s := newStore()
-		mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+		mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 		seed := func(id, parent string) {
 			s.registerAgent(registry.AgentRecord{AgentID: id, AgentType: "chain-worker", TenantID: "tenant-1", UserID: "alice", ParentID: parent})
 		}
@@ -1945,7 +2126,7 @@ func TestSubtreeEndpoint(t *testing.T) {
 	// Unknown id -> 404.
 	t.Run("unknown id", func(t *testing.T) {
 		s := newStore()
-		mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+		mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 		if _, code := subtreeIDs(t, mux, "nope", "alice"); code != http.StatusNotFound {
 			t.Fatalf("subtree(unknown) status = %d, want 404", code)
 		}
@@ -1954,7 +2135,7 @@ func TestSubtreeEndpoint(t *testing.T) {
 	// A descendant whose status is terminal is still part of the delete set.
 	t.Run("terminal descendant still included", func(t *testing.T) {
 		s := newStore()
-		mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll())
+		mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(validator), controlplane.AllowAll(), testDir())
 		seed := func(id, parent string) {
 			s.registerAgent(registry.AgentRecord{AgentID: id, AgentType: "chain-worker", TenantID: "tenant-1", UserID: "alice", ParentID: parent})
 		}
@@ -1987,7 +2168,7 @@ func ownershipMux(t *testing.T) (*store, http.Handler, *spicedb.Mock) {
 	sdb := spicedb.NewMock()
 	sdb.WriteRelationship(t.Context(), "tenant:tenant-1", "agent", "agent:alice-agent")
 	sdb.WriteRelationship(t.Context(), "agent:alice-agent", "enabled", "agent:alice-agent")
-	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll())
+	mux := buildMux(s, sdb, registrant.NewSpiffeVerifier(&spiffe.MockSVIDValidator{}), controlplane.AllowAll(), testDir())
 	return s, mux, sdb
 }
 

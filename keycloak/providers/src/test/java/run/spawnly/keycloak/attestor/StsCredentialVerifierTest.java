@@ -125,6 +125,33 @@ class StsCredentialVerifierTest {
     }
 
     @Test
+    void validateStsUrl_trustedEndpointNarrowsTrust() {
+        // Mirror internal/attestor/aws_test.go:TestValidateStsURL_TrustedEndpoint:
+        // with the override set, ONLY that scheme+host+port is trusted (never
+        // widened), and plain http to the fake is allowed.
+        String trusted = "http://fake-sts:8080";
+        assertTrue(StsCredentialVerifier.validateStsUrl(
+                "http://fake-sts:8080/?Action=GetCallerIdentity", trusted));
+        assertTrue(StsCredentialVerifier.validateStsUrl(
+                "http://fake-sts:8080/foo?Action=GetCallerIdentity", trusted)); // path irrelevant
+        assertFalse(StsCredentialVerifier.validateStsUrl(
+                "https://fake-sts:8080/?Action=GetCallerIdentity", trusted)); // scheme differs
+        assertFalse(StsCredentialVerifier.validateStsUrl(
+                "http://fake-sts:9090/?Action=GetCallerIdentity", trusted)); // port differs
+        assertFalse(StsCredentialVerifier.validateStsUrl(
+                "http://other:8080/?Action=GetCallerIdentity", trusted)); // host differs
+        assertFalse(StsCredentialVerifier.validateStsUrl(
+                "https://sts.amazonaws.com/?Action=GetCallerIdentity", trusted)); // real AWS no longer trusted
+        assertFalse(StsCredentialVerifier.validateStsUrl(
+                "http://fake-sts:8080/?Action=AssumeRole", trusted)); // wrong action
+        // Empty override keeps the real AWS default.
+        assertTrue(StsCredentialVerifier.validateStsUrl(
+                "https://sts.amazonaws.com/?Action=GetCallerIdentity", ""));
+        assertFalse(StsCredentialVerifier.validateStsUrl(
+                "http://fake-sts:8080/?Action=GetCallerIdentity", ""));
+    }
+
+    @Test
     void verify_garbageCredential_isRejected() {
         assertNull(verifier().verify(null));
         assertNull(verifier().verify(""));

@@ -1,0 +1,79 @@
+# fake-sts — E2E-ONLY trust-injection stub for AWS STS GetCallerIdentity.
+#
+# ⚠ NOT part of the platform. This manifest is DELIBERATELY NOT referenced by
+# deploy/manifests/kustomization.yaml, so `make deploy` / `kubectl apply -k`
+# never installs it. It is applied ONLY by scripts/deploy-fake-sts.sh as part of
+# the anchor e2e path, which also points the registry's STS_TRUSTED_ENDPOINT at
+# it. A real deployment installs neither this nor that env, so nothing ever
+# trusts this stub. See cmd/fake-sts/main.go for the full "no SigV4" banner.
+#
+# The FAKE_STS_PRINCIPALS below map a signing-identity token (the convenience
+# X-Fake-Principal query param the anchor e2e presents, OR the access-key id in a
+# real presigned request's X-Amz-Credential — the remote-agent e2e's sidecar
+# presigns with AWS_ACCESS_KEY_ID=<principal>) to the account+ARN this fake
+# attests. `acme-good` is the acme org's legitimate identity; `acme-wrong` is a
+# different account used to prove a wrong-account activation is refused;
+# `globex-good` is a SECOND org's identity (a different account) used to prove
+# cross-org attestation isolation (Phase 10 criterion 12).
+#
+# The remote-agent e2e additionally passes an X-Fake-Session query param (the
+# consumer's chosen role-session-name == the agentId); when present the fake
+# echoes it as the returned ARN's session-name segment, keeping the account+role
+# anchor-fixed. So the ARN session names below are only defaults for callers that
+# do NOT override the session.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fake-sts
+  namespace: default
+  labels:
+    app: fake-sts
+    spawnly.run/e2e-only: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fake-sts
+  template:
+    metadata:
+      labels:
+        app: fake-sts
+        spawnly.run/e2e-only: "true"
+    spec:
+      containers:
+        - name: fake-sts
+          image: agent-fake-sts:latest
+          imagePullPolicy: Never
+          env:
+            - name: FAKE_STS_ADDR
+              value: ":8080"
+            - name: FAKE_STS_PRINCIPALS
+              value: |
+                {
+                  "acme-good":   {"account": "111122223333", "arn": "arn:aws:sts::111122223333:assumed-role/acme-agents/agent-e2e"},
+                  "acme-wrong":  {"account": "999988887777", "arn": "arn:aws:sts::999988887777:assumed-role/intruder/agent-e2e"},
+                  "globex-good": {"account": "444455556666", "arn": "arn:aws:sts::444455556666:assumed-role/globex-agents/agent-e2e"}
+                }
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 1
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fake-sts
+  namespace: default
+  labels:
+    app: fake-sts
+    spawnly.run/e2e-only: "true"
+spec:
+  selector:
+    app: fake-sts
+  ports:
+    - port: 8080
+      targetPort: 8080

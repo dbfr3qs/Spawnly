@@ -126,6 +126,35 @@ func TestSweep_OrphansMarkedFailedWithEvent(t *testing.T) {
 	}
 }
 
+// TestSweep_RemoteAgentsExcluded pins the Phase-10 invariant: a consumer-hosted
+// (Placement=remote) agent has NO AgentWorkload by design, so the sweep must
+// NEVER fail it — otherwise every remote agent dies on the operator's first
+// startup sweep. A co-located platform (k8s) orphan in the same active state IS
+// still swept, proving the skip is scoped to remote placement, not to status.
+func TestSweep_RemoteAgentsExcluded(t *testing.T) {
+	reg := registry.NewMock(nil)
+	remote := agent("a-remote", "active")
+	remote.Placement = registry.PlacementRemote
+	reg.Agents = []registry.AgentRecord{
+		remote,               // remote, no workload — must be left alone
+		agent("a-k8s", "active"), // platform orphan, no workload — must be swept
+	}
+	ev := events.NewMock()
+
+	// No workloads seeded — the k8s record is an orphan, the remote one is not.
+	sweeper := newSweeper(t, reg, ev)
+	if err := sweeper.Sweep(context.Background(), "startup"); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	if len(reg.Failed) != 1 || reg.Failed[0] != "a-k8s" {
+		t.Fatalf("Failed = %v, want [a-k8s] only (remote agent must be excluded)", reg.Failed)
+	}
+	if len(ev.Events["a-remote"]) != 0 {
+		t.Errorf("remote agent got sweep events %v, want none", ev.Events["a-remote"])
+	}
+}
+
 func TestSweep_MatchingWorkloadUntouched(t *testing.T) {
 	reg := registry.NewMock(nil)
 	reg.Agents = []registry.AgentRecord{

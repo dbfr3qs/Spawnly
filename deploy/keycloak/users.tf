@@ -68,3 +68,52 @@ resource "keycloak_user" "viewer" {
   }
   # No admin role — the `role` claim is simply absent for this user.
 }
+
+# ---- bob: non-admin user, second org (globex) ------------------------------
+# Exercises cross-org isolation: bob is the org admin of `globex` (via the
+# Phase-3 onboarding API, SpiceDB tuple — NOT a realm role), so he must see none
+# of alice's `acme` agents. Same fail-closed count pattern as viewer.
+resource "keycloak_user" "bob" {
+  count = var.bob_password != "" ? 1 : 0
+
+  realm_id = keycloak_realm.spawnly.id
+  username = "bob"
+  enabled  = true
+
+  email          = "bob@example.com"
+  email_verified = true
+  first_name     = "Bob"
+  last_name      = "Builder"
+
+  initial_password {
+    value     = var.bob_password
+    temporary = false
+  }
+  # No realm admin role — bob's org-admin authority over globex is a SpiceDB
+  # tuple written by the onboarding API, not the realm `admin` role.
+}
+
+# ---- nomad: non-admin user in NO organization ------------------------------
+# Deliberately never added to any org (reseed-orgs.sh does not touch nomad), so a
+# fresh login lands on the dashboard's "no organization" screen — the Phase-5 e2e
+# proof of that state. Non-admin (no realm role) with a usable password, since a
+# user created via the org onboarding API carries a required-password-reset action
+# and no usable password (so it can't complete a browser login); a seeded org-less
+# user is the testable equivalent.
+resource "keycloak_user" "nomad" {
+  count = var.nomad_password != "" ? 1 : 0
+
+  realm_id = keycloak_realm.spawnly.id
+  username = "nomad"
+  enabled  = true
+
+  email          = "nomad@example.com"
+  email_verified = true
+  first_name     = "Nomad"
+  last_name      = "Unaffiliated"
+
+  initial_password {
+    value     = var.nomad_password
+    temporary = false
+  }
+}

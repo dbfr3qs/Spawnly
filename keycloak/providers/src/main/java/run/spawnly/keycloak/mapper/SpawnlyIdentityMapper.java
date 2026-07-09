@@ -57,6 +57,7 @@ public class SpawnlyIdentityMapper extends AbstractOIDCProtocolMapper
 
     private static final String ACT_CLAIM = "act";
     private static final String TOKEN_USE_CLAIM = "token_use";
+    private static final String ORGANIZATION_CLAIM = "organization";
     private static final String DELEGATION = "delegation";
     private static final String AUDIENCE_PARAM = "audience";
 
@@ -131,6 +132,19 @@ public class SpawnlyIdentityMapper extends AbstractOIDCProtocolMapper
         Map<String, Object> act = new LinkedHashMap<>();
         act.put("sub", agent.subject());
         token.setOtherClaims(ACT_CLAIM, act);
+
+        // organization = ["<orgId>"] — the SAME array-of-aliases shape Keycloak's
+        // org membership mapper stamps into USER tokens (frozen live-captured
+        // shape; see internal/tokenvalidator/keycloak_fixture_test.go), so the Go
+        // tokenvalidator parses agent + user tokens identically. Emitted ONLY for
+        // an org-bound agent; an org-less (global) agent carries NO org claim.
+        // The value is the REGISTRY record's orgId (threaded via VerifiedAgent),
+        // so an agent can never mint a token claiming an org other than the one
+        // recorded at spawn.
+        String orgId = agent.orgId();
+        if (orgId != null && !orgId.isEmpty()) {
+            token.setOtherClaims(ORGANIZATION_CLAIM, List.of(orgId));
+        }
 
         // token_use=delegation when the token request carried audience=delegation.
         if (isDelegationRequested(session)) {

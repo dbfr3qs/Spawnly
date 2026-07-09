@@ -9,6 +9,7 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -23,6 +24,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/spawnly/platform/internal/controlplane"
 	"github.com/spawnly/platform/internal/events"
+	"github.com/spawnly/platform/internal/orgdirectory"
+	"github.com/spawnly/platform/internal/orgdirectory/keycloak"
 	"github.com/spawnly/platform/internal/registrant"
 	"github.com/spawnly/platform/internal/registry"
 	"github.com/spawnly/platform/internal/registry/dynamostore"
@@ -38,7 +41,11 @@ import (
 //go:embed schema.zed
 var defaultSchema string
 
-const defaultSchemaVersion = "v1"
+// Bumped to v2 when the embedded schema gained the org multi-tenancy
+// definitions (user/organization) and the agent owner/org relations +
+// view/manage permissions. The version is informational (GET /v1/schema + boot
+// log); WriteSchema is applied unconditionally on boot regardless of it.
+const defaultSchemaVersion = "v2"
 
 // validAgentID constrains the identifier a registrant.Verifier returns before it
 // is used to build SpiceDB tuple keys and as the AgentRecord primary key. The
@@ -54,6 +61,11 @@ type store struct {
 	// consents is keyed by the (user, parentType, childType) edge — one record
 	// per edge, replaced on each fresh grant. See consentKey.
 	consents map[string]registry.ConsentRecord
+
+	// orgs holds organization records keyed by OrgID. Membership is NOT here —
+	// Keycloak owns who's in an org, SpiceDB owns authorization; this stores only
+	// the org's own record (name, settings, optional attestation anchor).
+	orgs map[string]registry.Organization
 
 	// consentRequests holds brokered consent asks by ID (Phase 5b). openRequests
 	// indexes the single open (pending) request per edge by consentKey, so
@@ -79,6 +91,7 @@ func newStore() *store {
 		consents:        map[string]registry.ConsentRecord{},
 		consentRequests: map[string]registry.ConsentRequest{},
 		openRequests:    map[string]string{},
+		orgs:            map[string]registry.Organization{},
 	}
 	s.SetSchema(defaultSchema, defaultSchemaVersion, "default")
 	return s
@@ -132,6 +145,44 @@ func (s *store) getAgent(id string) registry.AgentRecord {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.agents[id]
+}
+
+// putOrg upserts an organization record (replaces the whole record, matching
+// the agent/template write semantics).
+func (s *store) putOrg(org registry.Organization) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.orgs[org.OrgID] = org
+}
+
+// getOrg returns the org and whether it was found.
+func (s *store) getOrg(id string) (registry.Organization, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	org, ok := s.orgs[id]
+	return org, ok
+}
+
+// listOrgs returns all organization records.
+func (s *store) listOrgs() []registry.Organization {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]registry.Organization, 0, len(s.orgs))
+	for _, org := range s.orgs {
+		out = append(out, org)
+	}
+	return out
+}
+
+// deleteOrg removes an org, returning whether one was found.
+func (s *store) deleteOrg(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.orgs[id]; !ok {
+		return false
+	}
+	delete(s.orgs, id)
+	return true
 }
 
 // appendEvent stamps and stores an event, returning the stored copy. It returns
@@ -505,16 +556,34 @@ func subtree(ctx context.Context, s registry.Store, id string) ([]string, error)
 	return out, nil
 }
 
-// agentOwnedBy reports whether the agent exists and is owned by userId. Ownership
-// is the agent record's UserID. An empty userId never owns anything (so a caller
-// that asserts no identity is denied), and an unknown id reports exists=false.
+// SpiceDB agent permissions checked for human lifecycle authority (schema.zed):
+// view = owner + org->view_agents (read: subtree/events/logs/chain);
+// manage = owner + org->admin_agents (mutate: revoke/resume/dismiss/kill/...).
+const (
+	actionView   = "view"
+	actionManage = "manage"
+)
+
+// agentAllowed reports whether the agent exists and whether userId is allowed the
+// given action (actionView / actionManage) on it — the Phase-4 authorization flip
+// from pure userId-equality to SpiceDB org checks. Two paths:
 //
-// A backend read error is PROPAGATED (not swallowed to exists=false): mapping a
-// transient DynamoDB read failure to "not found" would turn a retryable 5xx into
-// a misleading 404, and — on the revoke/resume paths this gates — could let a
-// caller believe an agent is gone when the store merely hiccupped. The handler
-// surfaces the error as a 5xx via storeErr, matching the subtree/revokeNode fix.
-func agentOwnedBy(ctx context.Context, s registry.Store, id, userId string) (owned, exists bool, err error) {
+//   - ORG-LESS agent (record OrgID == ""): today's equality, decided from the
+//     record alone with NO SpiceDB round-trip. Global agents (incl. any whose
+//     owner/org tuples predate this phase) keep working exactly as before, and
+//     the existing e2e — all org-less — stays on this path unchanged.
+//   - ORG-SCOPED agent (record OrgID != ""): SpiceDB is authoritative via
+//     CheckPermission on "agent:<id>" for the action. The subject userId is
+//     normalized with spicedb.EncodeObjectID so it matches the object id written
+//     on the owner/membership tuples (registry.ValidUserID admits '. : @', which
+//     SpiceDB's object-id charset rejects raw).
+//
+// A STORE read error is PROPAGATED (exists=false, err set) so the handler surfaces
+// a retryable 5xx — mapping it to 404 would falsely tell a caller the agent is
+// gone. A SpiceDB CheckPermission error, by contrast, FAILS CLOSED: it is logged
+// and returns allowed=false (a 404 for the caller), never a 5xx oracle and never
+// an open grant — matching the recorded agentOwnedBy follow-up.
+func agentAllowed(ctx context.Context, s registry.Store, sdb spicedb.Client, id, userId, action string) (allowed, exists bool, err error) {
 	rec, err := s.GetAgent(ctx, id)
 	if err != nil {
 		return false, false, err
@@ -522,7 +591,21 @@ func agentOwnedBy(ctx context.Context, s registry.Store, id, userId string) (own
 	if rec.AgentID == "" {
 		return false, false, nil
 	}
-	return userId != "" && rec.UserID == userId, true, nil
+	if userId == "" {
+		return false, true, nil // no asserted identity never owns / is never a member
+	}
+	if rec.OrgID == "" {
+		return rec.UserID == userId, true, nil
+	}
+	ok, cerr := sdb.CheckPermission(ctx, "agent:"+id, action, "user:"+spicedb.EncodeObjectID(userId))
+	if cerr != nil {
+		// Fail closed: deny (404) and log, rather than 5xx (which would leak that
+		// the id exists) or fail open. The org tuples are the source of truth; a
+		// SpiceDB hiccup must not grant access.
+		log.Printf("agentAllowed: spicedb %s check for agent %s user %s failed (fail-closed deny): %v", action, id, userId, cerr)
+		return false, true, nil
+	}
+	return ok, true, nil
 }
 
 // depth returns how many agents are in the lineage from id up to the root,
@@ -617,6 +700,52 @@ func validAgentType(w http.ResponseWriter, agentType string) bool {
 		return false
 	}
 	return true
+}
+
+// templateInScope reports whether agentType exists AND belongs to scopeOrg
+// (Phase 6 org-scoped template management). It is the shared guard for the
+// org-admin-scoped PATCH path (DELETE checks the equivalent inline after its own
+// GetTemplate). On any failure it writes the response (500 on a store error, 404
+// when the template is unknown OR belongs to a different org — a single 404 so an
+// org admin can't distinguish "no such template" from "template exists in another
+// org", no cross-org existence oracle) and returns false; the caller returns.
+func templateInScope(w http.ResponseWriter, ctx context.Context, s registry.Store, agentType, scopeOrg string) bool {
+	t, ok, err := s.GetTemplate(ctx, agentType)
+	if storeErr(w, err) {
+		return false
+	}
+	if !ok || t.OrgID != scopeOrg {
+		http.Error(w, "not found", http.StatusNotFound)
+		return false
+	}
+	return true
+}
+
+// filterTemplatesVisible returns the templates SPAWNABLE by a caller whose active
+// org is org (Phase 6): every global template (OrgID == "", the seeded catalog)
+// plus templates scoped to org. An org-less caller (org == "") sees global only.
+// This is the "global + own org" visibility used by the spawn dropdown / bare list.
+func filterTemplatesVisible(tpls []registry.AgentTemplate, org string) []registry.AgentTemplate {
+	out := make([]registry.AgentTemplate, 0, len(tpls))
+	for _, t := range tpls {
+		if t.OrgID == "" || t.OrgID == org {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// filterTemplatesOwnOrg returns ONLY the templates scoped to org (excludes global)
+// — the org-admin Agent Types management view, which manages the org's own
+// catalog, never the global one.
+func filterTemplatesOwnOrg(tpls []registry.AgentTemplate, org string) []registry.AgentTemplate {
+	out := make([]registry.AgentTemplate, 0, len(tpls))
+	for _, t := range tpls {
+		if t.OrgID == org {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func mustMarshal(v any) json.RawMessage {
@@ -744,6 +873,90 @@ func resumeNode(ctx context.Context, s registry.Store, sdb spicedb.Client, id st
 	return true, nil
 }
 
+// applyRemovalDisposition settles a removed member's running agents per the org's
+// removal-disposition setting (Phase 6). It runs AFTER the member's Keycloak
+// membership and SpiceDB membership tuples are gone (the DELETE members handler),
+// so the ex-member has ALREADY lost all access and can no longer mint into the org
+// — this only decides the fate of the agents they OWNED in the org:
+//
+// In BOTH dispositions the ex-member's OWNER tuple on each of their org agents is
+// dropped, so their lifecycle authority (view/manage via the owner term) dies with
+// their membership — the spec's "the ex-member loses ALL access" (a removed member
+// must not be able to keep reading/resuming an org agent just because they spawned
+// it). What differs is the fate of the agent itself:
+//
+//   - auto-revoke: additionally run the existing revoke cascade (subtree +
+//     revokeNode) over each owned ROOT (an owned agent whose parent is not itself
+//     owned), so the ex-member's agents and everything they spawned stop acting.
+//   - orphan-to-admin (default, non-destructive): the agent keeps running; the
+//     record keeps UserID for history; org admins retain manage via org->admin_agents.
+//
+// Owner-tuple drops + cascade roots are strictly the ex-member's OWN agents in
+// THIS org (OrgID == org && UserID == user). The auto-revoke cascade only ever
+// STARTS from an owned root, so it never revokes an unrelated agent — but, exactly
+// like a normal owner-initiated revoke, it does follow ParentID into descendants
+// the ex-member spawned even if a descendant is owned by another member (that is
+// the ex-member's delegation subtree, within their revoke authority). A backend
+// error is returned so the handler fails loud (the whole remove is retryable +
+// idempotent).
+func applyRemovalDisposition(ctx context.Context, s registry.Store, sdb spicedb.Client, org, user, disposition string) error {
+	agents, err := s.ListAgents(ctx)
+	if err != nil {
+		return err
+	}
+	var owned []registry.AgentRecord
+	ownedSet := map[string]bool{}
+	for _, a := range agents {
+		if a.OrgID == org && a.UserID == user {
+			owned = append(owned, a)
+			ownedSet[a.AgentID] = true
+		}
+	}
+	if len(owned) == 0 {
+		return nil
+	}
+	// Always sever the ex-member's ownership of their org agents (best-effort: the
+	// membership tuple is already gone, so a stray owner tuple only over-grants to a
+	// subject that can no longer authenticate; a retry re-runs this idempotently).
+	sub := "user:" + spicedb.EncodeObjectID(user)
+	for _, a := range owned {
+		if derr := sdb.DeleteRelationship(ctx, "agent:"+a.AgentID, "owner", sub); derr != nil {
+			log.Printf("removal disposition: drop owner tuple for %s: %v", a.AgentID, derr)
+		}
+	}
+	if disposition == registry.RemovalAutoRevoke {
+		for _, a := range owned {
+			// Roots only: an owned agent whose parent is also owned is already
+			// covered by the parent's cascade (revokeNode is idempotent regardless).
+			if a.ParentID != "" && ownedSet[a.ParentID] {
+				continue
+			}
+			nodes, err := subtree(ctx, s, a.AgentID)
+			if err != nil {
+				return err
+			}
+			for _, id := range nodes {
+				if _, err := revokeNode(ctx, s, sdb, id); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	// orphan-to-admin: audit each orphaned agent (revokeNode emits its own event on
+	// the auto-revoke path).
+	for _, a := range owned {
+		if _, aerr := s.AppendEvent(ctx, a.AgentID, events.Event{
+			Source:  events.SourceRegistry,
+			Type:    "agent_orphaned",
+			Payload: mustMarshal(map[string]string{"agentId": a.AgentID, "orgId": org, "formerOwner": user}),
+		}); aerr != nil {
+			log.Printf("removal disposition orphan: append event for %s: %v", a.AgentID, aerr)
+		}
+	}
+	return nil
+}
+
 // rejectDuplicateUserID is a defense-in-depth guard for every userId-scoped
 // ownership/consent check in the registry. Those handlers read userId with
 // url.Values.Get, which returns only the FIRST value, so a request carrying
@@ -784,7 +997,7 @@ func rejectInvalidUserID(w http.ResponseWriter, userID string) bool {
 	return true
 }
 
-func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier, cpAuth controlplane.Authenticator) http.Handler {
+func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier, cpAuth controlplane.Authenticator, dir orgdirectory.Directory) http.Handler {
 	mux := http.NewServeMux()
 
 	// Control-plane caller authentication for the consent lifecycle endpoints.
@@ -808,6 +1021,11 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	// handleCP registers a consent-lifecycle handler behind the control-plane check.
 	handleCP := func(pattern string, h http.HandlerFunc) { mux.HandleFunc(pattern, cp(h)) }
 
+	// Org onboarding + membership control-plane API (multi-tenancy Phase 3). All
+	// org/membership mutation flows through here (registry = the single dual-write
+	// choke point over Keycloak + SpiceDB); every route is cp-gated.
+	registerOrgRoutes(mux, s, sdb, dir, cp)
+
 	// Template management (create/disable/delete) is a control-plane operation,
 	// so it sits behind the same control-plane authenticator as the consent
 	// lifecycle. Under the default AllowAll authenticator it runs open.
@@ -816,6 +1034,39 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+		// Org scope (Phase 6) is stamped from the TRUSTED ?orgId= the orchestrator
+		// derives from the caller's token claim (the withTemplateOrg pattern),
+		// NEVER from the request body — a dashboard-created template is bound to the
+		// org it was created in, and a body OrgID must not be able to forge that.
+		// Empty (realm-admin create, or terraform) = a global template. Validate the
+		// charset so it stays a safe SpiceDB/DNS-label object id like every other org id.
+		t.OrgID = r.URL.Query().Get("orgId")
+		if t.OrgID != "" && !validOrgID.MatchString(t.OrgID) {
+			http.Error(w, "invalid orgId", http.StatusBadRequest)
+			return
+		}
+		// Scope-integrity guard (Phase 6 security): templates share ONE global name
+		// namespace (keyed by AgentType) and PutTemplate is an unconditional upsert,
+		// so without this an org admin could re-POST an existing name and silently
+		// STEAL it into their org — hijacking the global catalog (OrgID "") or another
+		// org's template. On a name collision:
+		//   • org-scoped create (?orgId set): the existing template MUST already be in
+		//     the SAME org, else 409 — an org admin may only edit their own org's
+		//     template of that name, never a global or cross-org one.
+		//   • realm-admin create (no ?orgId, global authority): PRESERVE the existing
+		//     scope rather than de-scoping an org template into the global catalog (a
+		//     realm admin's edit of an org template keeps it org-scoped). A brand-new
+		//     name stays global as intended.
+		if existing, ok, err := s.GetTemplate(r.Context(), t.AgentType); storeErr(w, err) {
+			return
+		} else if ok {
+			if t.OrgID == "" {
+				t.OrgID = existing.OrgID
+			} else if existing.OrgID != t.OrgID {
+				http.Error(w, "agent type already exists", http.StatusConflict)
+				return
+			}
 		}
 		// Reject an unrecognized status at creation time so a template can't be
 		// born with a junk value. Empty (treated as active) and the tolerated
@@ -858,6 +1109,17 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			http.Error(w, "invalid status", http.StatusBadRequest)
 			return
 		}
+		// Org-scoped management (Phase 6): when the caller is org-scoped (the
+		// orchestrator forwarded ?orgId= for an org admin), the target template MUST
+		// belong to that org — an org admin can neither manage the global catalog
+		// (OrgID "") nor another org's templates. A realm admin forwards no orgId and
+		// bypasses this (global authority). A mismatch (or unknown) reads as the same
+		// 404 the update path returns, so there is no cross-org existence oracle.
+		if scopeOrg := r.URL.Query().Get("orgId"); scopeOrg != "" {
+			if !templateInScope(w, r.Context(), s, agentType, scopeOrg) {
+				return
+			}
+		}
 		t, found, err := s.UpdateTemplateStatus(r.Context(), agentType, body.Status)
 		if storeErr(w, err) {
 			return
@@ -882,6 +1144,14 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			return
 		}
 		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		// Org-scoped management (Phase 6): an org admin (?orgId= set) may delete only
+		// their own org's templates; realm admin (no orgId) may delete any. Mismatch
+		// reads as 404 (no cross-org oracle) — checked before the disabled-state 409
+		// so a wrong-org caller can't even learn the template's status.
+		if scopeOrg := r.URL.Query().Get("orgId"); scopeOrg != "" && t.OrgID != scopeOrg {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -949,6 +1219,22 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		// token sub) becomes the agent record's owner and feeds ownership scoping —
 		// validate its charset at ingest.
 		if !rejectInvalidUserID(w, rec.UserID) {
+			return
+		}
+		// The preregistered orgId becomes a SpiceDB object id ("organization:"+id)
+		// on the agent's org tuple — constrain its charset at ingest exactly like
+		// agentId (this endpoint is the ONLY ingress that accepts orgId; the
+		// self-register path derives it from this record). Phase 3's org
+		// onboarding tightens org ids further to DNS labels.
+		if rec.OrgID != "" && !validAgentID.MatchString(rec.OrgID) {
+			http.Error(w, "invalid orgId", http.StatusBadRequest)
+			return
+		}
+		// Placement (Phase 10) is trusted from this cp-gated body (the orchestrator's
+		// remote-registration path sets it), but constrain it to the known values so
+		// a typo can never yield a record that neither the sweep nor the UI expects.
+		if rec.Placement != "" && rec.Placement != registry.PlacementK8s && rec.Placement != registry.PlacementRemote {
+			http.Error(w, "invalid placement", http.StatusBadRequest)
 			return
 		}
 		rec.Status = "pending"
@@ -1028,7 +1314,25 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		// forgeable parent would let any agent plant parentId=victim and post events
 		// onto the victim. The trusted set-once happens at preregister (cpAuth) or,
 		// for an un-preregistered brand-new self-register, this first write.
+		// ParentID, UserID (owner), and OrgID are all set-once — at preregister
+		// (cpAuth, orchestrator-asserted) or, for an un-preregistered brand-new
+		// self-register, at this first write — and IMMUTABLE thereafter. A
+		// self-registering sidecar proves ONLY its own agentId (SVID-pinned),
+		// never its lineage, owner, or org, so none of the three may be
+		// (re)pointed from the request body once the record exists: a forgeable
+		// owner would let a sidecar rewrite the record's owner (and, from Phase 4
+		// on, the agent:<id>#owner authz tuple) to an arbitrary user; a forgeable
+		// org would let it claim another org's agents.
 		parentID := req.ParentID
+		userID := req.UserID
+		orgID := existing.OrgID
+		// Placement is set-once at preregistration and immutable (like ParentID/
+		// UserID/OrgID): a self-registering sidecar proves only its SVID-pinned
+		// agentId, never where it runs, so it must NOT be able to declare itself
+		// remote (dodging the operator's stale sweep) or flip a remote record to
+		// k8s. It is never read from the request body — only carried from the
+		// preregistered record.
+		placement := existing.Placement
 		if existing.AgentID != "" {
 			switch existing.Status {
 			case "completed", "failed", "revoked":
@@ -1036,18 +1340,21 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 					http.StatusConflict)
 				return
 			}
-			parentID = existing.ParentID // preserve the lineage set at preregister/first-register
+			parentID = existing.ParentID
+			userID = existing.UserID
 		}
 
 		rec := registry.AgentRecord{
 			AgentID:      agentID,
 			AgentType:    req.AgentType,
 			TenantID:     req.TenantID,
-			UserID:       req.UserID,
+			UserID:       userID,
 			Status:       "active",
 			Lifecycle:    tpl.Runtime.Lifecycle,
 			SupportsChat: tpl.Runtime.SupportsChat,
 			ParentID:     parentID,
+			OrgID:        orgID,
+			Placement:    placement,
 		}
 		if storeErr(w, s.RegisterAgent(ctx, rec)) {
 			return
@@ -1090,6 +1397,39 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			log.Printf("spicedb enabled-tuple write error for %s: %v", agentID, err)
 		}
 		tuples = append(tuples, relTuple{Resource: enabledRes, Relation: "enabled", Subject: enabledSub})
+
+		// Human lifecycle authority tuples (Phase 1, org multi-tenancy). Always
+		// write the owner tuple; when the record is org-scoped also write the org
+		// tuple so org admins/members inherit view/manage via `org->...`. These
+		// feed the agent `view`/`manage` permissions; nothing enforces them yet
+		// (the authz flip from userId-equality is Phase 4) — writing them now is
+		// additive and keeps the tuples present for when it lands.
+		//
+		// OrgID is the record's server-derived org (rec.OrgID == existing.OrgID),
+		// never a body value. The owner tuple is skipped for a user-less global
+		// agent so we never write a malformed `user:` (empty id) tuple — the same
+		// guard the tenant-relation skip applies above for a tenant-less agent.
+		// userId/orgId are normalized to a SpiceDB-safe object id here on the WRITE
+		// side; agentAllowed applies the SAME spicedb.EncodeObjectID on the READ
+		// (CheckPermission) side, and orgTuple does likewise for org membership —
+		// so the owner/org/membership tuples and the Phase-4 checks agree even for
+		// subjects carrying '. : @' (which ValidUserID admits but SpiceDB rejects
+		// raw). For the common UUID-sub / DNS-label-org case the encoding is the
+		// identity, so nothing changes for existing tuples.
+		if rec.UserID != "" {
+			ownerRes, ownerSub := "agent:"+agentID, "user:"+spicedb.EncodeObjectID(rec.UserID)
+			if err := sdb.WriteRelationship(ctx, ownerRes, "owner", ownerSub); err != nil {
+				log.Printf("spicedb owner-tuple write error for %s: %v", agentID, err)
+			}
+			tuples = append(tuples, relTuple{Resource: ownerRes, Relation: "owner", Subject: ownerSub})
+		}
+		if rec.OrgID != "" {
+			orgRes, orgSub := "agent:"+agentID, "organization:"+spicedb.EncodeObjectID(rec.OrgID)
+			if err := sdb.WriteRelationship(ctx, orgRes, "org", orgSub); err != nil {
+				log.Printf("spicedb org-tuple write error for %s: %v", agentID, err)
+			}
+			tuples = append(tuples, relTuple{Resource: orgRes, Relation: "org", Subject: orgSub})
+		}
 		s.AppendEvent(ctx, agentID, events.Event{
 			Source:  events.SourceRegistry,
 			Type:    "spicedb_relations_written",
@@ -1253,11 +1593,23 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			if ok {
 				resTypes = relationResourceTypes(tpl, rec.TenantID != "")
 			}
+			// Template relations (tenant/project/...) have "agent:<id>" as their
+			// SUBJECT, so a subject-scoped delete reaches them.
 			if err := sdb.DeleteAgentRelationships(ctx, agentID, resTypes); err != nil {
 				log.Printf("spicedb cleanup error for %s: %v", agentID, err)
 			}
+			// Drop ONLY the `enabled` status tuple (a terminal agent isn't runnable),
+			// exactly like revoke. The `owner` and `org` tuples are DELIBERATELY left
+			// in place: they are the agent's HUMAN lifecycle authority (view/manage),
+			// and a terminal agent still has a record a human must be able to view
+			// and DISMISS. The record is never hard-deleted (dismiss is a soft flag;
+			// nothing removes it from the store), so these tuples live with the
+			// record — removing them here would 404 the owner's own dismiss/view of a
+			// completed/failed/killed org-scoped agent (org authz checks manage/view =
+			// owner + org->admin/view_agents against SpiceDB). This mirrors the schema
+			// note that view/manage must stay checkable on a non-active agent.
 			if err := sdb.DeleteRelationship(ctx, "agent:"+agentID, "enabled", "agent:"+agentID); err != nil {
-				log.Printf("spicedb enabled-tuple cleanup error for %s: %v", agentID, err)
+				log.Printf("spicedb terminal enabled-tuple delete error for %s: %v", agentID, err)
 			}
 		}
 		w.WriteHeader(http.StatusOK)
@@ -1266,11 +1618,12 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	mux.HandleFunc("POST /v1/agents/{id}/dismiss", func(w http.ResponseWriter, r *http.Request) {
 		agentID := r.PathValue("id")
 		userId := r.URL.Query().Get("userId")
-		owned, exists, err := agentOwnedBy(r.Context(), s, agentID, userId)
+		// dismiss mutates the agent → manage authority.
+		allowed, exists, err := agentAllowed(r.Context(), s, sdb, agentID, userId, actionManage)
 		if storeErr(w, err) {
 			return
 		}
-		if !exists || !owned {
+		if !exists || !allowed {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -1296,11 +1649,12 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	mux.HandleFunc("POST /v1/agents/{id}/revoke", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		userId := r.URL.Query().Get("userId")
-		owned, exists, err := agentOwnedBy(r.Context(), s, id, userId)
+		// revoke mutates the agent (and its subtree) → manage authority.
+		allowed, exists, err := agentAllowed(r.Context(), s, sdb, id, userId, actionManage)
 		if storeErr(w, err) {
 			return
 		}
-		if !exists || !owned {
+		if !exists || !allowed {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -1338,11 +1692,12 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	mux.HandleFunc("POST /v1/agents/{id}/resume", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		userId := r.URL.Query().Get("userId")
-		owned, exists, err := agentOwnedBy(r.Context(), s, id, userId)
+		// resume mutates the agent (and its subtree) → manage authority.
+		allowed, exists, err := agentAllowed(r.Context(), s, sdb, id, userId, actionManage)
 		if storeErr(w, err) {
 			return
 		}
-		if !exists || !owned {
+		if !exists || !allowed {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -1378,11 +1733,15 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	mux.HandleFunc("GET /v1/agents/{id}/subtree", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		userId := r.URL.Query().Get("userId")
-		owned, exists, err := agentOwnedBy(r.Context(), s, id, userId)
+		// subtree is the read side of the DELETE cascade (a mutation the
+		// orchestrator drives), so it takes manage authority per the spec matrix —
+		// not view. A same-org member (view-only) must not be able to enumerate an
+		// admin's agent subtree as a prelude to a delete they can't perform.
+		allowed, exists, err := agentAllowed(r.Context(), s, sdb, id, userId, actionManage)
 		if storeErr(w, err) {
 			return
 		}
-		if !exists || !owned {
+		if !exists || !allowed {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -1792,6 +2151,15 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			if storeErr(w, err) {
 				return
 			}
+			// Org-scoped full view (Phase 6): with ?orgId= (the orchestrator's
+			// org-admin Agent Types view) return ONLY that org's templates — an org
+			// admin manages their org's catalog, not the global one nor another
+			// org's. Without orgId (the realm-admin /v1/admin/templates view) return
+			// everything. Note this is the "own org ONLY" scope (excludes global),
+			// distinct from the spawn/list "global + own org" visibility below.
+			if org := r.URL.Query().Get("orgId"); org != "" {
+				tpls = filterTemplatesOwnOrg(tpls, org)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(tpls)
 			return
@@ -1800,12 +2168,15 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		// to decide tenant-ness: {agentType, requiresTenant}. Unlike detail=full
 		// it stays PUBLIC (no control-plane auth) — a non-admin user spawning an
 		// agent needs the flag, and it exposes nothing sensitive (active type
-		// names + a boolean, no authz config, no disabled types).
+		// names + a boolean, no authz config, no disabled types). Phase 6: with
+		// ?orgId= (the orchestrator forwards the caller's active org) the list is
+		// global + that-org templates; without it, global only.
 		if strings.EqualFold(r.URL.Query().Get("detail"), "spawn") {
 			tpls, err := s.ListTemplates(r.Context(), false)
 			if storeErr(w, err) {
 				return
 			}
+			tpls = filterTemplatesVisible(tpls, r.URL.Query().Get("orgId"))
 			out := make([]map[string]any, 0, len(tpls))
 			for _, t := range tpls {
 				out = append(out, map[string]any{
@@ -1817,9 +2188,18 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			json.NewEncoder(w).Encode(out)
 			return
 		}
-		types, err := s.ListTemplateTypes(r.Context())
+		// Bare list: active type names for the spawn dropdown. Phase 6: same
+		// global + caller's-org visibility filter as detail=spawn (was
+		// ListTemplateTypes; now ListTemplates(false) so OrgID is available to
+		// filter on before projecting to names).
+		tpls, err := s.ListTemplates(r.Context(), false)
 		if storeErr(w, err) {
 			return
+		}
+		tpls = filterTemplatesVisible(tpls, r.URL.Query().Get("orgId"))
+		types := make([]string, 0, len(tpls))
+		for _, t := range tpls {
+			types = append(types, t.AgentType)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(types)
@@ -2014,17 +2394,29 @@ func main() {
 	// configured JWKS (any IdP), enforcing audience + scope.
 	cpAuth := buildControlPlaneAuth(ctx)
 
+	dir := buildOrgDirectory()
+
 	s := buildStore(ctx)
 	// Apply the active schema (default or SPICEDB_SCHEMA_PATH override) to whatever
 	// backend was selected. The schema is boot-time config every Store keeps in
 	// memory (registry.SchemaState), so this seeds the DynamoDB store — which
 	// starts with none — and re-applies the same value to the in-memory store.
 	s.SetSchema(activeSchema, schemaVersion, schemaSource)
+
+	// Per-org verifier resolution (multi-tenancy Phase 9): wrap the configured
+	// default registrant verifier so a consumer-hosted (remote) agent can
+	// self-register with its org's AWS STS credential — resolved to the org that
+	// owns the agent's record and bound to that org's active anchor (account +
+	// role pattern). A non-STS credential (JWT-SVID/OIDC/mTLS) is passed straight
+	// through, so platform SPIRE registration is bit-identical. The isolation
+	// invariant (an STS credential verifies ONLY against its record's org anchor)
+	// mirrors the Keycloak OrgAwareVerifier on the token-minting side.
+	verifier = registrant.NewOrgAwareVerifier(verifier, s, nil)
 	log.Printf("registry listening on :8080 (store=%s schema source=%s version=%s)",
 		getEnv("STORE", "memory"), schemaSource, schemaVersion)
 	srv := &http.Server{
 		Addr:              ":8080",
-		Handler:           buildMux(s, sdb, verifier, cpAuth),
+		Handler:           buildMux(s, sdb, verifier, cpAuth, dir),
 		ReadHeaderTimeout: 10 * time.Second, // Slowloris defense; no risk to legit responses.
 		ReadTimeout:       30 * time.Second, // request bodies are all small JSON.
 		IdleTimeout:       120 * time.Second,
@@ -2112,4 +2504,52 @@ func buildControlPlaneAuth(ctx context.Context) controlplane.Authenticator {
 		log.Fatalf("unknown CONTROL_PLANE_AUTH %q", v)
 		return nil // unreachable
 	}
+}
+
+// buildOrgDirectory selects the org-membership directory backend. When
+// ORG_ADMIN_CLIENT_SECRET is set (the bootstrap-generated org-admin client
+// secret, deploy/keycloak + scripts/bootstrap.sh), it returns the Keycloak
+// admin-REST adapter authenticating as the least-privilege org-admin
+// service-account client. When unset — a bare `kubectl apply` with no org
+// onboarding, or the pre-Phase-3 demo — it returns a disabled directory whose
+// methods fail loudly, so the org endpoints 500 rather than silently corrupting
+// half a dual-write. The secret is NEVER read from a file or baked into an image.
+func buildOrgDirectory() orgdirectory.Directory {
+	secret := getEnv("ORG_ADMIN_CLIENT_SECRET", "")
+	if secret == "" {
+		log.Printf("org directory: ORG_ADMIN_CLIENT_SECRET unset — org endpoints disabled")
+		return disabledDirectory{}
+	}
+	base := getEnv("KEYCLOAK_URL", "http://keycloak:8080")
+	realm := getEnv("KEYCLOAK_REALM", "spawnly")
+	clientID := getEnv("ORG_ADMIN_CLIENT_ID", "org-admin")
+	log.Printf("org directory: keycloak admin-REST (base=%s realm=%s client=%s)", base, realm, clientID)
+	return keycloak.New(base, realm, clientID, secret, nil)
+}
+
+// disabledDirectory is the org directory when no org-admin credential is
+// configured. Every method fails, so an org endpoint returns 500 instead of
+// half-completing a Keycloak/SpiceDB dual-write.
+type disabledDirectory struct{}
+
+var errOrgDirectoryDisabled = errors.New("org directory not configured (ORG_ADMIN_CLIENT_SECRET unset)")
+
+func (disabledDirectory) CreateOrg(context.Context, string, string) error {
+	return errOrgDirectoryDisabled
+}
+func (disabledDirectory) DeleteOrg(context.Context, string) error { return errOrgDirectoryDisabled }
+func (disabledDirectory) AddMember(context.Context, string, string) error {
+	return errOrgDirectoryDisabled
+}
+func (disabledDirectory) RemoveMember(context.Context, string, string) error {
+	return errOrgDirectoryDisabled
+}
+func (disabledDirectory) SetRole(context.Context, string, string, string) error {
+	return errOrgDirectoryDisabled
+}
+func (disabledDirectory) ListMembers(context.Context, string) ([]orgdirectory.Member, error) {
+	return nil, errOrgDirectoryDisabled
+}
+func (disabledDirectory) ListUserOrgs(context.Context, string) ([]string, error) {
+	return nil, errOrgDirectoryDisabled
 }

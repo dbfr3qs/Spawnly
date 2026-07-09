@@ -12,10 +12,44 @@
 // single `agent:<id>#enabled@agent:<id>` tuple; a permission that omits the
 // intersection will NOT be revocable. A consumer overriding this schema must
 // preserve that convention for their permissions to honour revoke.
+// A human principal. Its object id is the userId (token sub). Empty so far —
+// it is only ever referenced as the subject of agent#owner / organization
+// member/admin relations.
+definition user {}
+
+// An organization is the SaaS account authorization boundary (the NEW
+// multi-tenancy primitive, distinct from `tenant` below). Membership is
+// mirrored here from Keycloak: `member` for ordinary members, `admin` for org
+// admins. view_agents/admin_agents are the org-wide capabilities the agent
+// permissions below fan into.
+definition organization {
+    relation member: user
+    relation admin: user
+    // Org admins are also members for viewing purposes (admin ⊇ member).
+    permission view_agents = member + admin
+    permission admin_agents = admin
+}
+
 definition agent {
     // Exactly one tuple per agent: agent:<id>#enabled@agent:<id>.
     // Present while the agent is active; absent while revoked.
     relation enabled: agent
+
+    // Human lifecycle authority over the agent. owner is the spawning user;
+    // org (present only for org-scoped agents) fans into the owning org's
+    // members/admins. view = read (list/events/logs/chain); manage = mutate
+    // (spawn/message/revoke/resume/dismiss/kill).
+    relation owner: user
+    relation org: organization
+
+    // view/manage are HUMAN lifecycle authority and DELIBERATELY do NOT
+    // intersect `& agent->enabled`: resume must be checkable on a revoked agent
+    // (whose enabled tuple is absent), so gating manage on enabled would make a
+    // revoked agent un-resumable. The enabled-intersection EXTENSION CONTRACT
+    // above governs agent-RUNTIME permissions (e.g. tenant.work_on), not these
+    // control-plane lifecycle checks.
+    permission view = owner + org->view_agents
+    permission manage = owner + org->admin_agents
 }
 
 definition tenant {

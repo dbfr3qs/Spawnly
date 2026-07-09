@@ -20,6 +20,7 @@
 //	Consent         CON#<user>|<parent>|<child> META                     CON / <user>|<parent>|<child>  CONID#<consentId>
 //	Consent request CREQ#<id>                  META                      CREQ / <userId>#<created>#<id>  EDGE#<user>|<parent>|<child>
 //	Open marker     OPEN#<openRequestKey>      META                      —                         —
+//	Organization    ORG#<orgId>                META                      ORG / <orgId>             —
 //
 // Access patterns: point gets = GetItem; list-by-type = Query gsi1 on the type
 // partition; ListChildren = Query gsi2 PARENT#<id>; GetEvents = Query pk +
@@ -89,6 +90,7 @@ const (
 	gsi1Agent    = "AG"
 	gsi1Consent  = "CON"
 	gsi1Creq     = "CREQ"
+	gsi1Org      = "ORG"
 )
 
 func tplPK(agentType string) string { return "TPL#" + agentType }
@@ -96,6 +98,7 @@ func agPK(agentID string) string    { return "AG#" + agentID }
 func conPK(edge string) string      { return "CON#" + edge }
 func creqPK(id string) string       { return "CREQ#" + id }
 func openPK(key string) string      { return "OPEN#" + key }
+func orgPK(id string) string        { return "ORG#" + id }
 
 // edgeKey / openRequestKey delegate to the shared registry key builders so this
 // store and the in-memory store serialise consent edges identically (single
@@ -236,6 +239,16 @@ type eventItem struct {
 	PK    string       `json:"pk"`
 	SK    string       `json:"sk"`
 	Event events.Event `json:"event"`
+}
+
+// orgItem nests the Organization under a named attribute so pk/sk/gsi keys
+// never collide with a domain field (same shape as templates/agents).
+type orgItem struct {
+	PK     string                `json:"pk"`
+	SK     string                `json:"sk"`
+	GSI1PK string                `json:"gsi1pk"`
+	GSI1SK string                `json:"gsi1sk"`
+	Org    registry.Organization `json:"org"`
 }
 
 // ---- templates --------------------------------------------------------------
@@ -489,6 +502,74 @@ func (s *Store) ListChildren(ctx context.Context, parentID string) ([]registry.A
 		out = append(out, it.Agent)
 	}
 	return out, nil
+}
+
+// ---- organizations ----------------------------------------------------------
+
+// PutOrg upserts an org record (a plain PutItem replaces the whole item,
+// mirroring the in-memory map assignment and PutTemplate's overwrite).
+func (s *Store) PutOrg(ctx context.Context, org registry.Organization) error {
+	item, err := marshal(orgItem{
+		PK: orgPK(org.OrgID), SK: skMeta,
+		GSI1PK: gsi1Org, GSI1SK: org.OrgID, Org: org,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = s.db.PutItem(ctx, &dynamodb.PutItemInput{TableName: &s.table, Item: item})
+	return err
+}
+
+// GetOrg returns the org and whether it exists; an unknown id is (zero, false).
+func (s *Store) GetOrg(ctx context.Context, id string) (registry.Organization, bool, error) {
+	out, err := s.db.GetItem(ctx, &dynamodb.GetItemInput{TableName: &s.table, Key: keyOf(orgPK(id), skMeta)})
+	if err != nil {
+		return registry.Organization{}, false, err
+	}
+	if out.Item == nil {
+		return registry.Organization{}, false, nil
+	}
+	var it orgItem
+	if err := unmarshal(out.Item, &it); err != nil {
+		return registry.Organization{}, false, err
+	}
+	return it.Org, true, nil
+}
+
+// ListOrgs returns every org record via the ORG partition of GSI1.
+func (s *Store) ListOrgs(ctx context.Context) ([]registry.Organization, error) {
+	items, err := s.queryAll(ctx, &dynamodb.QueryInput{
+		TableName:                 &s.table,
+		IndexName:                 aws.String("gsi1"),
+		KeyConditionExpression:    aws.String("gsi1pk = :pk"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":pk": strAV(gsi1Org)},
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]registry.Organization, 0, len(items))
+	for _, m := range items {
+		var it orgItem
+		if err := unmarshal(m, &it); err != nil {
+			return nil, err
+		}
+		out = append(out, it.Org)
+	}
+	return out, nil
+}
+
+// DeleteOrg removes an org, reporting whether one existed (via ALL_OLD) —
+// matching DeleteTemplate's found-ness contract.
+func (s *Store) DeleteOrg(ctx context.Context, id string) (bool, error) {
+	out, err := s.db.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName:    &s.table,
+		Key:          keyOf(orgPK(id), skMeta),
+		ReturnValues: types.ReturnValueAllOld,
+	})
+	if err != nil {
+		return false, err
+	}
+	return len(out.Attributes) > 0, nil
 }
 
 // ---- events -----------------------------------------------------------------

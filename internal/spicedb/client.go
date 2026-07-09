@@ -34,6 +34,13 @@ type Client interface {
 	// resource type per call, so one call is issued per type. An empty (or nil)
 	// resourceTypes slice is a no-op.
 	DeleteAgentRelationships(ctx context.Context, agentID string, resourceTypes []string) error
+	// DeleteResourceRelationships removes EVERY tuple whose resource is the given
+	// "type:id" object, regardless of relation or subject. It is the resource-side
+	// counterpart to DeleteAgentRelationships' subject-side filter: an agent's own
+	// lifecycle tuples (enabled, owner, org — all with resource "agent:<id>") are
+	// swept in one call at terminal cleanup, without the caller having to
+	// reconstruct each exact subject.
+	DeleteResourceRelationships(ctx context.Context, resource string) error
 	// CheckPermission returns true when subject holds permission on resource.
 	CheckPermission(ctx context.Context, resource, permission, subject string) (bool, error)
 }
@@ -122,6 +129,17 @@ func (r *realClient) DeleteAgentRelationships(ctx context.Context, agentID strin
 	return errors.Join(errs...)
 }
 
+func (r *realClient) DeleteResourceRelationships(ctx context.Context, resource string) error {
+	resType, resID := parseRef(resource)
+	_, err := r.c.DeleteRelationships(ctx, &v1.DeleteRelationshipsRequest{
+		RelationshipFilter: &v1.RelationshipFilter{
+			ResourceType:       resType,
+			OptionalResourceId: resID,
+		},
+	})
+	return err
+}
+
 func (r *realClient) CheckPermission(ctx context.Context, resource, permission, subject string) (bool, error) {
 	resType, resID := parseRef(resource)
 	subType, subID := parseRef(subject)
@@ -150,6 +168,16 @@ type Mock struct {
 func NewMock() *Mock { return &Mock{tuples: map[string]bool{}} }
 
 func (m *Mock) WriteSchema(_ context.Context, _ string) error { return nil }
+
+// HasRelationship reports whether an exact tuple (resource#relation@subject) is
+// present. Test-only helper: the mock stores tuples opaquely, and the new
+// owner/org lifecycle tuples (Phase 1) are read via `view`/`manage` permissions
+// the mock does not model, so tests assert their PRESENCE directly instead.
+func (m *Mock) HasRelationship(resource, relation, subject string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.tuples[resource+"#"+relation+"@"+subject]
+}
 
 func (m *Mock) WriteRelationship(_ context.Context, resource, relation, subject string) error {
 	m.mu.Lock()
@@ -192,15 +220,80 @@ func (m *Mock) DeleteAgentRelationships(_ context.Context, agentID string, resou
 	return nil
 }
 
-// CheckPermission checks whether subject holds permission on resource.
-// The mock models the default schema's `work_on = agent & agent->enabled`
-// (Phase 5a): permission requires BOTH the "agent" relation tuple AND the
-// subject agent's own "enabled" status tuple, mirroring SpiceDB's intersection.
-// subject is "agent:<id>", so its enabled tuple key is "<subject>#enabled@<subject>".
-func (m *Mock) CheckPermission(_ context.Context, resource, _ /*permission*/ string, subject string) (bool, error) {
+func (m *Mock) DeleteResourceRelationships(_ context.Context, resource string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	prefix := resource + "#"
+	for k := range m.tuples {
+		// Key shape: "resource#relation@subject". Delete every tuple on this
+		// exact resource object, mirroring realClient's resource-only filter.
+		if strings.HasPrefix(k, prefix) {
+			delete(m.tuples, k)
+		}
+	}
+	return nil
+}
+
+// CheckPermission checks whether subject holds permission on resource. The mock
+// models the schema permissions the platform actually checks:
+//
+//   - "view"/"manage" on an agent (Phase 4, org multi-tenancy):
+//     view   = owner + org->view_agents (org member OR admin)
+//     manage = owner + org->admin_agents (org admin)
+//     These DELIBERATELY do NOT intersect `enabled` (a revoked agent must stay
+//     manageable so resume works), matching schema.zed.
+//   - "view_agents"/"admin_agents" on an organization (the per-request
+//     "is org admin?" list check): view_agents = member + admin;
+//     admin_agents = admin.
+//   - anything else (e.g. "work_on") falls back to the default schema's
+//     `work_on = agent & agent->enabled`: both the "agent" relation tuple AND
+//     the subject agent's own "enabled" status tuple must be present.
+//
+// subject is a "type:id" object (e.g. "user:<id>" or "agent:<id>").
+func (m *Mock) CheckPermission(_ context.Context, resource, permission, subject string) (bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	agentKey := resource + "#agent@" + subject
-	enabledKey := subject + "#enabled@" + subject
-	return m.tuples[agentKey] && m.tuples[enabledKey], nil
+	switch permission {
+	case "view", "manage":
+		if m.tuples[resource+"#owner@"+subject] {
+			return true, nil
+		}
+		// Resolve the agent's org, then check membership/admin on that org.
+		org := m.orgOf(resource)
+		if org == "" {
+			return false, nil
+		}
+		if m.tuples[org+"#admin@"+subject] {
+			return true, nil
+		}
+		if permission == "view" && m.tuples[org+"#member@"+subject] {
+			return true, nil
+		}
+		return false, nil
+	case "view_agents", "admin_agents":
+		if m.tuples[resource+"#admin@"+subject] {
+			return true, nil
+		}
+		if permission == "view_agents" && m.tuples[resource+"#member@"+subject] {
+			return true, nil
+		}
+		return false, nil
+	default:
+		agentKey := resource + "#agent@" + subject
+		enabledKey := subject + "#enabled@" + subject
+		return m.tuples[agentKey] && m.tuples[enabledKey], nil
+	}
+}
+
+// orgOf returns the "organization:<id>" object an agent resource is linked to
+// via its single `org` tuple ("agent:<id>#org@organization:<orgId>"), or "" when
+// the agent is org-less. Caller holds the read lock.
+func (m *Mock) orgOf(agentResource string) string {
+	prefix := agentResource + "#org@"
+	for k := range m.tuples {
+		if strings.HasPrefix(k, prefix) {
+			return strings.TrimPrefix(k, prefix)
+		}
+	}
+	return ""
 }

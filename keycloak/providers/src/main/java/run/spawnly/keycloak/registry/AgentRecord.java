@@ -18,6 +18,11 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  * @param agentType the agent's type, which the platform models as the Keycloak
  *                  {@code client_id}; bound against the authenticating client
  * @param parentId  parent agent id (used by delegation in Phase 3)
+ * @param orgId     the organization the agent belongs to (multi-tenancy), or
+ *                  {@code null}/empty for an org-less (global) agent. Recorded at
+ *                  spawn and derived SERVER-SIDE by the registry — the IdP treats
+ *                  it as the authoritative, registry-bound source of the token's
+ *                  {@code organization} claim (never copied from a request token).
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record AgentRecord(
@@ -25,5 +30,16 @@ public record AgentRecord(
         @JsonProperty("status") String status,
         @JsonProperty("userId") String userId,
         @JsonProperty("agentType") String agentType,
-        @JsonProperty("parentId") String parentId) {
+        @JsonProperty("parentId") String parentId,
+        @JsonProperty("orgId") String orgId) {
+
+    /**
+     * Backward-compatible constructor for the org-less case (and the many call
+     * sites that predate multi-tenancy): delegates to the canonical constructor
+     * with {@code orgId=null}. Jackson always uses the canonical (annotated)
+     * constructor, so this only affects hand-built records.
+     */
+    public AgentRecord(String agentId, String status, String userId, String agentType, String parentId) {
+        this(agentId, status, userId, agentType, parentId, null);
+    }
 }

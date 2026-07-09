@@ -98,6 +98,74 @@
     .current-user::before {
       content: "👤 ";
     }
+    .org-indicator::before { content: "🏢 "; }
+    .org-switcher {
+      font-size: 13px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      background: rgba(255,255,255,.08);
+      color: rgba(255,255,255,.9);
+      border: 1px solid rgba(255,255,255,.18);
+    }
+    :root[data-theme="light"] .org-switcher {
+      background: rgba(0,0,0,.04);
+      color: #1a1a2e;
+      border-color: rgba(0,0,0,.15);
+    }
+    /* The open dropdown's <option> popup is drawn by the browser on a
+       system/opaque surface — without an explicit colour it inherits the
+       switcher's near-white text and renders white-on-white. Pin both to the
+       theme surface so unselected options stay legible in light and dark. */
+    .org-switcher option {
+      background: var(--card);
+      color: var(--text);
+    }
+
+    /* Org gate overlay — full-viewport, blocks the dashboard for the no-org and
+       picker states. */
+    .org-gate {
+      position: fixed;
+      inset: 0;
+      z-index: 2000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(10,12,20,.92);
+      padding: 24px;
+    }
+    /* The [hidden] attribute must win over display:flex above — otherwise the
+       overlay stays in the layout and intercepts pointer events over the whole
+       dashboard even when it's "hidden". */
+    .org-gate[hidden] { display: none; }
+    .org-gate-card {
+      max-width: 460px;
+      width: 100%;
+      background: var(--card, #171a26);
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 12px;
+      padding: 28px 30px;
+      text-align: center;
+    }
+    .org-gate-card h2 { margin: 0 0 10px; font-size: 20px; }
+    .org-gate-card p { color: var(--text-dim, #9aa3b2); font-size: 14px; margin: 0 0 18px; }
+    .org-picker-list { display: flex; flex-direction: column; gap: 10px; }
+    .org-picker-list .btn { width: 100%; }
+    /* Self-serve create-org form on the no-organization screen (Phase 7). */
+    .create-org-form { display: flex; flex-direction: column; gap: 12px; text-align: left; margin: 0 0 16px; }
+    .create-org-form label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--text-dim, #9aa3b2); }
+    .create-org-form input {
+      padding: 9px 11px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,.14);
+      background: var(--bg, #12141d);
+      color: var(--text, #e8eaf0);
+      font-family: var(--font);
+      font-size: 13px;
+    }
+    .create-org-form .btn { width: 100%; }
+    .create-org-hint { color: var(--text-dim, #9aa3b2); font-size: 11px; margin: 0; }
+    .form-error { color: #f87171; font-size: 12px; margin: 0; }
+    .org-gate-sep { border: none; border-top: 1px solid rgba(255,255,255,.12); margin: 4px 0 16px; }
 
     header h1::before {
       content: '';
@@ -272,11 +340,19 @@
 
     .agent-row {
       display: grid;
-      grid-template-columns: minmax(180px, 250px) 130px 120px 130px 1fr;
+      /* id | type | status | tenant | owner | actions. The action buttons column
+         is `auto` (sized to its content) so the buttons ALWAYS fit inline instead
+         of overflowing the card (which has overflow:hidden and would clip the last
+         button — e.g. Kill). The id and the text columns are shrinkable
+         (minmax(0,…)/1fr) so they ellipsis first when space is tight; the status
+         badge keeps its natural width (auto). */
+      grid-template-columns: minmax(120px, 1fr) minmax(0, 130px) auto minmax(0, 130px) minmax(0, 110px) auto;
       align-items: center;
       gap: 12px;
       padding: 16px 20px;
     }
+    /* Owner (record userId) — a monospace label so it reads as an identity. */
+    .agent-owner { font-family: var(--mono); }
 
     .agent-id {
       font-family: var(--mono);
@@ -295,14 +371,15 @@
       text-overflow: ellipsis;
     }
 
-    /* Actions stay on a single line (side by side); the agent-id column and the
-       data columns shrink/ellipsis first so the buttons always fit inline. */
+    /* Actions sit side by side; the id + data columns shrink/ellipsis first (see
+       the grid template) so the buttons normally fit inline. As a last resort on a
+       very narrow viewport they WRAP to a second (right-aligned) line rather than
+       being clipped by the card's overflow:hidden. */
     .agent-actions {
       display: flex;
       gap: 6px;
       justify-content: flex-end;
-      flex-wrap: nowrap;
-      white-space: nowrap;
+      flex-wrap: wrap;
       position: relative;
     }
     /* Uniform, compact sizing for in-row action buttons (Events, Chat, Revoke/
@@ -840,7 +917,7 @@
     .child-card .agent-row {
       padding: 16px 20px;
       /* Use exact same grid as parent for perfect alignment */
-      grid-template-columns: minmax(180px, 250px) 130px 120px 130px 1fr;
+      grid-template-columns: minmax(180px, 250px) 130px 120px 130px 110px 1fr;
     }
 
     /* ── Consent requests (CIBA) ── */
@@ -1001,6 +1078,24 @@
 
     .badge-disabled { background: rgba(93,109,126,.15); color: #95a5a6; border-color: rgba(93,109,126,.35); }
     :root[data-theme="light"] .badge-disabled { background: rgba(107,114,128,.1); color: #4b5563; border-color: rgba(107,114,128,.25); }
+    .badge-role-admin { background: rgba(52,152,219,.15); color: #3498db; border-color: rgba(52,152,219,.35); }
+    .badge-role-member { background: rgba(93,109,126,.15); color: #95a5a6; border-color: rgba(93,109,126,.35); }
+
+    /* Members view (Phase 6) */
+    .add-member-bar { display: flex; gap: 8px; margin: 4px 0 12px; flex-wrap: wrap; }
+    .add-member-bar input { flex: 1 1 220px; padding: 7px 10px; }
+    .add-member-bar select { padding: 7px 10px; }
+    .members-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .members-table th, .members-table td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+    .members-table th { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-dim); font-weight: 700; }
+    .members-table td.user-cell { font-family: var(--mono, ui-monospace, monospace); font-weight: 600; }
+    .org-settings { margin-top: 22px; border-top: 1px solid var(--border); padding-top: 16px; }
+    .org-settings h3 { font-size: 15px; margin: 0 0 12px; }
+    .setting-row { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
+    .setting-label { min-width: 180px; font-weight: 600; font-size: 13px; }
+    .setting-label .hint { display: block; font-weight: 400; color: var(--text-dim); font-size: 11px; margin-top: 3px; }
+    .setting-control { display: flex; flex-direction: column; gap: 8px; font-size: 13px; }
+    .setting-control label { display: flex; gap: 6px; align-items: center; }
 
     .tmpl-detail { background: rgba(255,255,255,.02); border: 1px solid var(--border); border-radius: 8px; margin: 4px 0 10px; }
     .tmpl-detail[hidden] { display: none; }
@@ -1054,11 +1149,21 @@
     <!-- Admin-only (shown when /api/me reports isAdmin). Server-side gates
          are the real boundary; this nav button is cosmetic convenience. -->
     <button class="btn btn-ghost" id="open-agent-types-btn" hidden>Agent Types</button>
+    <!-- Org self-service (multi-tenancy Phase 6): shown when /api/me reports the
+         caller is this org's admin. The orchestrator's requireOrgAdmin is the real
+         gate; this button is cosmetic convenience. -->
+    <button class="btn btn-ghost" id="open-members-btn" data-testid="open-members" hidden>Members</button>
     <!-- href is overwritten from /api/config on load (local docs by default,
          the public docs origin in prod); the default keeps the link working in
          local dev even if that fetch fails. -->
     <a class="btn btn-ghost" id="docs-link" href="http://localhost:4321" target="_blank" rel="noopener noreferrer">Docs ↗</a>
     <button class="btn btn-ghost theme-toggle" id="theme-toggle-btn" title="Toggle dark/light mode"></button>
+    <!-- Active org + switcher (multi-tenancy). Populated from /api/me. The switcher
+         is shown only when there is more than one destination (multiple orgs, or a
+         realm admin who can also pick Global). Changing it navigates to /switch-org,
+         which does a full re-auth into the new org. -->
+    <span id="org-indicator" class="current-user org-indicator" data-testid="active-org" hidden></span>
+    <select id="org-switcher" class="org-switcher" data-testid="org-switcher" hidden aria-label="Active organization"></select>
     <span id="current-user" class="current-user"></span>
     <form method="post" action="/logout" class="logout-form">
       <button class="btn btn-ghost" type="submit" id="logout-btn">Log out</button>
@@ -1077,6 +1182,57 @@
   <div id="agent-list"></div>
 </main>
 
+<!-- Org gate overlay (multi-tenancy). Covers the page for the two states an
+     ordinary user can't act from: NO organization (0 orgs, non-admin) and the org
+     PICKER (>1 orgs, org-less session). A single-org non-admin is auto-selected
+     (redirected through /switch-org) and never sees this; a realm admin defaults to
+     the Global view and switches via the header dropdown. -->
+<div id="org-gate" class="org-gate" hidden>
+  <div class="org-gate-card">
+    <!-- No-organization message -->
+    <div id="org-gate-noorg" hidden data-testid="no-org-screen">
+      <h2>Create your organization</h2>
+      <p>Your account isn't part of an organization yet. Create one to get
+         started — you'll be its first admin. (Or ask an existing org's admin to
+         add you, then sign in again.)</p>
+      <!-- Self-serve signup (Phase 7): posts to the session-gated /api/signup/org;
+           the orchestrator makes the token sub the first admin. On success we
+           re-auth into the new org so the session token carries its claim. -->
+      <form id="create-org-form" class="create-org-form" data-testid="create-org-form">
+        <label>Organization name
+          <input id="create-org-name" type="text" required placeholder="Acme Inc."
+                 autocomplete="organization" maxlength="120" data-testid="create-org-name" />
+        </label>
+        <p class="create-org-hint">This is how your organization appears in Spawnly. Its
+           unique ID is generated automatically.</p>
+        <p class="form-error" id="create-org-error" data-testid="create-org-error" hidden></p>
+        <button id="create-org-submit" class="btn btn-primary" type="submit" data-testid="create-org-submit">Create organization</button>
+      </form>
+      <!-- Realm-admin-only escape: an admin legitimately works org-less (Global),
+           so they aren't forced to create an org here. Shown only when the app
+           routes an org-less ADMIN to this screen (see the /api/me handler). -->
+      <button id="noorg-continue-global" class="btn btn-ghost" type="button" data-testid="noorg-continue-global" hidden>Continue to Global (no organization)</button>
+      <hr class="org-gate-sep" />
+      <form method="post" action="/logout" class="logout-form">
+        <button class="btn btn-ghost" type="submit" data-testid="no-org-logout">Log out</button>
+      </form>
+    </div>
+    <!-- Org picker -->
+    <div id="org-gate-picker" hidden data-testid="org-picker">
+      <h2>Choose an organization</h2>
+      <p>You belong to more than one organization. Pick one to continue.</p>
+      <div id="org-picker-list" class="org-picker-list"></div>
+    </div>
+    <!-- Soft error when the org list couldn't be loaded (don't strand the user on a
+         false no-org screen). -->
+    <div id="org-gate-error" hidden data-testid="org-gate-error">
+      <h2>Couldn't load your organizations</h2>
+      <p>Something went wrong reaching the platform. Try again.</p>
+      <button class="btn btn-primary" onclick="location.reload()">Reload</button>
+    </div>
+  </div>
+</div>
+
 <!-- Admin: Agent Types view (admin-only; hidden until /api/me isAdmin) -->
 <section class="admin-view" id="agent-types-view" hidden>
   <div class="admin-toolbar">
@@ -1094,6 +1250,73 @@
     from git will not carry UI changes unless you commit them.
   </div>
   <div id="agent-types-table-wrap">Loading…</div>
+</section>
+
+<!-- Org admin: Members view (multi-tenancy Phase 6; hidden until /api/me isOrgAdmin) -->
+<section class="admin-view" id="members-view" hidden data-testid="members-view">
+  <div class="admin-toolbar">
+    <span class="admin-title">Members</span>
+    <button class="btn btn-ghost" id="members-back-btn">← Back to Agents</button>
+  </div>
+  <!-- Add member -->
+  <div class="add-member-bar">
+    <input id="member-add-input" type="text" autocomplete="off" spellcheck="false"
+           placeholder="email or username" data-testid="member-add-input" />
+    <select id="member-add-role" data-testid="member-add-role">
+      <option value="member">Member</option>
+      <option value="admin">Admin</option>
+    </select>
+    <button class="btn btn-primary" id="member-add-btn" data-testid="member-add-btn">Add member</button>
+  </div>
+  <div class="caveat-note">
+    Adding an unknown email/username creates a Keycloak account with a
+    <strong>required password reset</strong> — the person sets their password on
+    first sign-in (no invitation email is sent). Never edit org membership
+    directly in the Keycloak admin console.
+  </div>
+  <div id="members-table-wrap">Loading…</div>
+
+  <!-- Org settings -->
+  <div class="org-settings" data-testid="org-settings">
+    <h3>Organization settings</h3>
+    <div class="setting-row">
+      <div class="setting-label">Removed-member agents
+        <span class="hint">what happens to a removed member's running agents</span></div>
+      <div class="setting-control">
+        <label><input type="radio" name="removal-disposition" value="orphan-to-admin" data-testid="disp-orphan" /> Keep running, hand to admins (orphan-to-admin)</label>
+        <label><input type="radio" name="removal-disposition" value="auto-revoke" data-testid="disp-revoke" /> Revoke them (auto-revoke)</label>
+        <button class="btn btn-ghost" id="save-disposition-btn" data-testid="save-disposition">Save</button>
+      </div>
+    </div>
+
+    <!-- Attestation anchor (multi-tenancy Phase 8). Admins register/clear the
+         org's STS trust anchor and prove control from their AWS account; members
+         see it read-only (the editor is hidden for non-admins, and the server
+         gates every mutation regardless). -->
+    <div class="setting-row" data-testid="anchor-setting">
+      <div class="setting-label">Attestation anchor
+        <span class="hint">STS trust for consumer-hosted agents (optional)</span></div>
+      <div class="setting-control">
+        <div id="anchor-status" data-testid="anchor-status">Loading…</div>
+        <div id="anchor-editor" hidden>
+          <input id="anchor-account" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="AWS account id (12 digits)" data-testid="anchor-account" />
+          <input id="anchor-role" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="arn:aws:sts::&lt;account&gt;:assumed-role/&lt;role&gt;/*" data-testid="anchor-role" />
+          <div class="row-actions">
+            <button class="btn btn-primary" id="anchor-register-btn" data-testid="anchor-register">Register</button>
+            <button class="btn btn-ghost" id="anchor-clear-btn" data-testid="anchor-clear">Clear</button>
+          </div>
+          <div class="caveat-note">
+            Registering stores the anchor as <strong>pending</strong>. Prove control
+            of the AWS account from a shell holding its credentials:
+            <code>ORCHESTRATOR_URL=… ACCESS_TOKEN=… ./scripts/activate-anchor.sh &lt;org&gt;</code>
+            — the anchor activates only if the presented STS identity matches.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 </section>
 
 <!-- Admin: Create / edit template modal -->
@@ -1443,8 +1666,17 @@
   // orchestrator). The nav button is shown only when /api/me isAdmin, but the
   // gate is enforced regardless of the client. Denied calls (e.g. a tampered
   // non-admin client) surface as 403 and are shown as a toast/inline error.
+  // ME holds the /api/me identity flags used to scope the admin surfaces by role
+  // (Phase 6): a REALM admin manages the GLOBAL catalog (/api/admin/templates); an
+  // ORG admin manages only their org's templates (/api/org/templates). Server gates
+  // are authoritative — this only decides which endpoint the UI reads.
+  const ME = { isAdmin: false, isOrgAdmin: false, activeOrg: '' };
+
   async function fetchAdminTemplates() {
-    const r = await fetch('/api/admin/templates');
+    // Realm admin → global + every org's (full catalog). Org admin (non-realm) →
+    // their org's templates only.
+    const url = ME.isAdmin ? '/api/admin/templates' : '/api/org/templates';
+    const r = await fetch(url);
     if (!r.ok) throw new Error(`list templates: ${r.status}`);
     return r.json();
   }
@@ -1779,6 +2011,191 @@
     document.querySelector('main').hidden = false;
   }
 
+  // ── Org admin: Members management (Phase 6) ────────────────────────────────
+  // Every mutation rides the /api/org/* BFF twins, which the orchestrator gates
+  // with requireOrgAdmin over the SESSION's active org — the org is never a client
+  // value. This UI is convenience; the server is the boundary.
+  function openMembersView() {
+    document.querySelector('main').hidden = true;
+    document.getElementById('members-view').hidden = false;
+    reloadMembers();
+    loadOrgSettings();
+  }
+  function closeMembersView() {
+    document.getElementById('members-view').hidden = true;
+    document.querySelector('main').hidden = false;
+  }
+
+  async function reloadMembers() {
+    const wrap = document.getElementById('members-table-wrap');
+    wrap.innerHTML = 'Loading…';
+    try {
+      const r = await fetch('/api/org/members');
+      if (!r.ok) throw new Error(`members: ${r.status}`);
+      renderMembersTable(await r.json());
+    } catch (e) {
+      wrap.innerHTML = `<div class="no-events">Couldn't load members (${escHtml(String(e.message || e))}).</div>`;
+    }
+  }
+
+  function roleBadge(role) {
+    const r = (role || 'member').toLowerCase();
+    const cls = r === 'admin' ? 'badge-role-admin' : 'badge-role-member';
+    return `<span class="badge ${cls}">${escHtml(r)}</span>`;
+  }
+
+  function renderMembersTable(members) {
+    const wrap = document.getElementById('members-table-wrap');
+    const list = Array.isArray(members) ? members : [];
+    if (!list.length) { wrap.innerHTML = '<div class="no-events">No members.</div>'; return; }
+    const sorted = [...list].sort((a, b) =>
+      (a.username || a.userId || '').localeCompare(b.username || b.userId || '', undefined, { sensitivity: 'base' }));
+    wrap.innerHTML = `
+      <table class="members-table">
+        <thead><tr><th>User</th><th>Email</th><th>Role</th><th style="text-align:right">Actions</th></tr></thead>
+        <tbody>${sorted.map(memberRow).join('')}</tbody>
+      </table>`;
+  }
+
+  function memberRow(m) {
+    const user = escHtml(m.username || m.userId || '');
+    const key = escHtml(m.userId || '');
+    const isAdmin = (m.role || '').toLowerCase() === 'admin';
+    // Non-admin members get a read-only roster: no promote/demote/remove.
+    const actions = !ME.isOrgAdmin ? '—' : `<div class="row-actions">
+          ${isAdmin
+            ? `<button class="btn btn-ghost" data-act="demote" data-user="${key}">Demote</button>`
+            : `<button class="btn btn-ghost" data-act="promote" data-user="${key}">Promote</button>`}
+          <button class="btn btn-danger" data-act="remove" data-user="${key}">Remove</button>
+        </div>`;
+    return `
+      <tr data-user="${key}">
+        <td class="user-cell">${user}</td>
+        <td>${escHtml(m.email || '—')}</td>
+        <td>${roleBadge(m.role)}</td>
+        <td>${actions}</td>
+      </tr>`;
+  }
+
+  async function addMember() {
+    const input = document.getElementById('member-add-input');
+    const user = (input.value || '').trim();
+    if (!user) return;
+    const role = document.getElementById('member-add-role').value;
+    try {
+      const r = await fetch('/api/org/members', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user, role }),
+      });
+      if (!r.ok) throw new Error(`add member: ${r.status}`);
+      input.value = '';
+      showToast(`Added ${user}. If new, they must reset their password on first sign-in.`);
+      reloadMembers();
+    } catch (e) { showToast(`Add member failed: ${e.message || e}`, true); }
+  }
+
+  async function handleMembersAction(e) {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const user = btn.getAttribute('data-user');
+    const act = btn.getAttribute('data-act');
+    try {
+      let r;
+      if (act === 'remove') {
+        if (!window.confirm(`Remove ${user} from the organization?`)) return;
+        r = await fetch(`/api/org/members/${encodeURIComponent(user)}`, { method: 'DELETE' });
+      } else {
+        const role = act === 'promote' ? 'admin' : 'member';
+        r = await fetch(`/api/org/members/${encodeURIComponent(user)}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role }),
+        });
+      }
+      if (!r.ok) throw new Error(`${act}: ${r.status}`);
+      reloadMembers();
+    } catch (err) { showToast(`${act} failed: ${err.message || err}`, true); }
+  }
+
+  async function loadOrgSettings() {
+    // A plain member gets a read-only Organization view: hide every mutating
+    // control (the server also 404s their writes — this is cosmetic).
+    const admin = !!ME.isOrgAdmin;
+    const addBar = document.querySelector('.add-member-bar');
+    if (addBar) addBar.style.display = admin ? '' : 'none';
+    document.querySelectorAll('input[name="removal-disposition"]').forEach((el) => { el.disabled = !admin; });
+    const saveBtn = document.getElementById('save-disposition-btn');
+    if (saveBtn) saveBtn.style.display = admin ? '' : 'none';
+    const editor = document.getElementById('anchor-editor');
+    if (editor) editor.hidden = !admin;
+    try {
+      const r = await fetch('/api/org');
+      if (!r.ok) return;
+      const org = await r.json();
+      const disp = org.removalDisposition || 'orphan-to-admin';
+      const el = document.querySelector(`input[name="removal-disposition"][value="${disp}"]`);
+      if (el) el.checked = true;
+      renderAnchor(org.anchor, admin);
+    } catch (_) {}
+  }
+
+  // renderAnchor paints the anchor status (none / pending / active) and, for an
+  // admin, prefills the editor with the current account + role pattern.
+  function renderAnchor(anchor, admin) {
+    const status = document.getElementById('anchor-status');
+    if (!status) return;
+    if (!anchor) {
+      status.innerHTML = '<span class="badge">No anchor</span> agents attest via the platform default (SPIRE).';
+    } else {
+      const st = (anchor.status || 'pending').toLowerCase();
+      const cls = st === 'active' ? 'badge-role-admin' : 'badge-role-member';
+      status.innerHTML =
+        `<span class="badge ${cls}" data-testid="anchor-state">${escHtml(st)}</span> ` +
+        `account <code>${escHtml(anchor.awsAccountId || '')}</code> ` +
+        `role <code>${escHtml(anchor.roleArnPattern || '')}</code>`;
+    }
+    if (admin) {
+      document.getElementById('anchor-account').value = anchor ? (anchor.awsAccountId || '') : '';
+      document.getElementById('anchor-role').value = anchor ? (anchor.roleArnPattern || '') : '';
+    }
+  }
+
+  async function registerAnchor() {
+    const awsAccountId = (document.getElementById('anchor-account').value || '').trim();
+    const roleArnPattern = (document.getElementById('anchor-role').value || '').trim();
+    try {
+      const r = await fetch('/api/org/anchor', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'sts', awsAccountId, roleArnPattern }),
+      });
+      if (!r.ok) throw new Error(`register anchor: ${r.status}`);
+      showToast('Anchor registered (pending). Prove control to activate.');
+      loadOrgSettings();
+    } catch (e) { showToast(`Register anchor failed: ${e.message || e}`, true); }
+  }
+
+  async function clearAnchor() {
+    if (!window.confirm('Clear the org’s attestation anchor?')) return;
+    try {
+      const r = await fetch('/api/org/anchor', { method: 'DELETE' });
+      if (!r.ok) throw new Error(`clear anchor: ${r.status}`);
+      showToast('Anchor cleared.');
+      loadOrgSettings();
+    } catch (e) { showToast(`Clear anchor failed: ${e.message || e}`, true); }
+  }
+
+  async function saveDisposition() {
+    const sel = document.querySelector('input[name="removal-disposition"]:checked');
+    if (!sel) return;
+    try {
+      const r = await fetch('/api/org', {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ removalDisposition: sel.value }),
+      });
+      if (!r.ok) throw new Error(`save: ${r.status}`);
+      showToast('Organization settings saved.');
+    } catch (e) { showToast(`Save failed: ${e.message || e}`, true); }
+  }
+
   async function sendMessage(agentId, message) {
     const r = await fetch(`/api/agents/${agentId}/message`, {
       method: 'POST',
@@ -1896,6 +2313,13 @@
     return '';
   }
   function actionButtonsHtml(a) {
+    // canManage (from GET /api/agents, owner || org-admin) gates every MUTATING
+    // control. A same-org member viewing another member's agent sees it READ-ONLY:
+    // no revoke/kill/dismiss (and no chat/message — see buildCard). This is cosmetic
+    // only — the orchestrator enforces the same manage authority on every call, so a
+    // tampered client that re-adds a button still gets a 404. Absent canManage (an
+    // older payload) is treated as read-only, fail-closed.
+    if (!a.canManage) return '';
     return `
       <span id="revokewrap-${a.agentId}" data-state="${revokeState(a.status)}">${revokeBtnHtml(a.agentId, revokeState(a.status))}</span>
       <span id="killwrap-${a.agentId}">${isKillable(a.status) ? `<button class="btn btn-danger" data-testid="kill" onclick="handleKill('${a.agentId}')">Kill</button>` : ''}</span>
@@ -1941,6 +2365,7 @@
         <span class="agent-meta">${escHtml(a.agentType || '—')}</span>
         <span class="status-wrap">${statusBadge(a.status)}</span>
         <span class="agent-meta">${escHtml(a.tenantId || '—')}</span>
+        <span class="agent-meta agent-owner" title="owner">${escHtml(a.userId || '—')}</span>
         <div class="agent-actions">
           <button class="btn btn-events" id="evtbtn-${a.agentId}"
                   onclick="toggleEvents('${a.agentId}')">▼ Events</button>
@@ -1993,10 +2418,11 @@
         <span class="agent-meta">${escHtml(a.agentType || '—')}</span>
         <span class="status-wrap">${statusBadge(a.status)}</span>
         <span class="agent-meta">${escHtml(a.tenantId || '—')}</span>
+        <span class="agent-meta agent-owner" title="owner">${escHtml(a.userId || '—')}</span>
         <div class="agent-actions">
           <button class="btn btn-events" id="evtbtn-${a.agentId}"
                   onclick="toggleEvents('${a.agentId}')">▼ Events</button>
-          ${a.lifecycle === 'long-lived' && a.supportsChat ? `<button class="btn btn-chat" id="chatbtn-${a.agentId}" onclick="toggleChat('${a.agentId}')">💬 Chat</button>` : ''}
+          ${a.canManage && a.lifecycle === 'long-lived' && a.supportsChat ? `<button class="btn btn-chat" id="chatbtn-${a.agentId}" onclick="toggleChat('${a.agentId}')">💬 Chat</button>` : ''}
           ${actionButtonsHtml(a)}
         </div>
       </div>`;
@@ -2570,6 +2996,16 @@
   document.getElementById('open-agent-types-btn').addEventListener('click', openAgentTypesView);
   document.getElementById('agent-types-back-btn').addEventListener('click', closeAgentTypesView);
   document.getElementById('new-agent-type-btn').addEventListener('click', () => openTemplateForm(null, { edit: false }));
+
+  // ── Org admin: Members view wiring (Phase 6) ───────────────────────────
+  document.getElementById('open-members-btn').addEventListener('click', openMembersView);
+  document.getElementById('members-back-btn').addEventListener('click', closeMembersView);
+  document.getElementById('member-add-btn').addEventListener('click', addMember);
+  document.getElementById('member-add-input').addEventListener('keydown', e => { if (e.key === 'Enter') addMember(); });
+  document.getElementById('members-table-wrap').addEventListener('click', handleMembersAction);
+  document.getElementById('save-disposition-btn').addEventListener('click', saveDisposition);
+  document.getElementById('anchor-register-btn').addEventListener('click', registerAnchor);
+  document.getElementById('anchor-clear-btn').addEventListener('click', clearAnchor);
   document.getElementById('agent-types-table-wrap').addEventListener('click', handleTableAction);
   document.getElementById('tmpl-form-cancel').addEventListener('click', closeTemplateForm);
   document.getElementById('tmpl-form-save').addEventListener('click', saveTemplateForm);
@@ -2761,21 +3197,185 @@
     document.getElementById('consents-modal').classList.remove('open');
   });
 
-  // Show the logged-in user in the header. The page itself is only reachable
-  // with a session (the server redirects to /login otherwise), so this is just
-  // a label; a 401 here means the session lapsed, so bounce to login.
-  // Also surface isAdmin to toggle the admin-only "Agent Types" nav entry.
-  // The nav button is cosmetic convenience; the BFF/orchestrator gates are the
-  // real boundary, so a tampered client that unhides it still 403s on every call.
+  // ── Identity + org gate ───────────────────────────────────────────────────
+  // /api/me drives the whole login-into-org UX. It reports the session identity
+  // (user/isAdmin/activeOrg) plus the caller's org memberships (orgs/isOrgAdmin)
+  // from the orchestrator. The gate below decides between: the dashboard (in an
+  // org, or a realm admin's Global view), the no-organization screen, the org
+  // picker, or an auto-select redirect. Server gates are the real boundary — this
+  // is UX only, and the orchestrator 403/404s any call from the wrong org context.
+  const ORG_LABEL_GLOBAL = 'Global (no organization)';
+
+  function showGate(which) {
+    document.getElementById('org-gate-noorg').hidden = which !== 'noorg';
+    document.getElementById('org-gate-picker').hidden = which !== 'picker';
+    document.getElementById('org-gate-error').hidden = which !== 'error';
+    document.getElementById('org-gate').hidden = false;
+  }
+
+  function renderOrgSwitcher(orgs, activeOrg, isAdmin) {
+    // Destinations: each org the user belongs to, plus "Global" for a realm admin.
+    const dests = orgs.map(o => ({ value: o.orgId, label: o.name || o.orgId }));
+    if (isAdmin) dests.push({ value: '', label: ORG_LABEL_GLOBAL });
+    // Only worth showing when there's a real choice.
+    if (dests.length <= 1) return;
+    const sel = document.getElementById('org-switcher');
+    sel.innerHTML = dests.map(d =>
+      `<option value="${escHtml(d.value)}" ${d.value === (activeOrg || '') ? 'selected' : ''}>${escHtml(d.label)}</option>`
+    ).join('');
+    sel.hidden = false;
+    sel.addEventListener('change', () => {
+      const v = sel.value;
+      // A full re-auth into the chosen org (or Global when empty).
+      window.location = v ? `/switch-org?org=${encodeURIComponent(v)}` : '/switch-org';
+    });
+  }
+
+  // Self-serve org creation (Phase 7). Bound once on load; the form only becomes
+  // visible when showGate('noorg') runs for an org-less user. On success we re-auth
+  // into the new org via /switch-org so the session token carries its claim and the
+  // user lands on the dashboard as the org admin. Server gates are authoritative —
+  // the orchestrator enforces the first-admin=sub, reserved-slug and one-org limits.
+  (function () {
+    const form = document.getElementById('create-org-form');
+    if (!form) return;
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const errEl = document.getElementById('create-org-error');
+      const btn = document.getElementById('create-org-submit');
+      errEl.hidden = true;
+      const name = document.getElementById('create-org-name').value.trim();
+      if (!name) return;
+      btn.disabled = true;
+      try {
+        const r = await fetch('/api/signup/org', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          // Only the display name — the registry mints the org's opaque GUID id.
+          body: JSON.stringify({ name }),
+        });
+        if (r.ok) {
+          // Switch straight into the just-created org (a re-auth into its scope) so
+          // the user lands INSIDE it as its admin — not on the org-less Global view,
+          // which is where a realm admin would otherwise land. The response echoes
+          // the server-minted GUID id; fall back to a plain reload if it's absent.
+          const created = await r.json().catch(() => ({}));
+          window.location = created.orgId
+            ? `/switch-org?org=${encodeURIComponent(created.orgId)}`
+            : '/';
+          return;
+        }
+        const msg = (await r.text()).trim();
+        errEl.textContent = msg || 'Could not create the organization. Try again.';
+        errEl.hidden = false;
+      } catch (_) {
+        errEl.textContent = 'Something went wrong. Try again.';
+        errEl.hidden = false;
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  })();
+
   (async () => {
+    let me;
     try {
       const r = await fetch('/api/me');
       if (r.status === 401) { window.location = '/login'; return; }
-      if (!r.ok) return;
-      const me = await r.json();
-      if (me.user) document.getElementById('current-user').textContent = me.user;
-      if (me.isAdmin) document.getElementById('open-agent-types-btn').hidden = false;
-    } catch (_) {}
+      if (!r.ok) { showGate('error'); return; }
+      me = await r.json();
+    } catch (_) { showGate('error'); return; }
+
+    if (me.user) document.getElementById('current-user').textContent = me.user;
+    // Scope the admin surfaces by role (Phase 6). A realm admin manages the global
+    // catalog; an org admin manages their org's templates + membership. Server
+    // gates are authoritative — these flags only decide button visibility + which
+    // endpoint fetchAdminTemplates reads.
+    ME.isAdmin = !!me.isAdmin;
+    ME.isOrgAdmin = !!me.isOrgAdmin;
+    ME.activeOrg = me.activeOrg || '';
+    if (me.isAdmin || me.isOrgAdmin) document.getElementById('open-agent-types-btn').hidden = false;
+    // Any member of an active org can open the Organization view (members list +
+    // settings + anchor) — read-only for non-admins (loadOrgSettings hides the
+    // mutating controls; the server gates every write regardless).
+    if (me.isOrgAdmin || ME.activeOrg) document.getElementById('open-members-btn').hidden = false;
+
+    // Couldn't reach the org backend — don't strand the user on a false no-org
+    // screen; offer a reload instead.
+    if (me.orgsUnavailable) { showGate('error'); return; }
+
+    const orgs = Array.isArray(me.orgs) ? me.orgs : [];
+    const activeOrg = me.activeOrg || '';
+
+    if (activeOrg) {
+      // In an org: show it in the header + a switcher when there's a choice.
+      // Clear the auto-select loop guard — we resolved into an org successfully.
+      try { sessionStorage.removeItem('spawnly.autoOrg'); } catch (_) {}
+      const ind = document.getElementById('org-indicator');
+      const label = (orgs.find(o => o.orgId === activeOrg) || {}).name || activeOrg;
+      ind.textContent = label;
+      ind.hidden = false;
+      renderOrgSwitcher(orgs, activeOrg, me.isAdmin);
+      return; // dashboard proceeds
+    }
+
+    // Global (org-less) view for a realm admin: label the header + offer a
+    // switcher into any org. Factored so both the "admin has orgs" and the
+    // "admin escaped the create screen" paths land the same way.
+    const proceedGlobal = () => {
+      const ind = document.getElementById('org-indicator');
+      ind.textContent = ORG_LABEL_GLOBAL;
+      ind.hidden = false;
+      renderOrgSwitcher(orgs, '', true);
+    };
+
+    // Org-less session.
+    if (me.isAdmin) {
+      if (orgs.length === 0) {
+        // A realm admin with NO orgs yet — e.g. a fresh public deploy that seeds
+        // none (kind seeds acme; deploy.sh deliberately doesn't). Global is still
+        // legitimate for an admin, but there was previously no way to CREATE the
+        // first org from the dashboard (the create form was gated to non-admins).
+        // Show it, with a "Continue to Global" escape so the admin isn't forced.
+        showGate('noorg');
+        const esc = document.getElementById('noorg-continue-global');
+        if (esc) {
+          esc.hidden = false;
+          esc.addEventListener('click', () => {
+            document.getElementById('org-gate').hidden = true;
+            proceedGlobal();
+          }, { once: true });
+        }
+        return;
+      }
+      // Admin who belongs to org(s): Global view + a switcher to jump into them.
+      proceedGlobal();
+      return; // dashboard proceeds (global)
+    }
+
+    // Ordinary user, org-less: must resolve to an org.
+    if (orgs.length === 0) { showGate('noorg'); return; }
+    if (orgs.length === 1) {
+      // Auto-select the sole org via a re-auth. Loop guard: if we ALREADY tried
+      // to auto-select this org this tab-session but landed org-less again (the
+      // token isn't carrying the org claim for some reason), don't redirect
+      // forever — surface the error gate instead.
+      const only = orgs[0].orgId;
+      let tried = '';
+      try { tried = sessionStorage.getItem('spawnly.autoOrg') || ''; } catch (_) {}
+      if (tried === only) { showGate('error'); return; }
+      try { sessionStorage.setItem('spawnly.autoOrg', only); } catch (_) {}
+      window.location = `/switch-org?org=${encodeURIComponent(only)}`;
+      return;
+    }
+    // Multiple orgs: pick one.
+    const listEl = document.getElementById('org-picker-list');
+    listEl.innerHTML = orgs.map(o =>
+      `<button class="btn btn-primary" data-testid="org-pick" data-org="${escHtml(o.orgId)}">${escHtml(o.name || o.orgId)}</button>`
+    ).join('');
+    listEl.querySelectorAll('button[data-org]').forEach(b =>
+      b.addEventListener('click', () => { window.location = `/switch-org?org=${encodeURIComponent(b.dataset.org)}`; }));
+    showGate('picker');
   })();
 
   // Point the header Docs link at the env-specific docs origin (localhost:4321

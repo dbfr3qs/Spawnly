@@ -54,17 +54,43 @@ public class StsCredentialVerifier implements AgentCredentialVerifier {
 
     private static final String ASSUMED_ROLE_MARKER = ":assumed-role/";
 
+    /** Env var naming the sole trusted STS endpoint override (e2e fake STS). */
+    public static final String STS_TRUSTED_ENDPOINT_ENV = "STS_TRUSTED_ENDPOINT";
+
     private final HttpClient http;
 
+    /**
+     * When set, the SOLE STS endpoint this verifier will replay against (scheme
+     * + host[:port] must match exactly). SSRF stance: it NEVER widens trust —
+     * unset (the production default, {@code null}/empty) keeps the hardcoded AWS
+     * {@link #STS_HOST} pattern over HTTPS; when set, ONLY that one endpoint is
+     * trusted (the AWS pattern no longer applies). It exists solely so an
+     * in-cluster FAKE STS can stand in for e2e (mirrors the Go
+     * {@code STS_TRUSTED_ENDPOINT} override); a real deploy leaves it unset, so no
+     * operator can be tricked into pointing the token endpoint at an attacker's
+     * host. Wired from {@link AttestorFactory#build} config.
+     */
+    private final String trustedEndpoint;
+
     public StsCredentialVerifier() {
+        this((String) null);
+    }
+
+    /** Production constructor: an optional STS_TRUSTED_ENDPOINT override. */
+    public StsCredentialVerifier(String trustedEndpoint) {
         this(HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
-                .build());
+                .build(), trustedEndpoint);
     }
 
     /** For tests: inject a client (e.g. pointed at WireMock over plain http). */
     StsCredentialVerifier(HttpClient http) {
+        this(http, null);
+    }
+
+    StsCredentialVerifier(HttpClient http, String trustedEndpoint) {
         this.http = http;
+        this.trustedEndpoint = (trustedEndpoint == null || trustedEndpoint.isEmpty()) ? null : trustedEndpoint;
     }
 
     @Override
@@ -79,7 +105,7 @@ public class StsCredentialVerifier implements AgentCredentialVerifier {
         // The verifier replays a caller-supplied URL, so it MUST confirm the URL
         // targets an STS endpoint over HTTPS and invokes GetCallerIdentity — else
         // a caller could point the control plane at an arbitrary URL (SSRF).
-        if (!validateStsUrl(pr.url)) {
+        if (!validateStsUrl(pr.url, trustedEndpoint)) {
             return null;
         }
 
@@ -176,21 +202,61 @@ public class StsCredentialVerifier implements AgentCredentialVerifier {
         return (v == null || v.isNull()) ? null : v.asText();
     }
 
+    /** Default (no override) — the hardcoded AWS STS host pattern over HTTPS. */
     static boolean validateStsUrl(String raw) {
+        return validateStsUrl(raw, null);
+    }
+
+    /**
+     * Validates the presigned replay target. When {@code trustedEndpoint} is
+     * non-empty it is the SOLE trusted endpoint (scheme + host + port must match
+     * exactly, and the AWS host pattern no longer applies — trust only ever
+     * NARROWS); otherwise the URL must be HTTPS to an AWS STS host. Either way it
+     * must invoke GetCallerIdentity. Mirrors Go {@code validateStsURLWith}.
+     */
+    static boolean validateStsUrl(String raw, String trustedEndpoint) {
         URI u;
         try {
             u = URI.create(raw);
         } catch (IllegalArgumentException e) {
             return false;
         }
+        if (!raw.contains("Action=GetCallerIdentity")) {
+            return false;
+        }
+        if (trustedEndpoint != null && !trustedEndpoint.isEmpty()) {
+            return matchesTrustedEndpoint(u, trustedEndpoint);
+        }
         if (u.getScheme() == null || !u.getScheme().equals("https")) {
             return false;
         }
         String host = u.getHost();
-        if (host == null || !STS_HOST.matcher(host).matches()) {
+        return host != null && STS_HOST.matcher(host).matches();
+    }
+
+    /**
+     * Requires u to share the trusted endpoint's scheme, host, and port. The
+     * trusted endpoint may be plain http (the in-cluster fake STS); that
+     * relaxation is scoped to exactly what the operator explicitly configured and
+     * is never inferred.
+     */
+    private static boolean matchesTrustedEndpoint(URI u, String trustedEndpoint) {
+        URI t;
+        try {
+            t = URI.create(trustedEndpoint);
+        } catch (IllegalArgumentException e) {
             return false;
         }
-        return raw.contains("Action=GetCallerIdentity");
+        if (t.getScheme() == null || t.getHost() == null) {
+            return false;
+        }
+        return t.getScheme().equalsIgnoreCase(nullToEmpty(u.getScheme()))
+                && t.getHost().equalsIgnoreCase(nullToEmpty(u.getHost()))
+                && t.getPort() == u.getPort();
+    }
+
+    private static String nullToEmpty(String s) {
+        return s == null ? "" : s;
     }
 
     /**
@@ -261,6 +327,55 @@ public class StsCredentialVerifier implements AgentCredentialVerifier {
         }
         String sessionName = rest.substring(slash + 1);
         return sessionName.isEmpty() ? null : sessionName;
+    }
+
+    /**
+     * Extracts the 12-digit account id from an ARN
+     * ({@code arn:partition:service:region:<account>:resource}). Returns
+     * {@code null} if the ARN has no account segment. Mirrors Go
+     * {@code attestor.AccountFromArn}; used by the Phase-9 org-aware verifier to
+     * bind the STS-attested account to the record's org anchor account.
+     */
+    public static String accountFromArn(String arn) {
+        if (arn == null) {
+            return null;
+        }
+        // arn:partition:service:region:<account>:resource — the account is field 5.
+        String[] parts = arn.split(":", 6);
+        if (parts.length < 6 || parts[4].isEmpty()) {
+            return null;
+        }
+        return parts[4];
+    }
+
+    /**
+     * Reports whether an assumed-role ARN matches an anchor's roleArnPattern. The
+     * pattern is a simple glob: {@code *} matches any run of characters (including
+     * none); every other character is literal. Matching is anchored (the whole ARN
+     * must match) and case-sensitive. An empty pattern matches nothing
+     * (fail-closed): an anchor with no role constraint must not authenticate any
+     * role in the account. Mirrors Go {@code attestor.MatchRoleArnPattern}
+     * verbatim so the registry (self-registration) and the IdP (token minting)
+     * enforce the SAME anchor role check (the isolation invariant).
+     */
+    public static boolean matchRoleArnPattern(String pattern, String arn) {
+        if (pattern == null || pattern.isEmpty() || arn == null || arn.isEmpty()) {
+            return false;
+        }
+        StringBuilder b = new StringBuilder("^");
+        String[] segs = pattern.split("\\*", -1);
+        for (int i = 0; i < segs.length; i++) {
+            if (i > 0) {
+                b.append(".*");
+            }
+            b.append(Pattern.quote(segs[i]));
+        }
+        b.append("$");
+        try {
+            return Pattern.compile(b.toString()).matcher(arn).matches();
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     /** The wire form of a SigV4-presigned GetCallerIdentity request. */

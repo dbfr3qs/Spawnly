@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -48,10 +51,24 @@ type Authenticator struct {
 	pending  map[string]pendingLogin // OIDC state -> PKCE verifier
 }
 
+// validOrgAlias is the org alias/slug charset (a DNS label) — the SAME shape the
+// registry enforces (cmd/registry/orgs.go validOrgID). Applied before an org
+// alias is spliced into an OAuth scope string (organization:<alias>) or a redirect
+// query, so a crafted value can never inject whitespace/newlines into the scope or
+// smuggle extra request params. An invalid alias is treated as org-less (dropped).
+var validOrgAlias = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
 type session struct {
 	username   string
 	rawIDToken string // kept for the logout id_token_hint
 	isAdmin    bool
+	// activeOrg is the single organization this session's token names (the
+	// `organization` claim), parsed from the access token at callback. "" for an
+	// org-less (global) session — a realm admin, or a fresh login before an org was
+	// picked. Single-org by construction: the dashboard requests organization:<alias>
+	// so the token names exactly one org (see handleLogin). The org picker / no-org
+	// screen (static UI) and /switch-org drive changes to it.
+	activeOrg string
 	// tokenSrc yields the delegated OAuth access token the dashboard presents to
 	// the orchestrator (audienced for "orchestrator", sub=userId, scope
 	// orchestrator:read/write). It is a ReuseTokenSource: it caches the current
@@ -65,6 +82,15 @@ type session struct {
 type pendingLogin struct {
 	verifier  string
 	createdAt time.Time
+	// org is the organization this flow requests (organization:<alias> scope), or
+	// "" for an org-less/global login. Kept so a silent-attempt fallback can
+	// re-drive the SAME org interactively.
+	org string
+	// silent marks an org-switch that tried prompt=none (no user interaction,
+	// reusing the existing Keycloak SSO session). When Keycloak answers that it
+	// can't complete without interaction, the callback falls back to an
+	// interactive login for `org` instead of erroring.
+	silent bool
 }
 
 const (
@@ -121,12 +147,23 @@ func (a *Authenticator) ensure(ctx context.Context) error {
 			// openid/profile drive the human's id_token; spawnly-roles carries the
 			// user's flat `role` claim (admin gating) into the id_token;
 			// orchestrator:read/write are the delegated authority the access token
-			// carries to the orchestrator; offline_access mints the refresh token
-			// that keeps it fresh for the session's lifetime. NOTE: the scope is
+			// carries to the orchestrator. NOTE: the scope is
 			// "spawnly-roles", not "roles" — Keycloak's built-in `roles` scope
 			// emits realm_access.roles; our flat `role` claim lives in a distinct
 			// scope (see deploy/keycloak/scopes.tf).
-			Scopes: []string{oidc.ScopeOpenID, "profile", "spawnly-roles", "orchestrator:read", "orchestrator:write", "offline_access"},
+			//
+			// offline_access is DELIBERATELY ABSENT. Since Keycloak 26.1
+			// (keycloak/keycloak#32650) requesting offline_access on the login that
+			// CREATES the session makes Keycloak delete the ONLINE SSO session and
+			// keep only the offline one — after which every prompt=none re-auth
+			// (the silent /switch-org path) returns login_required and the user is
+			// forced to type their password on every org switch. Without it the
+			// code exchange still returns an ONLINE refresh token (Keycloak's
+			// client-level "use refresh tokens" default), which the session's
+			// ReuseTokenSource rotates exactly as before; the realm's SSO idle/max
+			// windows (deploy/keycloak/realm.tf) are sized to cover the dashboard's
+			// 8h sliding session that offline tokens used to cover.
+			Scopes: []string{oidc.ScopeOpenID, "profile", "spawnly-roles", "orchestrator:read", "orchestrator:write"},
 		}
 
 		a.verifier = provider.Verifier(&oidc.Config{ClientID: a.clientID})
@@ -134,18 +171,32 @@ func (a *Authenticator) ensure(ctx context.Context) error {
 	return a.initErr
 }
 
-// handleLogin starts the authorization-code+PKCE flow.
+// handleLogin starts the (interactive) authorization-code+PKCE flow, reading the
+// optional ?org=<alias> to request a single-org token.
 func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err := a.ensure(r.Context()); err != nil {
 		http.Error(w, "auth unavailable: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+	org := ""
+	if o := r.URL.Query().Get("org"); o != "" && validOrgAlias.MatchString(o) {
+		org = o
+	}
+	a.startAuth(w, r, org, false, "")
+}
 
+// startAuth begins the auth-code+PKCE flow for org (may be "" for org-less).
+// When silent, it adds prompt=none (+ login_hint) so an EXISTING Keycloak SSO
+// session yields a fresh single-org token with NO user interaction; if Keycloak
+// answers that it can't complete silently, handleCallback falls back to an
+// interactive login for the same org. hint is the login_hint (the current
+// username) — only meaningful when silent.
+func (a *Authenticator) startAuth(w http.ResponseWriter, r *http.Request, org string, silent bool, hint string) {
 	state := randToken()
 	verifier := oauth2.GenerateVerifier()
 
 	a.mu.Lock()
-	a.pending[state] = pendingLogin{verifier: verifier, createdAt: time.Now()}
+	a.pending[state] = pendingLogin{verifier: verifier, createdAt: time.Now(), org: org, silent: silent}
 	a.gcPendingLocked()
 	a.mu.Unlock()
 
@@ -155,8 +206,128 @@ func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true, Secure: forwardedHTTPS(r), SameSite: http.SameSiteLaxMode, MaxAge: 600,
 	})
 
-	authURL := a.oauth.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier))
+	opts := []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier)}
+	// Per-login single-org scope: when the login names an org, request
+	// organization:<alias> so Keycloak stamps that single active org into the
+	// token. The scope set is thus per-login (not the static config list): base
+	// scopes + this one org. Keycloak only issues the claim if the user is actually
+	// a member — a non-member request yields an org-less token (verified against a
+	// live realm), so this cannot be used to claim an org the user does not belong
+	// to. Overriding the authorize "scope" param (SetAuthURLParam runs after
+	// AuthCodeURL sets it from Scopes) is what makes the scope per-login; the code
+	// exchange + refresh preserve the granted scopes, so the org rides the whole
+	// session without more plumbing.
+	if org != "" {
+		scopes := append(append([]string{}, a.oauth.Scopes...), "organization:"+org)
+		opts = append(opts, oauth2.SetAuthURLParam("scope", strings.Join(scopes, " ")))
+	}
+	// Silent org switch: reuse the live Keycloak SSO session for the
+	// already-signed-in user (prompt=none = no UI). login_hint names that user so
+	// Keycloak's identity-first (Organizations) flow can resolve them without the
+	// username screen. If there is no usable session, Keycloak redirects back with
+	// ?error=login_required (or interaction_required/consent_required), which the
+	// callback turns into an interactive retry — so the worst case is today's
+	// prompted login, never a dead end.
+	if silent {
+		// Logged so its ABSENCE in the dashboard log means this build predates the
+		// silent-switch support (an old image) — vs. present-but-failing, which the
+		// callback logs with the Keycloak error.
+		log.Printf("switch-org: attempting silent re-auth (prompt=none) for org=%q hint=%q", org, hint)
+		opts = append(opts, oauth2.SetAuthURLParam("prompt", "none"))
+		if hint != "" {
+			opts = append(opts, oauth2.SetAuthURLParam("login_hint", hint))
+		}
+	}
+
+	authURL := a.oauth.AuthCodeURL(state, opts...)
 	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+// handleSwitchOrg switches the active org, minting a NEW single-org token for the
+// same user (the settled re-auth-per-org decision keeps tokens single-org). It
+// clears the current session — the old-org token must not survive the switch —
+// then attempts a SILENT re-auth (prompt=none + login_hint) so the switch needs
+// no username/password: the Keycloak SSO session for the signed-in user is left
+// intact (this never calls end_session), so it can back the silent flow. If
+// Keycloak can't complete silently, the callback falls back to an interactive
+// login for the same org. An empty/omitted org switches to the org-less (global)
+// session (a realm admin picking "global"). The org alias is validated before it
+// reaches a scope string.
+//
+// The silent path works over both http (kind: localhost is a trustworthy origin,
+// so browsers do send Keycloak's Secure+SameSite=None SSO cookies) and https (the
+// AWS ALB). It only falls back to the interactive login when Keycloak genuinely
+// has no live SSO session — e.g. Keycloak restarted, or the session lapsed. (The
+// historical always-interactive behaviour was Keycloak 26.1+ deleting the online
+// session when offline_access was in the login scopes — see the Scopes comment in
+// ensure() — not cookie transport.)
+func (a *Authenticator) handleSwitchOrg(w http.ResponseWriter, r *http.Request) {
+	if err := a.ensure(r.Context()); err != nil {
+		http.Error(w, "auth unavailable: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	// Capture the signed-in user BEFORE dropping the session, to hint the silent
+	// re-auth toward that same user.
+	var hint string
+	if sid, err := r.Cookie(sessionCookie); err == nil && sid.Value != "" {
+		a.mu.Lock()
+		if s, ok := a.sessions[sid.Value]; ok {
+			hint = s.username
+		}
+		delete(a.sessions, sid.Value)
+		a.mu.Unlock()
+	}
+	clearCookie(w, sessionCookie, forwardedHTTPS(r))
+
+	org := ""
+	if o := r.URL.Query().Get("org"); o != "" && validOrgAlias.MatchString(o) {
+		org = o
+	}
+	a.startAuth(w, r, org, true, hint)
+}
+
+// parseOrgClaim extracts the single active org from a raw JWT's `organization`
+// claim, for the dashboard's OWN session bookkeeping (display + picker state). It
+// decodes the payload WITHOUT verifying the signature — the token is one the
+// dashboard just obtained from its own IdP over the back channel and only uses for
+// display; the orchestrator independently validates + re-derives the org for every
+// authorization decision, so this is never a trust boundary. Fail-closed and shape-
+// tolerant, mirroring tokenvalidator.parseOrgID: only a claim naming EXACTLY one
+// org yields it; zero, multiple, or an unparsable claim yields "" (org-less).
+func parseOrgClaim(rawJWT string) string {
+	parts := strings.Split(rawJWT, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		if payload, err = base64.URLEncoding.DecodeString(parts[1]); err != nil {
+			return ""
+		}
+	}
+	var claims struct {
+		Organization any `json:"organization"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return ""
+	}
+	switch t := claims.Organization.(type) {
+	case []any:
+		if len(t) == 1 {
+			if s, ok := t[0].(string); ok {
+				return s
+			}
+		}
+	case map[string]any:
+		if len(t) == 1 {
+			for k := range t {
+				return k
+			}
+		}
+	case string:
+		return t
+	}
+	return ""
 }
 
 // handleCallback completes the flow: validate state, exchange the code, verify
@@ -181,6 +352,37 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 	if !ok {
 		http.Error(w, "unknown state", http.StatusBadRequest)
+		return
+	}
+
+	// Keycloak signals a flow it couldn't complete by redirecting back with
+	// ?error= instead of ?code=. For a SILENT org switch (prompt=none) the
+	// expected error is login_required / interaction_required / consent_required
+	// — there was no reusable session, so fall back to an interactive login for
+	// the SAME org (no dead end, no worse than a normal prompted login). For a
+	// non-silent flow an error is a real failure surfaced to the user.
+	if authErr := r.URL.Query().Get("error"); authErr != "" {
+		if pl.silent {
+			// Diagnostic for "org switch still asks for a password". The error names
+			// WHY the silent (prompt=none) switch couldn't complete:
+			//   login_required        → Keycloak found NO reusable SSO session (its
+			//                            session cookie wasn't sent — e.g. dropped
+			//                            over plain http, or a cross-site/proxy cookie
+			//                            issue on https);
+			//   interaction_required  → a session EXISTS but the login flow demands
+			//   / consent_required       UI (the org identity-first execution) — which
+			//                            means prompt=none can't be silent for orgs and
+			//                            the browser flow needs reconfiguring.
+			// Either way we fall back to an interactive login (no dead end).
+			log.Printf("switch-org: silent re-auth for org=%q could not complete (error=%q) → interactive fallback", pl.org, authErr)
+			target := "/signin"
+			if pl.org != "" {
+				target += "?org=" + url.QueryEscape(pl.org)
+			}
+			http.Redirect(w, r, target, http.StatusFound)
+			return
+		}
+		http.Error(w, "login failed: "+authErr, http.StatusBadRequest)
 		return
 	}
 
@@ -226,8 +428,13 @@ func (a *Authenticator) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// single request's lifetime; refresh runs against the discovered (internal)
 	// token endpoint, preserving split-horizon.
 	tokenSrc := a.oauth.TokenSource(context.Background(), tok)
+	// Record the session's active org from the ACCESS token's organization claim
+	// (the token the dashboard presents to the orchestrator, and the one that
+	// carries the org). "" for an org-less login; a single alias when an org scope
+	// was requested and the user is a member.
+	activeOrg := parseOrgClaim(tok.AccessToken)
 	a.mu.Lock()
-	a.sessions[sid] = session{username: username, isAdmin: isAdmin, rawIDToken: rawID, tokenSrc: tokenSrc, expiresAt: time.Now().Add(8 * time.Hour)}
+	a.sessions[sid] = session{username: username, isAdmin: isAdmin, activeOrg: activeOrg, rawIDToken: rawID, tokenSrc: tokenSrc, expiresAt: time.Now().Add(sessionTTL)}
 	a.mu.Unlock()
 
 	http.SetCookie(w, &http.Cookie{
@@ -275,14 +482,6 @@ func (a *Authenticator) realmPath() string {
 	return strings.TrimRight(u.Path, "/")
 }
 
-// handleMe reports the logged-in user and whether they are an admin (the UI
-// shows it, confirms the session, and gates the Agent Types admin view).
-func (a *Authenticator) handleMe(w http.ResponseWriter, r *http.Request) {
-	user, _ := a.user(r) // require() guarantees a session before this runs
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"user": user, "isAdmin": a.isAdmin(r)})
-}
-
 // require gates a handler behind a valid session. Unauthenticated API calls get
 // 401; only genuine top-level page navigations are redirected to /signin (which
 // starts the OIDC flow and lands the browser on the /login form).
@@ -298,11 +497,56 @@ func (a *Authenticator) require(next http.Handler) http.Handler {
 		// state and overwrite the cookie of the in-flight navigation, surfacing
 		// as an "invalid state" error on the callback.
 		if strings.HasPrefix(r.URL.Path, "/api/") || !isPageNavigation(r) {
+			// Diagnostic for the "401 after a while" class of report. An API 401 here
+			// (as opposed to the proxy's) means there was NO live session for the
+			// request. `cookie-present=true` narrows it to a LOST session — the
+			// dashboard pod restarted (in-memory sessions don't survive), it runs >1
+			// replica without shared sessions, or the session passed its idle window;
+			// `false` means the browser sent no session cookie (logged out, or the
+			// Secure cookie wasn't sent, e.g. over plain http).
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				cookiePresent := false
+				if ck, err := r.Cookie(sessionCookie); err == nil && ck.Value != "" {
+					cookiePresent = true
+				}
+				log.Printf("require %s: 401 no live dashboard session (session-cookie-present=%v)", r.URL.Path, cookiePresent)
+			}
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		http.Redirect(w, r, "/signin", http.StatusFound)
 	})
+}
+
+// sessionTTL is the dashboard session's SLIDING idle window. Every authenticated
+// request extends the session's expiry to now+sessionTTL (see touchSession), so an
+// actively-used session never lapses, while an idle one still expires after this
+// window. 8h comfortably exceeds the "at least an hour" expectation; the 5-minute
+// access token is refreshed underneath it via the (online) refresh token, so the
+// session's lifetime — not the access token's — governs how long a user stays in.
+// The realm's SSO idle window (deploy/keycloak/realm.tf) is sized to match, so an
+// idle-then-returning user within 8h still refreshes without a new login.
+const sessionTTL = 8 * time.Hour
+
+// touchSession looks up a live session by id and SLIDES its idle expiry to
+// now+sessionTTL, returning the (updated) session. ok is false — and the entry is
+// reaped — when the session is absent or already past its idle window. This is the
+// single place session liveness is evaluated, so every authenticated entry point
+// (page loads via user(), API calls via orchestratorToken) slides the window.
+func (a *Authenticator) touchSession(sid string) (session, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s, ok := a.sessions[sid]
+	if !ok {
+		return session{}, false
+	}
+	if time.Now().After(s.expiresAt) {
+		delete(a.sessions, sid)
+		return session{}, false
+	}
+	s.expiresAt = time.Now().Add(sessionTTL)
+	a.sessions[sid] = s
+	return s, true
 }
 
 // isAdmin reports whether the request's session belongs to an admin user.
@@ -311,13 +555,7 @@ func (a *Authenticator) isAdmin(r *http.Request) bool {
 	if err != nil || c.Value == "" {
 		return false
 	}
-	a.mu.Lock()
-	s, ok := a.sessions[c.Value]
-	if ok && time.Now().After(s.expiresAt) {
-		delete(a.sessions, c.Value)
-		ok = false
-	}
-	a.mu.Unlock()
+	s, ok := a.touchSession(c.Value)
 	return ok && s.isAdmin
 }
 
@@ -397,13 +635,7 @@ func (a *Authenticator) orchestratorToken(ctx context.Context, r *http.Request) 
 	if err != nil || c.Value == "" {
 		return "", errNoSession
 	}
-	a.mu.Lock()
-	s, ok := a.sessions[c.Value]
-	if ok && time.Now().After(s.expiresAt) {
-		delete(a.sessions, c.Value)
-		ok = false
-	}
-	a.mu.Unlock()
+	s, ok := a.touchSession(c.Value)
 	if !ok {
 		return "", errNoSession
 	}
@@ -423,11 +655,26 @@ func (a *Authenticator) orchestratorToken(ctx context.Context, r *http.Request) 
 	return tok.AccessToken, nil
 }
 
-// user returns the logged-in username for the request, if any.
+// user returns the logged-in username for the request, if any. It slides the
+// session's idle window (page navigations count as activity).
 func (a *Authenticator) user(r *http.Request) (string, bool) {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil || c.Value == "" {
 		return "", false
+	}
+	s, ok := a.touchSession(c.Value)
+	if !ok {
+		return "", false
+	}
+	return s.username, true
+}
+
+// activeOrg returns the session's active organization alias (the token's
+// organization claim), or "" for an org-less session or no live session.
+func (a *Authenticator) activeOrg(r *http.Request) string {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil || c.Value == "" {
+		return ""
 	}
 	a.mu.Lock()
 	s, ok := a.sessions[c.Value]
@@ -437,9 +684,9 @@ func (a *Authenticator) user(r *http.Request) (string, bool) {
 	}
 	a.mu.Unlock()
 	if !ok {
-		return "", false
+		return ""
 	}
-	return s.username, true
+	return s.activeOrg
 }
 
 func (a *Authenticator) gcPendingLocked() {

@@ -13,6 +13,7 @@ dashboard_client_secret = ""
 # Control-plane clients.
 orchestrator_client_secret = ""
 idp_consent_client_secret  = ""
+org_admin_client_secret    = "" # registry org directory (multi-tenancy)
 
 # Machine clients (Phase 0 placeholder secret; attestation arrives in Phase 1).
 machine_client_secret = ""
@@ -20,3 +21,4 @@ machine_client_secret = ""
 # Users — leave a password empty to NOT create that user (fail-closed).
 alice_password  = ""
 viewer_password = ""
+bob_password    = "" # org admin of the demo `globex` org (SpiceDB tuple, not a realm role)

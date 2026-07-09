@@ -6,7 +6,15 @@ import { defineConfig, devices } from '@playwright/test';
 // repaired identically inside the devcontainer and on a native host).
 export default defineConfig({
   testDir: './tests',
-  // Agents share one cluster; serialize to avoid cross-test contention.
+  // One worker, no parallelism — this is load-bearing, do not raise it:
+  //  (1) agents share one Kind cluster (pod scheduling would thrash under
+  //      parallel spawns), and
+  //  (2) anchor.spec and remote-agent.spec both drive acme's (and globex's)
+  //      single attestation anchor through register→activate→clear. They are
+  //      each `test.describe.serial` and restore the anchor to its seed (none)
+  //      in afterAll, so run back-to-back they never collide — but only because
+  //      a single worker guarantees they never overlap. Parallel workers would
+  //      let one spec's activate race the other's clear on the SAME org anchor.
   fullyParallel: false,
   workers: 1,
   // Pod scheduling + image pulls dominate; keep generous ceilings.

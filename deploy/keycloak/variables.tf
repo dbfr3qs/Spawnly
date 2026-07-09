@@ -52,6 +52,12 @@ variable "idp_consent_client_secret" {
   sensitive   = true
 }
 
+variable "org_admin_client_secret" {
+  description = "Client secret for the `org-admin` control-plane client (registry org directory). Bootstrap-generated; never committed."
+  type        = string
+  sensitive   = true
+}
+
 # ---------------------------------------------------------------------------
 # Machine clients
 # ---------------------------------------------------------------------------
@@ -84,6 +90,20 @@ variable "alice_password" {
 
 variable "viewer_password" {
   description = "Initial password for the non-admin user `viewer`. Empty => viewer not created."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "bob_password" {
+  description = "Initial password for the non-admin user `bob` (org admin of the demo `globex` org via SpiceDB, not a realm role). Empty => bob not created."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "nomad_password" {
+  description = "Initial password for the non-admin user `nomad`, a member of NO organization (drives the dashboard 'no organization' screen in e2e). Empty => nomad not created."
   type        = string
   sensitive   = true
   default     = ""

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -326,14 +327,15 @@ func TestExpiredSessionRejected(t *testing.T) {
 	}
 }
 
-// TestTemplateRoutesRequireAdminAtBFF proves the dashboard BFF's template
-// POST/PATCH/DELETE routes are actually wired through auth.requireAdmin in
-// buildMux (not just the wrapper): a non-admin session gets 403 on each, AND
-// the upstream orchestrator is never hit (the proxy would forward if the gate
-// were bypassed). GET /api/templates stays on auth.require and is allowed for a
-// non-admin (the spawn dropdown is unchanged). This is the BFF-tier twin of the
-// orchestrator's TestTemplateManagementRequiresAdmin.
-func TestTemplateRoutesRequireAdminAtBFF(t *testing.T) {
+// TestTemplateRoutesSessionGatedAtBFF proves the dashboard BFF's template
+// POST/PATCH/DELETE routes are SESSION-gated (auth.require) as of Phase 6, not
+// realm-admin-gated: template management authz (realm admin OR org admin, scoped)
+// now lives at the orchestrator's requireTemplateManager, which the stateless BFF
+// cannot evaluate (no SpiceDB) — so a valid non-admin session is FORWARDED to the
+// orchestrator (which then 403s a non-manager), while an UNAUTHENTICATED request
+// is still rejected 401 before the proxy runs. GET /api/templates stays on
+// auth.require too (the spawn dropdown, unchanged).
+func TestTemplateRoutesSessionGatedAtBFF(t *testing.T) {
 	var upstreamHits int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHits++
@@ -364,23 +366,26 @@ func TestTemplateRoutesRequireAdminAtBFF(t *testing.T) {
 		{http.MethodDelete, "/api/templates/worker"},
 	}
 
-	// Non-admin: every template-mutate route is 403 AND the orchestrator is
-	// never reached (the requireAdmin gate returns before proxy runs).
+	// Non-admin WITH a valid session: forwarded to the orchestrator (the BFF is
+	// session-gated now; the orchestrator's requireTemplateManager is the real
+	// authz boundary — proven in cmd/orchestrator/phase6_test.go). The stub
+	// upstream returns 200; the point is that the proxy RAN (hit == 1).
 	for _, tc := range mutateCases {
 		upstreamHits = 0
 		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}"))
 		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "viewer-sid"})
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("non-admin %s: status = %d, want 403", tc.method, rec.Code)
+		if rec.Code != http.StatusOK {
+			t.Errorf("non-admin %s: status = %d, want 200 (session-gated forward)", tc.method, rec.Code)
 		}
-		if upstreamHits != 0 {
-			t.Errorf("non-admin %s: orchestrator hit %d times, want 0 (gate must run before proxy)", tc.method, upstreamHits)
+		if upstreamHits != 1 {
+			t.Errorf("non-admin %s: orchestrator hit %d times, want 1 (BFF forwards; authz is upstream)", tc.method, upstreamHits)
 		}
 	}
 
-	// Unauthenticated: admin routes are API-only → 401 (no login redirect).
+	// Unauthenticated: API routes are API-only → 401 (no login redirect), and the
+	// orchestrator is never reached.
 	for _, tc := range mutateCases {
 		upstreamHits = 0
 		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}"))
@@ -452,39 +457,279 @@ func TestTemplateRoutesRequireAdminAtBFF(t *testing.T) {
 	}
 }
 
-// TestHandleMeReportsIsAdmin asserts /api/me returns isAdmin=true for an admin
-// session and isAdmin=false for an ordinary (non-admin) session — the UI gates
-// the Agent Types admin view on this flag.
-func TestHandleMeReportsIsAdmin(t *testing.T) {
-	a := NewAuthenticator("http://localhost:8090", "http://keycloak:8080", "dashboard", "secret")
-	a.sessions["admin-sid"] = session{username: "alice", isAdmin: true, expiresAt: time.Now().Add(time.Hour)}
-	a.sessions["viewer-sid"] = session{username: "viewer", isAdmin: false, expiresAt: time.Now().Add(time.Hour)}
+// meSession gives a session a live (non-expiring) token source so /api/me can
+// fetch /v1/my/orgs through the orchestrator stub.
+func meSession(s session) session {
+	oauth := &oauth2.Config{Endpoint: oauth2.Endpoint{TokenURL: "http://refresh.invalid/token"}}
+	s.tokenSrc = oauth.TokenSource(context.Background(), &oauth2.Token{AccessToken: "at-1", Expiry: time.Now().Add(time.Hour)})
+	s.expiresAt = time.Now().Add(time.Hour)
+	return s
+}
 
-	cases := []struct {
-		sid         string
-		wantUser    string
-		wantIsAdmin bool
-	}{
-		{"admin-sid", "alice", true},
-		{"viewer-sid", "viewer", false},
-	}
-	for _, tc := range cases {
+// TestApiMeComposesOrgs drives the composed GET /api/me: it merges the session
+// identity (user/isAdmin/activeOrg) with the orchestrator's /v1/my/orgs
+// (orgs/isOrgAdmin), and degrades to orgsUnavailable when the orchestrator errs.
+func TestApiMeComposesOrgs(t *testing.T) {
+	// Orchestrator stub: /v1/my/orgs echoes the caller's active org from the token —
+	// but the test controls the response per session via a switch on the bearer.
+	orch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/my/orgs" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"orgs":[{"orgId":"acme","name":"Acme"}],"activeOrg":"acme","isOrgAdmin":true}`))
+	}))
+	defer orch.Close()
+
+	a := stubAuth(&oauth2.Config{Endpoint: oauth2.Endpoint{TokenURL: "http://refresh.invalid/token"}})
+	a.sessions["admin-sid"] = meSession(session{username: "alice", isAdmin: true, activeOrg: "acme"})
+	a.sessions["viewer-sid"] = meSession(session{username: "viewer", isAdmin: false, activeOrg: "acme"})
+	mux := buildMux(a, orch.URL, "http://keycloak:8080", "http://docs", fstest.MapFS{})
+
+	get := func(sid string) map[string]any {
 		req := httptest.NewRequest("GET", "/api/me", nil)
-		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tc.sid})
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: sid})
 		rec := httptest.NewRecorder()
-		a.handleMe(rec, req)
+		mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
-			t.Fatalf("%s: status = %d, want 200", tc.sid, rec.Code)
+			t.Fatalf("%s: status = %d, want 200", sid, rec.Code)
 		}
 		var got map[string]any
 		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
-			t.Fatalf("%s: decode: %v", tc.sid, err)
+			t.Fatalf("%s: decode: %v", sid, err)
 		}
-		if got["user"] != tc.wantUser {
-			t.Errorf("%s: user = %v, want %q", tc.sid, got["user"], tc.wantUser)
+		return got
+	}
+
+	admin := get("admin-sid")
+	if admin["user"] != "alice" || admin["isAdmin"] != true {
+		t.Errorf("admin identity wrong: %v", admin)
+	}
+	if admin["activeOrg"] != "acme" {
+		t.Errorf("activeOrg = %v, want acme", admin["activeOrg"])
+	}
+	if admin["isOrgAdmin"] != true {
+		t.Errorf("isOrgAdmin = %v, want true", admin["isOrgAdmin"])
+	}
+	orgs, _ := admin["orgs"].([]any)
+	if len(orgs) != 1 {
+		t.Errorf("orgs = %v, want one org", admin["orgs"])
+	}
+	if _, bad := admin["orgsUnavailable"]; bad {
+		t.Error("orgsUnavailable should be absent when the orchestrator answers")
+	}
+
+	viewer := get("viewer-sid")
+	if viewer["user"] != "viewer" || viewer["isAdmin"] != false {
+		t.Errorf("viewer identity wrong: %v", viewer)
+	}
+}
+
+// TestApiMeDegradesWhenOrchestratorDown proves /api/me still returns the session
+// identity with orgsUnavailable=true (not a false no-org screen) when the
+// orchestrator's /v1/my/orgs fails, rather than 5xx-ing the whole page.
+func TestApiMeDegradesWhenOrchestratorDown(t *testing.T) {
+	orch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusBadGateway)
+	}))
+	defer orch.Close()
+
+	a := stubAuth(&oauth2.Config{Endpoint: oauth2.Endpoint{TokenURL: "http://refresh.invalid/token"}})
+	a.sessions["sid"] = meSession(session{username: "alice", isAdmin: false, activeOrg: ""})
+	mux := buildMux(a, orch.URL, "http://keycloak:8080", "http://docs", fstest.MapFS{})
+
+	req := httptest.NewRequest("GET", "/api/me", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "sid"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (degrade, not fail)", rec.Code)
+	}
+	var got map[string]any
+	json.NewDecoder(rec.Body).Decode(&got)
+	if got["user"] != "alice" {
+		t.Errorf("user = %v, want alice", got["user"])
+	}
+	if got["orgsUnavailable"] != true {
+		t.Errorf("orgsUnavailable = %v, want true", got["orgsUnavailable"])
+	}
+}
+
+// TestHandleLoginOrgScope asserts /signin?org=<alias> requests the
+// organization:<alias> scope on the authorize redirect (per-login single-org
+// scope), and that an invalid alias is dropped (org-less) rather than injected.
+func TestHandleLoginOrgScope(t *testing.T) {
+	a := stubAuth(&oauth2.Config{
+		ClientID: "dashboard",
+		Endpoint: oauth2.Endpoint{AuthURL: "http://localhost:8090/realms/spawnly/protocol/openid-connect/auth"},
+		Scopes:   []string{"openid", "orchestrator:read", "orchestrator:write"},
+	})
+
+	scopeOf := func(target string) string {
+		req := httptest.NewRequest("GET", target, nil)
+		rec := httptest.NewRecorder()
+		a.handleLogin(rec, req)
+		loc := rec.Header().Get("Location")
+		u, err := url.Parse(loc)
+		if err != nil {
+			t.Fatalf("parse redirect %q: %v", loc, err)
 		}
-		if isAdmin, _ := got["isAdmin"].(bool); isAdmin != tc.wantIsAdmin {
-			t.Errorf("%s: isAdmin = %v, want %v", tc.sid, got["isAdmin"], tc.wantIsAdmin)
+		return u.Query().Get("scope")
+	}
+
+	if sc := scopeOf("/signin?org=acme"); !strings.Contains(sc, "organization:acme") {
+		t.Errorf("org login scope = %q, want it to contain organization:acme", sc)
+	}
+	// Invalid alias (uppercase/space) must NOT be spliced into the scope.
+	if sc := scopeOf("/signin?org=Acme%20Corp"); strings.Contains(sc, "organization:") {
+		t.Errorf("invalid org alias must be dropped, scope = %q", sc)
+	}
+	// No org param → no organization scope override (base scopes only).
+	if sc := scopeOf("/signin"); strings.Contains(sc, "organization:") {
+		t.Errorf("org-less login must not request an organization scope, scope = %q", sc)
+	}
+}
+
+// TestSwitchOrgSilent asserts /switch-org drops the old session and drives a
+// SILENT re-auth (prompt=none + login_hint = the signed-in user) for the new org
+// — so switching mints a new single-org token with no username/password prompt
+// when the Keycloak SSO session is live. The old-org token must not survive.
+func TestSwitchOrgSilent(t *testing.T) {
+	a := stubAuth(&oauth2.Config{})
+	a.sessions["sid"] = session{username: "alice", activeOrg: "acme", expiresAt: time.Now().Add(time.Hour)}
+
+	req := httptest.NewRequest("GET", "/switch-org?org=globex", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "sid"})
+	rec := httptest.NewRecorder()
+	a.handleSwitchOrg(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	loc, err := url.Parse(rec.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("bad redirect: %v", err)
+	}
+	// It must go to the IdP authorize flow (silent), NOT the interactive /signin.
+	if loc.Path == "/signin" {
+		t.Errorf("switch-org went to interactive /signin; want a silent authorize redirect (%q)", loc)
+	}
+	q := loc.Query()
+	if q.Get("prompt") != "none" {
+		t.Errorf("prompt = %q, want none (silent re-auth)", q.Get("prompt"))
+	}
+	if q.Get("login_hint") != "alice" {
+		t.Errorf("login_hint = %q, want alice (the signed-in user)", q.Get("login_hint"))
+	}
+	if sc := q.Get("scope"); !strings.Contains(sc, "organization:globex") {
+		t.Errorf("scope = %q, want it to contain organization:globex", sc)
+	}
+	if _, ok := a.sessions["sid"]; ok {
+		t.Error("switch-org must delete the old session (its old-org token must not survive)")
+	}
+	// The session cookie must be cleared (MaxAge<0).
+	var cleared bool
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookie && c.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Error("session cookie was not cleared on switch-org")
+	}
+}
+
+// TestSilentSwitchFallback asserts the callback falls back to an INTERACTIVE
+// login for the same org when a silent (prompt=none) switch can't complete —
+// Keycloak redirects back with ?error=login_required and no code. A non-silent
+// flow surfaces the error instead.
+func TestSilentSwitchFallback(t *testing.T) {
+	a := stubAuth(&oauth2.Config{})
+
+	newReq := func(state string) (*http.Request, *httptest.ResponseRecorder) {
+		req := httptest.NewRequest("GET", "/callback?state="+state+"&error=login_required", nil)
+		req.AddCookie(&http.Cookie{Name: stateCookie, Value: state})
+		return req, httptest.NewRecorder()
+	}
+
+	// Silent attempt for globex → interactive retry at /signin?org=globex.
+	a.pending["s1"] = pendingLogin{verifier: "v", createdAt: time.Now(), org: "globex", silent: true}
+	req, rec := newReq("s1")
+	a.handleCallback(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("silent-fallback status = %d, want 302", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/signin?org=globex" {
+		t.Errorf("silent-fallback redirect = %q, want /signin?org=globex", loc)
+	}
+
+	// A non-silent error is a real failure (surfaced, not a redirect loop).
+	a.pending["s2"] = pendingLogin{verifier: "v", createdAt: time.Now(), org: "acme", silent: false}
+	req, rec = newReq("s2")
+	a.handleCallback(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("non-silent error status = %d, want 400", rec.Code)
+	}
+}
+
+// TestTouchSessionSlides pins the sliding-idle-window behaviour: a live session's
+// expiry is pushed forward on each touch (so activity keeps a user signed in),
+// while an expired one is reaped and an absent one reports not-live.
+func TestTouchSessionSlides(t *testing.T) {
+	a := stubAuth(&oauth2.Config{})
+
+	// Live but expiring soon → touch slides it to ~now+sessionTTL and persists it.
+	a.sessions["sid"] = session{username: "alice", expiresAt: time.Now().Add(time.Minute)}
+	s, ok := a.touchSession("sid")
+	if !ok {
+		t.Fatal("live session should be found")
+	}
+	if time.Until(s.expiresAt) < sessionTTL-time.Minute {
+		t.Errorf("touchSession did not slide the window: expiry in %v, want ~%v", time.Until(s.expiresAt), sessionTTL)
+	}
+	if a.sessions["sid"].expiresAt != s.expiresAt {
+		t.Error("slid expiry was not persisted back to the session map")
+	}
+
+	// Past its idle window → not live, and reaped.
+	a.sessions["dead"] = session{username: "bob", expiresAt: time.Now().Add(-time.Minute)}
+	if _, ok := a.touchSession("dead"); ok {
+		t.Error("expired session must report not-live")
+	}
+	if _, present := a.sessions["dead"]; present {
+		t.Error("expired session should be reaped")
+	}
+
+	// Absent.
+	if _, ok := a.touchSession("nope"); ok {
+		t.Error("absent session must report not-live")
+	}
+}
+
+// TestParseOrgClaim covers the fail-closed single-org extraction from an access
+// token's organization claim (the session's activeOrg source).
+func TestParseOrgClaim(t *testing.T) {
+	mk := func(orgJSON string) string {
+		payload := base64.RawURLEncoding.EncodeToString([]byte(`{"organization":` + orgJSON + `}`))
+		return "h." + payload + ".s"
+	}
+	cases := []struct {
+		name string
+		jwt  string
+		want string
+	}{
+		{"single-array", mk(`["acme"]`), "acme"},
+		{"multi-array fails closed", mk(`["acme","globex"]`), ""},
+		{"empty-array", mk(`[]`), ""},
+		{"map of one", mk(`{"acme":{}}`), "acme"},
+		{"string", mk(`"acme"`), "acme"},
+		{"absent", "h." + base64.RawURLEncoding.EncodeToString([]byte(`{}`)) + ".s", ""},
+		{"garbage", "not-a-jwt", ""},
+	}
+	for _, tc := range cases {
+		if got := parseOrgClaim(tc.jwt); got != tc.want {
+			t.Errorf("%s: parseOrgClaim = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }

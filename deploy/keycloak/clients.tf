@@ -35,8 +35,11 @@ resource "keycloak_openid_client" "dashboard" {
   valid_redirect_uris             = ["${var.dashboard_origin}/callback"]
   valid_post_logout_redirect_uris = ["${var.dashboard_origin}/"]
 
-  # offline_access mints a refresh token so the backend keeps its short-lived
-  # orchestrator token fresh for the browser session (Config.cs AllowOfflineAccess).
+  # The backend keeps its short-lived orchestrator token fresh via an ONLINE
+  # refresh token (this flag), bounded by the realm's SSO windows (realm.tf).
+  # NOT offline_access: since Keycloak 26.1 (keycloak/keycloak#32650) an initial
+  # login with offline_access deletes the online SSO session, which broke the
+  # silent (prompt=none) org switch.
   use_refresh_tokens = true
 
   full_scope_allowed = false
@@ -48,15 +51,29 @@ resource "keycloak_openid_client_optional_scopes" "dashboard" {
   realm_id  = keycloak_realm.spawnly.id
   client_id = keycloak_openid_client.dashboard.id
 
+  # The built-in `organization` scope below is provisioned by Keycloak as a SIDE
+  # EFFECT of the realm's organizations_enabled=true (realm.tf). Terraform's graph
+  # only sees resource references, not that side effect, so make the ordering
+  # explicit: attach optional scopes only AFTER the realm (and its organization
+  # scope) exists, or a clean apply can race to "client scope not found". (The
+  # client→realm reference already implies this edge; this states it explicitly.)
+  depends_on = [keycloak_realm.spawnly]
+
   # NOTE: only `profile` is a Keycloak DEFAULT default-client-scope that must
   # NOT be listed here (the provider errors "already attached as a default
-  # scope"). `offline_access` is a default-OPTIONAL scope, so it MUST be listed
-  # among the optional scopes below — `keycloak_openid_client_optional_scopes`
-  # is authoritative and would otherwise DETACH it, killing the refresh token
-  # (dashboard session dies at the realm idle timeout instead of lasting the 8h
-  # session). See finding #3.
+  # scope"). `offline_access` is deliberately NOT attached: the dashboard must
+  # never mint offline tokens — an initial login with offline_access deletes the
+  # online SSO session on Keycloak 26.1+ (keycloak/keycloak#32650), breaking the
+  # silent org switch. Detaching it here makes that a hard guarantee even if a
+  # future login request asks for the scope. The dashboard's refresh token is the
+  # ONLINE one (use_refresh_tokens above), valid for the realm's SSO windows.
   optional_scopes = [
-    "offline_access",
+    # Built-in scope Keycloak provisions when organizations_enabled=true
+    # (realm.tf). Requesting `organization` (or `organization:<alias>` for a
+    # single active org) makes the org membership mapper stamp the `organization`
+    # claim into the token — the source of the single-org token the dashboard
+    # mints. OPTIONAL so today's org-less logins are byte-identical.
+    "organization",
     keycloak_openid_client_scope.roles.name,
     keycloak_openid_client_scope.api["orchestrator:read"].name,
     keycloak_openid_client_scope.api["orchestrator:write"].name,
@@ -114,12 +131,20 @@ resource "keycloak_openid_client_optional_scopes" "mobile" {
   realm_id  = keycloak_realm.spawnly.id
   client_id = keycloak_openid_client.mobile.id
 
+  # See the dashboard optional-scopes note: the built-in `organization` scope is
+  # provisioned by the realm's organizations_enabled flip, so order this attach
+  # after the realm exists to avoid a clean-apply "client scope not found" race.
+  depends_on = [keycloak_realm.spawnly]
+
   # Only `profile` is a default default-scope (do not list it). `offline_access`
   # is a default-OPTIONAL scope and MUST be listed here or this authoritative
   # resource detaches it, killing the mobile long-lived session. See finding #3
   # and the dashboard note above.
   optional_scopes = [
     "offline_access",
+    # Built-in organization scope for parity with the dashboard (see the note on
+    # the dashboard client above). Lets the mobile app mint single-org tokens too.
+    "organization",
     keycloak_openid_client_scope.roles.name,
     keycloak_openid_client_scope.api["orchestrator:read"].name,
     keycloak_openid_client_scope.api["orchestrator:write"].name,
@@ -191,6 +216,61 @@ resource "keycloak_openid_client_optional_scopes" "idp_consent" {
   optional_scopes = [
     keycloak_openid_client_scope.api["registry.consent"].name,
   ]
+}
+
+# ---- org-admin: control-plane org directory client (client-credentials) ----
+# The registry's org onboarding + membership API (multi-tenancy Phase 3) writes
+# Keycloak Organizations/Users through THIS service-account client — the single
+# dual-write choke point over Keycloak + SpiceDB. It is LEAST-PRIVILEGE: its
+# service account is granted exactly two realm-management client roles
+# (manage-users, manage-realm), never the master/realm admin. The secret arrives
+# at runtime from the bootstrap-generated Secret (never baked into an image).
+resource "keycloak_openid_client" "org_admin" {
+  realm_id  = keycloak_realm.spawnly.id
+  client_id = "org-admin"
+  name      = "Spawnly Org Admin"
+
+  access_type                  = "CONFIDENTIAL"
+  service_accounts_enabled     = true
+  standard_flow_enabled        = false
+  implicit_flow_enabled        = false
+  direct_access_grants_enabled = false
+
+  client_secret = var.org_admin_client_secret
+
+  # EXCEPTION to the file-wide full_scope_allowed=false invariant: a
+  # service-account (client-credentials) token only carries the account's
+  # assigned roles when full scope is allowed — with it false, Keycloak filters
+  # the realm-management roles OUT of the token and every admin call 403s
+  # (verified against a live realm). Least privilege is preserved a different way
+  # here: the service account is assigned ONLY manage-users + manage-realm below,
+  # so full scope still admits just those two roles (plus the harmless default
+  # realm roles). This client never lists roles/orchestrator:* among any scope,
+  # so it cannot mint a human/agent-shaped token.
+  full_scope_allowed = true
+}
+
+# The built-in realm-management client, whose roles authorize admin-REST calls.
+data "keycloak_openid_client" "realm_management" {
+  realm_id  = keycloak_realm.spawnly.id
+  client_id = "realm-management"
+}
+
+# manage-users: create users (unknown-member invite), find users, org member
+# add/remove/list. manage-realm: organization CRUD. These two — and only these —
+# are the minimal set that authorizes every org-directory operation.
+resource "keycloak_openid_client_service_account_role" "org_admin_manage_users" {
+  realm_id                = keycloak_realm.spawnly.id
+  service_account_user_id = keycloak_openid_client.org_admin.service_account_user_id
+  client_id               = data.keycloak_openid_client.realm_management.id
+  role                    = "manage-users"
+}
+
+resource "keycloak_openid_client_service_account_role" "org_admin_manage_realm" {
+  realm_id                = keycloak_realm.spawnly.id
+  service_account_user_id = keycloak_openid_client.org_admin.service_account_user_id
+  client_id               = data.keycloak_openid_client.realm_management.id
+  role                    = "manage-realm"
 }
 
 # ===========================================================================
@@ -378,6 +458,12 @@ resource "keycloak_openid_client_default_scopes" "orchestrator" {
 resource "keycloak_openid_client_default_scopes" "idp_consent" {
   realm_id       = keycloak_realm.spawnly.id
   client_id      = keycloak_openid_client.idp_consent.id
+  default_scopes = local.default_scopes_service_account
+}
+
+resource "keycloak_openid_client_default_scopes" "org_admin" {
+  realm_id       = keycloak_realm.spawnly.id
+  client_id      = keycloak_openid_client.org_admin.id
   default_scopes = local.default_scopes_service_account
 }
 

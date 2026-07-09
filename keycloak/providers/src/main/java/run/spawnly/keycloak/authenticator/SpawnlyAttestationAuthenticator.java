@@ -17,6 +17,7 @@ import org.keycloak.sessions.AuthenticationSessionModel;
 import run.spawnly.keycloak.attestor.AgentCredentialVerifier;
 import run.spawnly.keycloak.attestor.AgentIdentity;
 import run.spawnly.keycloak.attestor.AttestorFactory;
+import run.spawnly.keycloak.attestor.OrgAwareVerifier;
 import run.spawnly.keycloak.identity.VerifiedAgent;
 import run.spawnly.keycloak.registry.AgentRecord;
 import run.spawnly.keycloak.registry.AgentRegistryClient;
@@ -73,12 +74,15 @@ public class SpawnlyAttestationAuthenticator extends AbstractClientAuthenticator
     public static final String NOTE_AGENT_ID = "spawnly.agent.id";
     public static final String NOTE_AGENT_ISSUER = "spawnly.agent.issuer";
 
-    // The verifier is selected once from ATTESTOR at factory init and shared
-    // (stateless, thread-safe). AbstractClientAuthenticator uses ONE instance as
-    // both the factory and the authenticator (create() returns this), so the
-    // verifier is a mutable field populated in init(). An unknown ATTESTOR makes
-    // init() throw — a HARD FAIL at server startup, matching Program.cs.
-    private volatile AgentCredentialVerifier verifier;
+    // Per-org verifier resolution (Phase 9): the platform default verifier
+    // (selected once from ATTESTOR) wrapped so an STS credential resolves to the
+    // anchor of the org owning the agent's record — the isolation invariant. A
+    // non-STS (SPIRE) credential is passed straight to the default, so the SPIRE
+    // path is bit-identical. AbstractClientAuthenticator uses ONE instance as both
+    // the factory and the authenticator (create() returns this), so this is a
+    // mutable field populated in init(). An unknown ATTESTOR makes init() throw —
+    // a HARD FAIL at server startup, matching Program.cs.
+    private volatile OrgAwareVerifier verifier;
 
     // The registry client is built once at factory init and shared (its HTTP
     // client + bearer supplier are thread-safe). Used by the Phase 2 liveness
@@ -89,13 +93,19 @@ public class SpawnlyAttestationAuthenticator extends AbstractClientAuthenticator
     public SpawnlyAttestationAuthenticator() {
     }
 
-    /** Test seam: inject a verifier directly, bypassing ATTESTOR selection. */
+    /** Test seam: inject a base verifier directly, bypassing ATTESTOR selection. */
     SpawnlyAttestationAuthenticator(AgentCredentialVerifier verifier) {
-        this.verifier = verifier;
+        this.verifier = new OrgAwareVerifier(verifier, null, "");
     }
 
-    /** Test seam: inject both the verifier and the registry client. */
+    /** Test seam: inject both the base verifier and the registry client. */
     SpawnlyAttestationAuthenticator(AgentCredentialVerifier verifier, AgentRegistryClient registry) {
+        this.verifier = new OrgAwareVerifier(verifier, registry, "");
+        this.registry = registry;
+    }
+
+    /** Test seam: inject a fully-built org-aware verifier (for the STS path). */
+    SpawnlyAttestationAuthenticator(OrgAwareVerifier verifier, AgentRegistryClient registry) {
         this.verifier = verifier;
         this.registry = registry;
     }
@@ -103,9 +113,12 @@ public class SpawnlyAttestationAuthenticator extends AbstractClientAuthenticator
     @Override
     public void init(org.keycloak.Config.Scope config) {
         // Select the attestor once. Unknown value ⇒ IllegalStateException ⇒
-        // startup fails loudly (no silent insecure fallback).
-        this.verifier = AttestorFactory.build(config);
+        // startup fails loudly (no silent insecure fallback). Wrap it in the
+        // org-aware resolver, built with the STS_TRUSTED_ENDPOINT override so the
+        // org-bound STS verifier honours the fake STS in e2e.
         this.registry = new AgentRegistryClient();
+        this.verifier = new OrgAwareVerifier(
+                AttestorFactory.build(config), registry, AttestorFactory.resolveStsTrustedEndpoint(config));
     }
 
     /** True for a client_assertion type one of this platform's attestors uses. */
@@ -143,6 +156,12 @@ public class SpawnlyAttestationAuthenticator extends AbstractClientAuthenticator
         context.getEvent().client(clientId);
         context.setClient(client);
 
+        // Per-org verifier resolution (Phase 9): for an STS credential this binds
+        // the AWS-attested account+ARN to the anchor of the org owning the agent's
+        // record (the isolation invariant); a SPIRE credential goes to the platform
+        // default unchanged. Any failure — bad credential, unknown record, wrong
+        // org, unanchored org, registry outage — returns null, which becomes the
+        // SAME invalid_client below (oracle-free).
         AgentIdentity identity;
         try {
             identity = verifier.verify(assertion);
@@ -201,9 +220,12 @@ public class SpawnlyAttestationAuthenticator extends AbstractClientAuthenticator
         // Thread the registry-confirmed identity to the Phase 2 mappers via the
         // per-request KeycloakSession attribute bag — the RELIABLE channel on the
         // client_credentials grant (see VerifiedAgent for why client notes don't
-        // survive that grant). sub=user:<userId> + act.sub=<spiffe> are derived
-        // from THIS object, so they can never be client-supplied.
-        VerifiedAgent verified = new VerifiedAgent(agent.userId(), identity.subject(), identity.agentId());
+        // survive that grant). sub=user:<userId> + act.sub=<spiffe> + the
+        // organization claim are derived from THIS object, so they can never be
+        // client-supplied. orgId is the REGISTRY record's org (multi-tenancy),
+        // binding the token's org claim to what was recorded at spawn.
+        VerifiedAgent verified = new VerifiedAgent(
+                agent.userId(), identity.subject(), identity.agentId(), agent.orgId());
         context.getSession().setAttribute(VerifiedAgent.SESSION_ATTR, verified);
 
         // Also keep the client notes for callers/paths that DO reuse the auth

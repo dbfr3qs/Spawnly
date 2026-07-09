@@ -5,7 +5,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"os"
+	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
@@ -39,6 +43,32 @@ type AwsSource struct {
 	presign func(ctx context.Context) (presignedRequest, error)
 }
 
+// AwsEndpointURLStsEnv overrides the STS endpoint the presigner targets. It is
+// the standard AWS SDK service-endpoint variable name; honouring it explicitly
+// lets the CLIENT side (the sidecar's presign source, cmd/anchorctl) point a
+// presigned GetCallerIdentity at an in-cluster FAKE STS for e2e, matching the
+// verifier's STS_TRUSTED_ENDPOINT override. Unset in a real deploy, so the
+// presigner uses the ambient/regional AWS STS endpoint as before.
+const AwsEndpointURLStsEnv = "AWS_ENDPOINT_URL_STS"
+
+// awsRoleSessionNameEnv is the standard AWS role-session-name variable. In a
+// real IRSA/AssumeRole deploy the SDK bakes it into the assumed-role identity, so
+// GetCallerIdentity returns an ARN whose session name IS this value (== agentId).
+// The fake STS performs no role assumption, so it cannot learn the session name
+// from the presigned request. See the fakeSessionParam affordance below.
+const awsRoleSessionNameEnv = "AWS_ROLE_SESSION_NAME"
+
+// fakeSessionParam is an E2E-ONLY query parameter the presign source appends when
+// (and ONLY when) AWS_ENDPOINT_URL_STS points the presigner at the in-cluster
+// fake STS. It carries AWS_ROLE_SESSION_NAME so the fake can echo it as the
+// returned ARN's session name — faithfully modelling AWS, where the CALLER
+// chooses the role-session-name (the agentId) while the account+role come from
+// the anchor. It is appended AFTER SigV4 signing, which is why it is gated to
+// fake mode: a real STS would reject the now-unsigned extra param, but the fake
+// ignores SigV4 entirely (see cmd/fake-sts). A real deploy never sets
+// AWS_ENDPOINT_URL_STS, so this param is never emitted.
+const fakeSessionParam = "X-Fake-Session"
+
 // NewAwsSource builds an AwsSource from the ambient AWS configuration. It does
 // not require credentials at construction time — they are resolved lazily on
 // the first Fetch (IRSA-friendly).
@@ -47,16 +77,45 @@ func NewAwsSource(ctx context.Context) (*AwsSource, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load AWS config: %w", err)
 	}
-	presigner := sts.NewPresignClient(sts.NewFromConfig(cfg))
+	var stsOpts []func(*sts.Options)
+	fakeEndpoint := os.Getenv(AwsEndpointURLStsEnv)
+	if fakeEndpoint != "" {
+		// BaseEndpoint routes the presigned request at the configured endpoint
+		// (e.g. the fake STS). The signature still uses real SigV4; the fake
+		// deliberately ignores it (see cmd/fake-sts).
+		stsOpts = append(stsOpts, func(o *sts.Options) { o.BaseEndpoint = aws.String(fakeEndpoint) })
+	}
+	// Only in fake mode (endpoint override set) do we carry the session name as an
+	// out-of-band query param the fake echoes as the ARN session name. Never in a
+	// real deploy.
+	fakeSession := ""
+	if fakeEndpoint != "" {
+		fakeSession = os.Getenv(awsRoleSessionNameEnv)
+	}
+	presigner := sts.NewPresignClient(sts.NewFromConfig(cfg, stsOpts...))
 	return &AwsSource{
 		presign: func(ctx context.Context) (presignedRequest, error) {
 			req, err := presigner.PresignGetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 			if err != nil {
 				return presignedRequest{}, fmt.Errorf("presign GetCallerIdentity: %w", err)
 			}
-			return presignedRequest{Method: req.Method, URL: req.URL, Headers: req.SignedHeader}, nil
+			return presignedRequest{Method: req.Method, URL: appendFakeSession(req.URL, fakeSession), Headers: req.SignedHeader}, nil
 		},
 	}, nil
+}
+
+// appendFakeSession appends the E2E-ONLY X-Fake-Session query param to a presigned
+// URL when session is non-empty (fake mode only — see fakeSessionParam). It is a
+// no-op otherwise, so the real-STS URL is returned byte-for-byte unchanged.
+func appendFakeSession(rawURL, session string) string {
+	if session == "" {
+		return rawURL
+	}
+	sep := "&"
+	if !strings.Contains(rawURL, "?") {
+		sep = "?"
+	}
+	return rawURL + sep + fakeSessionParam + "=" + url.QueryEscape(session)
 }
 
 // Fetch implements Source.

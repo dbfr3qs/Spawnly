@@ -14,6 +14,7 @@ import org.keycloak.representations.AccessToken;
 
 import run.spawnly.keycloak.identity.VerifiedAgent;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -55,8 +56,14 @@ class SpawnlyIdentityMapperTest {
     }
 
     private void verifiedAgentPresent() {
+        // Org-less (global) agent by default: orgId=null ⇒ no organization claim.
         when(session.getAttribute(VerifiedAgent.SESSION_ATTR, VerifiedAgent.class))
-                .thenReturn(new VerifiedAgent("alice", SPIFFE, "agent-abc"));
+                .thenReturn(new VerifiedAgent("alice", SPIFFE, "agent-abc", null));
+    }
+
+    private void verifiedAgentInOrg(String orgId) {
+        when(session.getAttribute(VerifiedAgent.SESSION_ATTR, VerifiedAgent.class))
+                .thenReturn(new VerifiedAgent("alice", SPIFFE, "agent-abc", orgId));
     }
 
     @Test
@@ -108,10 +115,51 @@ class SpawnlyIdentityMapperTest {
 
         mapper.transformAccessToken(token, model, session, userSession, csc);
 
-        // Unchanged: sub NOT overridden, no act, no token_use.
+        // Unchanged: sub NOT overridden, no act, no token_use, no organization.
         assertEquals("some-uuid-sub", token.getSubject());
         assertFalse(token.getOtherClaims().containsKey("act"));
         assertFalse(token.getOtherClaims().containsKey("token_use"));
+        assertFalse(token.getOtherClaims().containsKey("organization"));
+    }
+
+    // ── Organization claim (multi-tenancy) ─────────────────────────────────────
+
+    @Test
+    void orgAgent_stampsOrganizationClaim_arrayShape() {
+        // An org-bound agent's registry orgId is stamped as organization=["acme"]
+        // — the SAME array-of-aliases shape as Keycloak's user tokens, so the Go
+        // tokenvalidator parses agent + user tokens identically.
+        verifiedAgentInOrg("acme");
+        AccessToken token = new AccessToken();
+
+        mapper.transformAccessToken(token, model, session, userSession, csc);
+
+        assertEquals(List.of("acme"), token.getOtherClaims().get("organization"));
+        assertEquals("user:alice", token.getSubject());
+    }
+
+    @Test
+    void orgLessAgent_noOrganizationClaim() {
+        // orgId=null (global agent) ⇒ NO organization claim (org-less unaffected).
+        verifiedAgentPresent();
+        AccessToken token = new AccessToken();
+
+        mapper.transformAccessToken(token, model, session, userSession, csc);
+
+        assertFalse(token.getOtherClaims().containsKey("organization"));
+        // sub/act still shaped as normal.
+        assertEquals("user:alice", token.getSubject());
+    }
+
+    @Test
+    void orgAgent_emptyOrgId_noOrganizationClaim() {
+        // Defensive: an empty-string orgId is treated as org-less (no claim).
+        verifiedAgentInOrg("");
+        AccessToken token = new AccessToken();
+
+        mapper.transformAccessToken(token, model, session, userSession, csc);
+
+        assertFalse(token.getOtherClaims().containsKey("organization"));
     }
 
     @Test
