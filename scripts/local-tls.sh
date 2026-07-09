@@ -116,7 +116,7 @@ IN_DEVCONTAINER() { [ -f /.dockerenv ]; }
 
 # The Host names the e2e satellites need resolvable in a devcontainer (the demo
 # orgs seeded by reseed-orgs.sh, plus the apex).
-HOSTS_NAMES="${APEX} acme.${APEX} globex.${APEX}"
+HOSTS_NAMES="${APEX} acme.${APEX} globex.${APEX} initech.${APEX}"
 
 # ensure_hosts — in a devcontainer, point the apex + demo satellites at 127.0.0.1
 # in /etc/hosts (public *.localtest.me DNS isn't reachable through Docker's

@@ -60,11 +60,16 @@ echo "==> Creating demo organizations..."
 create_org acme   "Acme"   alice
 add_member acme   viewer   member
 create_org globex "Globex" bob
-# carol is a plain member of BOTH orgs — the org-subdomains silent cross-subdomain
-# SSO fixture (e2e case b). Added last so she never perturbs the single-org
-# isolation matrix (which asserts on named users, not member counts).
+# initech — alice's SECOND org (she admins both acme and initech). Lets you see
+# per-org isolation from the admin's own seat: acme.<apex> shows only acme agents,
+# initech.<apex> only initech's, while the org-less Global view shows the agents
+# alice OWNS across every org (record UserID == owner — not a cross-org leak).
+create_org initech "Initech" alice
+# carol is a plain member of BOTH acme and globex — the org-subdomains silent
+# cross-subdomain SSO fixture (e2e case b). Added last so she never perturbs the
+# single-org isolation matrix (which asserts on named users, not member counts).
 add_member acme   carol    member
 add_member globex carol    member
 
 echo ""
-echo "Done. Demo orgs seeded: acme (alice admin, viewer + carol members), globex (bob admin, carol member)."
+echo "Done. Demo orgs seeded: acme (alice admin, viewer + carol members), globex (bob admin, carol member), initech (alice admin)."
