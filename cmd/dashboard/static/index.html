@@ -3230,16 +3230,23 @@
     sel.hidden = false;
     sel.addEventListener('change', () => {
       const v = sel.value;
-      // On a satellite topology, NAVIGATE to the chosen org's subdomain (which then
-      // silently re-auths from its own host); Global (empty v) goes to the apex. The
-      // apex switcher — and single-origin mode (apexDomain === '') — keeps the
-      // in-place /switch-org re-auth unchanged.
-      if (ME.apexDomain && !ME.isApex) {
+      // Org-subdomains topology: each org lives at its OWN subdomain, so picking an
+      // org NAVIGATES to its satellite (which then silently re-auths from its own
+      // host via the shared apex SSO session — no password). This applies from BOTH
+      // the apex picker and a satellite switcher, so the URL always reflects the
+      // active org. "Global" (empty v) is org-less and lives on the apex: from a
+      // satellite navigate to the apex; on the apex do the in-place org-less re-auth.
+      if (ME.apexDomain) {
         const proto = window.location.protocol;
-        window.location = v ? `${proto}//${v}.${ME.apexDomain}/` : `${proto}//${ME.apexDomain}/`;
+        if (v) {
+          window.location = `${proto}//${v}.${ME.apexDomain}/`;
+        } else {
+          window.location = ME.isApex ? '/switch-org' : `${proto}//${ME.apexDomain}/`;
+        }
         return;
       }
-      // A full re-auth into the chosen org (or Global when empty).
+      // Single-origin mode (feature off): a full in-place re-auth into the chosen
+      // org (or Global when empty) — no subdomains, so the origin never changes.
       window.location = v ? `/switch-org?org=${encodeURIComponent(v)}` : '/switch-org';
     });
   }
