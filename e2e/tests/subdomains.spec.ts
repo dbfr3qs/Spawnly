@@ -333,4 +333,35 @@ test.describe('organization subdomains', () => {
       await nomadCtx.close();
     }
   });
+
+  test('(g) picking an org from the apex switcher NAVIGATES to its subdomain (silently)', async ({ browser }) => {
+    // Each org's home is its subdomain, so choosing an org from the header switcher
+    // must take the browser to <slug>.<apex> — from the apex too, not only from a
+    // satellite. alice (realm admin) starts on the apex Global view.
+    const ctx = await browser.newContext();
+    try {
+      const page = await ctx.newPage();
+      await loginAt(page, APEX_ORIGIN, 'alice', 'alice');
+      expect(hostOf(page.url()), 'starts on the apex').toBe(APEX_HOST);
+      const switcher = page.locator('#org-switcher');
+      await expect(switcher, 'the apex Global view offers the org switcher').toBeVisible({ timeout: 30_000 });
+
+      // Selecting acme fires the switcher's navigate-to-subdomain: the browser goes
+      // to the acme satellite and silently re-auths via the shared apex SSO session
+      // (no login form). The URL must end up on the acme subdomain — the regression
+      // this guards is the switch leaving the browser parked on the apex origin.
+      await Promise.all([
+        page.waitForURL(`https://acme.${APEX_HOST}/**`, { timeout: 30_000 }),
+        switcher.selectOption('acme'),
+      ]);
+      await expect(page.locator(LOGIN_USERNAME), 'apex→satellite switch must be password-less').not.toBeVisible();
+      await expect(page.locator('#agent-list')).toBeVisible({ timeout: 30_000 });
+      expect(hostOf(page.url()), 'the switch lands on the org subdomain, not the apex').toBe(`acme.${APEX_HOST}`);
+      await expect
+        .poll(async () => (await apiMe(page, orgOrigin('acme'))).activeOrg, { timeout: 30_000 })
+        .toBe('acme');
+    } finally {
+      await ctx.close();
+    }
+  });
 });
