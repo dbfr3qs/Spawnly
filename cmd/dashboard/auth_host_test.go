@@ -238,4 +238,28 @@ func TestSelfHealDecisionMatrix(t *testing.T) {
 			t.Fatal("the apex must never self-heal")
 		}
 	})
+
+	// Realm-admin exemption (tenant-visibility Phase 3): a master admin on a
+	// satellite is a legitimate VIEW-AS-ORG — the host SELECTS the tenant, the
+	// realm-admin role AUTHORIZES it. selfHeal must NOT redirect (no re-auth loop);
+	// it sets the session's viewingOrg to the host org IN PLACE and falls through,
+	// clearing any heal guard.
+	t.Run("realm admin on satellite views host org in place", func(t *testing.T) {
+		a := satAuth("localtest.me")
+		a.sessions["sid"] = session{username: "root", isAdmin: true, expiresAt: time.Now().Add(time.Hour)}
+		rec := httptest.NewRecorder()
+		// A stale guard is present to prove the exemption clears it.
+		req := pageReq("/", "acme.localtest.me", "acme")
+		if a.selfHeal(rec, req) {
+			t.Fatal("a realm admin on a satellite must NOT self-heal (view-as-org, not a mismatch)")
+		}
+		if a.sessions["sid"].viewingOrg != "acme" {
+			t.Errorf("selfHeal must set the admin session's viewingOrg to the host org, got %q", a.sessions["sid"].viewingOrg)
+		}
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == orgHealCookie && c.MaxAge >= 0 {
+				t.Error("the heal guard must be cleared on the admin exemption")
+			}
+		}
+	})
 }

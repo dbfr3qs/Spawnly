@@ -54,41 +54,45 @@ export async function expectLoginForm(page: Page): Promise<void> {
   await expect(page.locator(LOGIN_USERNAME)).toBeVisible({ timeout: 30_000 });
 }
 
-// reachDashboardShell waits for the dashboard shell (#agent-list) after the OIDC
-// redirect chain settles, transparently clicking through the org-less realm-admin
-// landing. A realm admin who belongs to NO org (i.e. `root`) lands on the
-// "no organization" gate — which, for an admin, carries a "Continue to Global
-// (no organization)" escape — instead of straight on the shell. Click it so the
-// master admin reaches the org-less Global dashboard. For every org-scoped user
-// the escape button never appears (it ships hidden and is only un-hidden for an
-// org-less admin), so this is a no-op on their normal landing.
-// (Phase 3 of tenant-visibility replaces this Global landing with a dedicated
-// org-directory view; this helper is the Phase-1-appropriate hook.)
+// reachDashboardShell waits for the dashboard shell after the OIDC redirect chain
+// settles. The settled shell is EITHER the scoped agent list (#agent-list, an org
+// or entered-tenant view) OR the master-admin Global org directory
+// ([data-testid="org-directory"], the org-less realm admin's platform landing —
+// tenant-visibility Phase 3). A realm admin who belongs to NO org (i.e. `root`)
+// lands directly on the directory when orgs exist; on a fresh deploy that seeded
+// NONE, they instead hit the "no organization" gate whose "Continue to Global"
+// escape leads to the same directory — click it when present. For every org-scoped
+// user the escape never appears (ships hidden) and the directory never renders, so
+// they simply settle on #agent-list.
 //
-// NOTE: the Global escape is a per-page-load client action — it sets no cookie,
-// so a fresh navigation to '/' re-shows the gate. login()/loginAt() call this on
-// their landing; a test that navigates root to '/' again must call it too (see
-// the `root` cases in orgs.spec.ts / admin-agent-types.spec.ts).
+// NOTE: the Global escape is a per-page-load client action — it sets no cookie, so
+// a fresh navigation to '/' re-shows the gate. login()/loginAt() call this on their
+// landing; a test that navigates root to '/' again must call it too.
 export async function reachDashboardShell(page: Page): Promise<void> {
   const gate = page.locator('#org-gate');
   const escape = page.locator('[data-testid="noorg-continue-global"]');
   const indicator = page.locator('[data-testid="active-org"]');
   const list = page.locator('#agent-list');
-  // #agent-list sits BEHIND the org-gate overlay and is "visible" to Playwright
-  // even while the gate covers it, so waiting on it alone races the /api/me
-  // routing. Poll until the org UX has actually SETTLED into one of its terminal
-  // states: the active-org indicator is shown (an org or Global session) OR the
-  // org-less realm-admin "no organization" gate has surfaced its Global escape.
+  const directory = page.locator('[data-testid="org-directory"]');
+  // Poll until the org UX has SETTLED into a terminal state: the active-org
+  // indicator is shown (an org, an entered tenant, or the Global landing), the org
+  // directory rendered, or the org-less-admin gate surfaced its Global escape.
   await expect(async () => {
-    const settled = (await indicator.isVisible()) || (await escape.isVisible());
-    expect(settled, 'org UX did not settle (no active-org indicator or Global escape)').toBe(true);
+    const settled =
+      (await indicator.isVisible()) || (await directory.isVisible()) || (await escape.isVisible());
+    expect(settled, 'org UX did not settle (no indicator, directory, or Global escape)').toBe(true);
   }).toPass({ timeout: 30_000 });
   if (await escape.isVisible()) {
     await escape.click();
     // Wait for the overlay to fully dismiss so it can't intercept later clicks.
     await expect(gate).toBeHidden({ timeout: 30_000 });
   }
-  await expect(list).toBeVisible({ timeout: 30_000 });
+  // Accept EITHER shell. (#agent-list is hidden in the Global directory view, so
+  // poll visibility of either rather than a strict single-element assertion.)
+  await expect(async () => {
+    const shellUp = (await list.isVisible()) || (await directory.isVisible());
+    expect(shellUp, 'neither the agent list nor the org directory is visible').toBe(true);
+  }).toPass({ timeout: 30_000 });
 }
 
 // Drive the real OIDC login UI: navigating to the dashboard while logged out
@@ -123,16 +127,19 @@ export async function login(
   // SSO session dictates the user — assert it's the one the caller asked for,
   // so a wrong-user silent login fails loudly instead of polluting the test.
   const uname = page.locator(LOGIN_USERNAME);
-  const list = page.locator('#agent-list');
-  await expect(uname.or(list).first()).toBeVisible({ timeout: 30_000 });
-  if (await list.isVisible()) {
+  // The active-org indicator is shown on EVERY settled dashboard landing (an org,
+  // an entered tenant, or the master-admin Global directory) and never on the
+  // Keycloak form, so it — not #agent-list, which is hidden in the Global view — is
+  // the reliable "logged in silently" signal across personas.
+  const indicator = page.locator('[data-testid="active-org"]');
+  await expect(uname.or(indicator).first()).toBeVisible({ timeout: 30_000 });
+  if (await indicator.isVisible()) {
     await expect(
       page.locator('#current-user'),
       `silent SSO login landed as the wrong user (wanted ${user}) — use a fresh context to log in as someone else`,
     ).toHaveText(user, { timeout: 10_000 });
-    // #agent-list is 'visible' to Playwright even behind the org-gate overlay, so a
-    // silent completion can land on the org-less admin gate — settle it (click the
-    // Global escape when present) before returning so the shell is actually usable.
+    // Settle the shell (org list or Global directory; click the Global escape if a
+    // no-orgs deploy surfaced it) before returning so it is actually usable.
     await reachDashboardShell(page);
     return;
   }
@@ -181,16 +188,16 @@ export async function loginAt(
   // Either the (apex-origin) Keycloak login form, or a silent landing on the
   // satellite shell (a live apex SSO cookie completes the flow with no prompt).
   const uname = page.locator(LOGIN_USERNAME);
-  const list = page.locator('#agent-list');
-  await expect(uname.or(list).first()).toBeVisible({ timeout: 30_000 });
-  if (await list.isVisible()) {
+  // The active-org indicator marks a settled dashboard landing (org, entered
+  // tenant, or master-admin Global directory) and never the Keycloak form.
+  const indicator = page.locator('[data-testid="active-org"]');
+  await expect(uname.or(indicator).first()).toBeVisible({ timeout: 30_000 });
+  if (await indicator.isVisible()) {
     await expect(
       page.locator('#current-user'),
       `silent SSO login landed as the wrong user (wanted ${user}) — use a fresh context to log in as someone else`,
     ).toHaveText(user, { timeout: 10_000 });
-    // #agent-list is 'visible' to Playwright even behind the org-gate overlay, so a
-    // silent completion can land on the org-less admin gate — settle it (click the
-    // Global escape when present) before returning so the shell is actually usable.
+    // Settle the shell (org list or Global directory) before returning.
     await reachDashboardShell(page);
     return;
   }

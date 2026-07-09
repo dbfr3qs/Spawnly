@@ -122,9 +122,12 @@ test.describe('admin agent-types UI', () => {
     // 9. Gone from the admin table.
     await expect(row).toHaveCount(0, { timeout: 15_000 });
 
-    // Restore the main agent list when leaving the admin view.
+    // Leaving the admin view restores the primary body. root is an org-less realm
+    // admin, so its primary body is the master-admin Global org DIRECTORY
+    // (tenant-visibility Phase 3) — NOT the agents <main>, which stays hidden on the
+    // Global landing (root has no agent list).
     await page.locator('#agent-types-back-btn').click();
-    await expect(page.locator('main')).toBeVisible();
+    await expect(page.locator('[data-testid="org-directory"]')).toBeVisible();
     await expect(page.locator('#agent-types-view')).toBeHidden();
     } finally {
       await ctx.close();

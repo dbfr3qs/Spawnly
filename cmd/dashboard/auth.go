@@ -73,6 +73,15 @@ type session struct {
 	// so the token names exactly one org (see handleLogin). The org picker / no-org
 	// screen (static UI) and /switch-org drive changes to it.
 	activeOrg string
+	// viewingOrg is the master-admin VIEW-AS-ORG selection (tenant-visibility
+	// Phase 3): the tenant a REALM-ADMIN session is currently viewing. It is a pure
+	// UI/session selection — the master admin's token is org-less (they are a member
+	// of nothing, so a re-auth could never mint an org claim), and the orchestrator
+	// honors a client-supplied org EXCLUSIVELY for a realm-admin token. Only ever set
+	// for an admin session (handleSwitchOrg / selfHeal); "" = the Global directory.
+	// For a non-admin session it stays "" and is never read (activeOrg() returns the
+	// token claim). The switcher/subdomain SELECTS it; the realm-admin role AUTHORIZES.
+	viewingOrg string
 	// tokenSrc yields the delegated OAuth access token the dashboard presents to
 	// the orchestrator (audienced for "orchestrator", sub=userId, scope
 	// orchestrator:read/write). It is a ReuseTokenSource: it caches the current
@@ -327,12 +336,32 @@ func (a *Authenticator) handleSwitchOrg(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "auth unavailable: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	// Capture the signed-in user BEFORE dropping the session, to hint the silent
-	// re-auth toward that same user.
+	org := ""
+	if o := r.URL.Query().Get("org"); o != "" && validOrgAlias.MatchString(o) {
+		org = o
+	}
+
+	// Realm-admin VIEW-AS-ORG (tenant-visibility Phase 3): a master admin's token is
+	// org-less (they are a member of nothing — a re-auth could never mint an org
+	// claim), so switching org for them is a pure SESSION selection done IN PLACE,
+	// with NO session drop and NO OIDC round-trip. Set viewingOrg to the validated
+	// org (empty ⇒ back to the Global directory) and redirect home. The orchestrator
+	// honors this viewing org for the realm-admin token only; a non-admin never
+	// reaches this branch and keeps the silent re-auth-per-org path below.
 	var hint string
 	if sid, err := r.Cookie(sessionCookie); err == nil && sid.Value != "" {
 		a.mu.Lock()
-		if s, ok := a.sessions[sid.Value]; ok {
+		s, ok := a.sessions[sid.Value]
+		if ok && s.isAdmin {
+			s.viewingOrg = org
+			a.sessions[sid.Value] = s
+			a.mu.Unlock()
+			http.Redirect(w, r, "/", http.StatusFound)
+			return
+		}
+		// Non-admin: capture the signed-in user BEFORE dropping the session, to hint
+		// the silent re-auth toward that same user.
+		if ok {
 			hint = s.username
 		}
 		delete(a.sessions, sid.Value)
@@ -340,10 +369,6 @@ func (a *Authenticator) handleSwitchOrg(w http.ResponseWriter, r *http.Request) 
 	}
 	clearCookie(w, sessionCookie, forwardedHTTPS(r))
 
-	org := ""
-	if o := r.URL.Query().Get("org"); o != "" && validOrgAlias.MatchString(o) {
-		org = o
-	}
 	a.startAuth(w, r, org, true, hint)
 }
 
@@ -612,6 +637,17 @@ func (a *Authenticator) selfHeal(w http.ResponseWriter, r *http.Request) bool {
 	if isApex || hostOrg == "" {
 		return false // apex or feature off — nothing to reconcile
 	}
+	// Realm-admin exemption (tenant-visibility Phase 3): a master admin on
+	// <tenant>.spawnly.run is a legitimate VIEW-AS-ORG, not a mismatch to heal via a
+	// re-auth (which could never mint an org claim for an org-less master admin).
+	// The host SELECTS the tenant; the realm-admin role AUTHORIZES it. Record the
+	// host org as the session's viewingOrg IN PLACE and fall through so the scoped
+	// dashboard renders — with activeOrg() now reporting viewingOrg, the consistency
+	// check below converges and no heal loop starts.
+	if a.setAdminViewingOrg(r, hostOrg) {
+		clearCookie(w, orgHealCookie, forwardedHTTPS(r))
+		return false
+	}
 	if a.activeOrg(r) == hostOrg {
 		// Consistent: clear any stale guard from a just-completed heal and proceed.
 		clearCookie(w, orgHealCookie, forwardedHTTPS(r))
@@ -801,7 +837,39 @@ func (a *Authenticator) activeOrg(r *http.Request) string {
 	if !ok {
 		return ""
 	}
+	// For a REALM-ADMIN session the org is a UI/session SELECTION (viewingOrg, the
+	// master-admin view-as-org), not a token claim — their token is org-less. For
+	// everyone else it is the token's organization claim (activeOrg). This is why
+	// /api/me, the header indicator, the /api/agents ?org= pass-through, and the
+	// /api/org/* self-service twins all follow the viewing org for a master admin.
+	if s.isAdmin {
+		return s.viewingOrg
+	}
 	return s.activeOrg
+}
+
+// setAdminViewingOrg records org as the REALM-ADMIN session's view-as-org selection
+// (tenant-visibility Phase 3) and reports whether the request belongs to an admin
+// session. It is the selfHeal exemption's writer: a master admin landing on
+// <tenant>.spawnly.run has the host org set as their viewingOrg in place (no
+// re-auth), so the scoped dashboard renders. It is a NO-OP returning false for a
+// non-admin or absent session — the host↔claim heal loop then proceeds unchanged.
+func (a *Authenticator) setAdminViewingOrg(r *http.Request, org string) bool {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s, ok := a.sessions[c.Value]
+	if !ok || time.Now().After(s.expiresAt) || !s.isAdmin {
+		return false
+	}
+	if s.viewingOrg != org {
+		s.viewingOrg = org
+		a.sessions[c.Value] = s
+	}
+	return true
 }
 
 func (a *Authenticator) gcPendingLocked() {

@@ -499,24 +499,35 @@ func meSession(s session) session {
 	return s
 }
 
-// TestApiMeComposesOrgs drives the composed GET /api/me: it merges the session
-// identity (user/isAdmin/activeOrg) with the orchestrator's /v1/my/orgs
-// (orgs/isOrgAdmin), and degrades to orgsUnavailable when the orchestrator errs.
+// TestApiMeComposesOrgs drives the composed GET /api/me for BOTH personas
+// (tenant-visibility Phase 3):
+//   - a NON-admin sources orgs from /v1/my/orgs and reports the token-claim
+//     activeOrg + its isOrgAdmin (unchanged);
+//   - a REALM ADMIN sources ALL orgs from /v1/admin/orgs (root belongs to none),
+//     reports activeOrg = the session viewingOrg, and isOrgAdmin true once a tenant
+//     is entered (viewingOrg set), false on the org-less Global landing.
 func TestApiMeComposesOrgs(t *testing.T) {
-	// Orchestrator stub: /v1/my/orgs echoes the caller's active org from the token —
-	// but the test controls the response per session via a switch on the bearer.
+	// Orchestrator stub: /v1/my/orgs for the member, /v1/admin/orgs (all orgs) for
+	// the realm admin. Each is answered independently so the two personas diverge.
 	orch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/my/orgs" {
-			http.NotFound(w, r)
-			return
-		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"orgs":[{"orgId":"acme","name":"Acme"}],"activeOrg":"acme","isOrgAdmin":true}`))
+		switch r.URL.Path {
+		case "/v1/my/orgs":
+			w.Write([]byte(`{"orgs":[{"orgId":"acme","name":"Acme"}],"activeOrg":"acme","isOrgAdmin":true}`))
+		case "/v1/admin/orgs":
+			w.Write([]byte(`[{"orgId":"acme","name":"Acme"},{"orgId":"globex","name":"Globex"}]`))
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer orch.Close()
 
 	a := stubAuth(&oauth2.Config{Endpoint: oauth2.Endpoint{TokenURL: "http://refresh.invalid/token"}})
-	a.sessions["admin-sid"] = meSession(session{username: "alice", isAdmin: true, activeOrg: "acme"})
+	// Admin viewing acme (viewingOrg set): activeOrg=acme, isOrgAdmin=true, all orgs.
+	a.sessions["admin-sid"] = meSession(session{username: "root", isAdmin: true, viewingOrg: "acme"})
+	// Admin on the org-less Global landing (no viewingOrg): activeOrg="", isOrgAdmin
+	// false, but STILL the full org directory.
+	a.sessions["global-sid"] = meSession(session{username: "root", isAdmin: true})
 	a.sessions["viewer-sid"] = meSession(session{username: "viewer", isAdmin: false, activeOrg: "acme"})
 	mux := buildMux(a, orch.URL, "http://keycloak:8080", "http://docs", fstest.MapFS{})
 
@@ -536,26 +547,44 @@ func TestApiMeComposesOrgs(t *testing.T) {
 	}
 
 	admin := get("admin-sid")
-	if admin["user"] != "alice" || admin["isAdmin"] != true {
+	if admin["user"] != "root" || admin["isAdmin"] != true {
 		t.Errorf("admin identity wrong: %v", admin)
 	}
 	if admin["activeOrg"] != "acme" {
-		t.Errorf("activeOrg = %v, want acme", admin["activeOrg"])
+		t.Errorf("activeOrg = %v, want acme (the viewingOrg)", admin["activeOrg"])
 	}
 	if admin["isOrgAdmin"] != true {
-		t.Errorf("isOrgAdmin = %v, want true", admin["isOrgAdmin"])
+		t.Errorf("isOrgAdmin = %v, want true (admin viewing a tenant)", admin["isOrgAdmin"])
 	}
 	orgs, _ := admin["orgs"].([]any)
-	if len(orgs) != 1 {
-		t.Errorf("orgs = %v, want one org", admin["orgs"])
+	if len(orgs) != 2 {
+		t.Errorf("admin orgs = %v, want ALL orgs (2 from /v1/admin/orgs)", admin["orgs"])
 	}
 	if _, bad := admin["orgsUnavailable"]; bad {
 		t.Error("orgsUnavailable should be absent when the orchestrator answers")
 	}
 
+	// Org-less Global landing: full directory, but no active org and not an org admin.
+	global := get("global-sid")
+	if global["activeOrg"] != "" {
+		t.Errorf("global activeOrg = %v, want empty (Global landing)", global["activeOrg"])
+	}
+	if global["isOrgAdmin"] != false {
+		t.Errorf("global isOrgAdmin = %v, want false (no tenant entered)", global["isOrgAdmin"])
+	}
+	if gorgs, _ := global["orgs"].([]any); len(gorgs) != 2 {
+		t.Errorf("global orgs = %v, want the full directory (2)", global["orgs"])
+	}
+
 	viewer := get("viewer-sid")
 	if viewer["user"] != "viewer" || viewer["isAdmin"] != false {
 		t.Errorf("viewer identity wrong: %v", viewer)
+	}
+	if viewer["activeOrg"] != "acme" || viewer["isOrgAdmin"] != true {
+		t.Errorf("viewer org fields wrong: %v", viewer)
+	}
+	if vorgs, _ := viewer["orgs"].([]any); len(vorgs) != 1 {
+		t.Errorf("viewer orgs = %v, want its own one org (from /v1/my/orgs)", viewer["orgs"])
 	}
 }
 
@@ -670,6 +699,118 @@ func TestSwitchOrgSilent(t *testing.T) {
 	}
 	if !cleared {
 		t.Error("session cookie was not cleared on switch-org")
+	}
+}
+
+// TestSwitchOrgAdminInPlace asserts the master-admin view-as-org switch
+// (tenant-visibility Phase 3): for a REALM-ADMIN session /switch-org sets the
+// session's viewingOrg IN PLACE — no session drop, no OIDC round-trip, no cleared
+// cookie — and redirects home. An empty ?org= returns to the Global directory.
+func TestSwitchOrgAdminInPlace(t *testing.T) {
+	a := stubAuth(&oauth2.Config{})
+	a.sessions["sid"] = session{username: "root", isAdmin: true, expiresAt: time.Now().Add(time.Hour)}
+
+	do := func(target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", target, nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "sid"})
+		rec := httptest.NewRecorder()
+		a.handleSwitchOrg(rec, req)
+		return rec
+	}
+
+	rec := do("/switch-org?org=globex")
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/" {
+		t.Fatalf("admin switch: got %d loc=%q, want 302 → /", rec.Code, rec.Header().Get("Location"))
+	}
+	s, ok := a.sessions["sid"]
+	if !ok {
+		t.Fatal("admin switch must NOT drop the session (the org-less token stays live)")
+	}
+	if s.viewingOrg != "globex" {
+		t.Errorf("viewingOrg = %q, want globex (set in place)", s.viewingOrg)
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookie && c.MaxAge < 0 {
+			t.Error("admin switch must NOT clear the session cookie")
+		}
+	}
+
+	// Empty ?org= returns to the Global directory (viewingOrg cleared).
+	do("/switch-org")
+	if a.sessions["sid"].viewingOrg != "" {
+		t.Errorf("empty org must clear viewingOrg (back to Global), got %q", a.sessions["sid"].viewingOrg)
+	}
+
+	// A validated invalid alias is dropped (treated as Global), never spliced.
+	do("/switch-org?org=Bad%20Org")
+	if a.sessions["sid"].viewingOrg != "" {
+		t.Errorf("invalid alias must be dropped, got %q", a.sessions["sid"].viewingOrg)
+	}
+}
+
+// TestActiveOrgViewingOrgForAdmin: activeOrg() returns the session's viewingOrg for
+// a realm-admin session (their token is org-less) and the token-claim activeOrg for
+// everyone else.
+func TestActiveOrgViewingOrgForAdmin(t *testing.T) {
+	a := stubAuth(&oauth2.Config{})
+	a.sessions["admin"] = session{username: "root", isAdmin: true, activeOrg: "", viewingOrg: "acme", expiresAt: time.Now().Add(time.Hour)}
+	a.sessions["member"] = session{username: "viewer", isAdmin: false, activeOrg: "acme", viewingOrg: "ignored", expiresAt: time.Now().Add(time.Hour)}
+
+	req := func(sid string) *http.Request {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.AddCookie(&http.Cookie{Name: sessionCookie, Value: sid})
+		return r
+	}
+	if got := a.activeOrg(req("admin")); got != "acme" {
+		t.Errorf("admin activeOrg = %q, want the viewingOrg acme", got)
+	}
+	if got := a.activeOrg(req("member")); got != "acme" {
+		t.Errorf("member activeOrg = %q, want the token-claim acme (viewingOrg ignored)", got)
+	}
+}
+
+// TestApiAgentsAppendsViewingOrg proves the /api/agents proxy appends
+// ?org=<viewingOrg> for a realm-admin session with a viewing org (SERVER-derived
+// from the session), and appends NOTHING for a member or an org-less admin.
+func TestApiAgentsAppendsViewingOrg(t *testing.T) {
+	var sawQuery string
+	orch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/agents" {
+			sawQuery = r.URL.RawQuery
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`[]`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer orch.Close()
+
+	a := stubAuth(&oauth2.Config{Endpoint: oauth2.Endpoint{TokenURL: "http://refresh.invalid/token"}})
+	a.sessions["admin"] = meSession(session{username: "root", isAdmin: true, viewingOrg: "acme"})
+	a.sessions["global"] = meSession(session{username: "root", isAdmin: true})
+	a.sessions["member"] = meSession(session{username: "viewer", isAdmin: false, activeOrg: "acme"})
+	mux := buildMux(a, orch.URL, "http://keycloak:8080", "http://docs", fstest.MapFS{})
+
+	query := func(sid string) string {
+		sawQuery = ""
+		req := httptest.NewRequest("GET", "/api/agents", nil)
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: sid})
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: status %d", sid, rec.Code)
+		}
+		return sawQuery
+	}
+
+	if q := query("admin"); q != "org=acme" {
+		t.Errorf("admin-viewing-acme query = %q, want org=acme", q)
+	}
+	if q := query("global"); q != "" {
+		t.Errorf("org-less admin must append no org, got %q", q)
+	}
+	if q := query("member"); q != "" {
+		t.Errorf("member must append no org (server never forwards a non-admin org), got %q", q)
 	}
 }
 

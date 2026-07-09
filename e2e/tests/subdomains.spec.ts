@@ -348,37 +348,40 @@ test.describe('organization subdomains', () => {
     }
   });
 
-  // FIXME(tenant-visibility Phase 3): this asserts the master admin's APEX Global
-  // switcher lists other orgs to jump into. In Phase 1 the ONLY realm admin is
-  // root, who is a member of NO org, so its Phase-1 switcher offers just "Global"
-  // (renderOrgSwitcher only lists the user's member orgs + Global) and stays
-  // hidden — there is no `acme` option to select. Phase 3 makes the realm-admin
-  // switcher enumerate ALL orgs (directory data); this case goes green then. alice
-  // no longer fits (she is not a realm admin and lands on the org picker, not a
-  // Global view with a header switcher).
-  test.fixme('(g) picking an org from the apex switcher NAVIGATES to its subdomain (silently)', async ({ browser }) => {
-    // Each org's home is its subdomain, so choosing an org from the header switcher
-    // must take the browser to <slug>.<apex> — from the apex too, not only from a
-    // satellite. root (realm admin) starts on the apex Global view.
+  // (g) The master admin's APEX Global switcher lists ALL orgs (directory data,
+  // tenant-visibility Phase 3), so root can pick a tenant. The IN-APP switcher path
+  // (single-origin /switch-org in-place → viewingOrg) works and is covered by the
+  // default-suite root drill-in tests. The SUBDOMAIN path here is DEFERRED:
+  // navigating root to <slug>.<apex> starts a fresh OIDC login that requests
+  // `organization=<slug>`, which Keycloak DENIES for a non-member (root belongs to
+  // no org) at the IdP — the exact non-member deny org-subdomains established (case
+  // c). The selfHeal view-as-org exemption only applies once root has a satellite
+  // session, which it can't obtain via the org-scoped login. Reconciling the
+  // master-admin subdomain entry with the org `organization`-param non-member deny
+  // (e.g. an org-less-then-view-as-org satellite login for a realm admin) is its own
+  // design pass — tracked as a follow-up. The in-app switcher covers the criterion.
+  test.fixme('(g) picking an org from the apex switcher NAVIGATES to its subdomain and views that tenant', async ({ browser }) => {
     const ctx = await browser.newContext();
     try {
       const page = await ctx.newPage();
       await loginAt(page, APEX_ORIGIN, 'root', 'root');
       expect(hostOf(page.url()), 'starts on the apex').toBe(APEX_HOST);
       const switcher = page.locator('#org-switcher');
-      await expect(switcher, 'the apex Global view offers the org switcher').toBeVisible({ timeout: 30_000 });
+      await expect(switcher, 'the apex Global switcher lists all orgs for a realm admin').toBeVisible({ timeout: 30_000 });
+      // The switcher enumerates ALL tenants (not just member orgs) plus Global.
+      await expect(switcher.locator('option[value="acme"]')).toHaveCount(1);
+      await expect(switcher.locator('option[value="globex"]')).toHaveCount(1);
 
-      // Selecting acme fires the switcher's navigate-to-subdomain: the browser goes
-      // to the acme satellite and silently re-auths via the shared apex SSO session
-      // (no login form). The URL must end up on the acme subdomain — the regression
-      // this guards is the switch leaving the browser parked on the apex origin.
+      // Selecting acme navigates to the acme satellite; the browser must END UP on the
+      // acme subdomain (the regression this guards is the switch parking on the apex).
       await Promise.all([
         page.waitForURL(`https://acme.${APEX_HOST}/**`, { timeout: 30_000 }),
         switcher.selectOption('acme'),
       ]);
-      await expect(page.locator(LOGIN_USERNAME), 'apex→satellite switch must be password-less').not.toBeVisible();
+      await expect(page.locator(LOGIN_USERNAME), 'apex→satellite entry must be password-less').not.toBeVisible();
       await expect(page.locator('#agent-list')).toBeVisible({ timeout: 30_000 });
-      expect(hostOf(page.url()), 'the switch lands on the org subdomain, not the apex').toBe(`acme.${APEX_HOST}`);
+      expect(hostOf(page.url()), 'lands on the org subdomain, not the apex').toBe(`acme.${APEX_HOST}`);
+      // The selfHeal exemption put root into acme's view-as-org (activeOrg = acme).
       await expect
         .poll(async () => (await apiMe(page, orgOrigin('acme'))).activeOrg, { timeout: 30_000 })
         .toBe('acme');
