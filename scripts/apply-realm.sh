@@ -50,6 +50,7 @@ echo "==> Applying Keycloak realm via Terraform..."
   export TF_VAR_alice_password="alice"
   export TF_VAR_viewer_password="viewer"
   export TF_VAR_bob_password="bob"
+  export TF_VAR_carol_password="carol"
   export TF_VAR_nomad_password="nomad"
 
   terraform -chdir="$KC_TF_DIR" init -input=false >/dev/null

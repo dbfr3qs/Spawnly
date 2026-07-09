@@ -60,6 +60,11 @@ echo "==> Creating demo organizations..."
 create_org acme   "Acme"   alice
 add_member acme   viewer   member
 create_org globex "Globex" bob
+# carol is a plain member of BOTH orgs — the org-subdomains silent cross-subdomain
+# SSO fixture (e2e case b). Added last so she never perturbs the single-org
+# isolation matrix (which asserts on named users, not member counts).
+add_member acme   carol    member
+add_member globex carol    member
 
 echo ""
-echo "Done. Demo orgs seeded: acme (alice admin, viewer member), globex (bob admin)."
+echo "Done. Demo orgs seeded: acme (alice admin, viewer + carol members), globex (bob admin, carol member)."

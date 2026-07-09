@@ -93,6 +93,33 @@ resource "keycloak_user" "bob" {
   # tuple written by the onboarding API, not the realm `admin` role.
 }
 
+# ---- carol: non-admin user, member of TWO orgs (acme + globex) -------------
+# Exercises silent cross-subdomain SSO (org-subdomains e2e case b): carol is a
+# plain member of BOTH acme and globex (SpiceDB tuples via reseed-orgs.sh, NOT a
+# realm role), so logging in at one org's subdomain and visiting the other's must
+# complete silently (prompt=none on the shared apex SSO session). She is added to
+# both orgs AFTER their admins/members are seeded, so she does not perturb the
+# single-org isolation matrix (orgs.spec.ts / membership.spec.ts assert on the
+# users they name, never a member count). Same fail-closed count pattern.
+resource "keycloak_user" "carol" {
+  count = var.carol_password != "" ? 1 : 0
+
+  realm_id = keycloak_realm.spawnly.id
+  username = "carol"
+  enabled  = true
+
+  email          = "carol@example.com"
+  email_verified = true
+  first_name     = "Carol"
+  last_name      = "Crossorg"
+
+  initial_password {
+    value     = var.carol_password
+    temporary = false
+  }
+  # No realm admin role — carol is an ordinary member of two orgs (SpiceDB tuples).
+}
+
 # ---- nomad: non-admin user in NO organization ------------------------------
 # Deliberately never added to any org (reseed-orgs.sh does not touch nomad), so a
 # fresh login lands on the dashboard's "no organization" screen — the Phase-5 e2e

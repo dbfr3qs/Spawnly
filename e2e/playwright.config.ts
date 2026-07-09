@@ -42,6 +42,10 @@ export default defineConfig({
       // headless is Playwright's default, but pin it so a stray HEADED/PWDEBUG
       // env or future edit can't pop a visible window during a run.
       name: 'chromium',
+      // The org-subdomains suite (subdomains.spec.ts) is a SEPARATE project below,
+      // run only against the local TLS mimic (make e2e-subdomains). Exclude it here
+      // so the default `make e2e` (localhost:8090 mode) never picks it up.
+      testIgnore: /subdomains\.spec\.ts/,
       use: {
         ...devices['Desktop Chrome'],
         headless: true,
@@ -49,6 +53,28 @@ export default defineConfig({
       },
       dependencies: ['setup'],
     },
+    // org-subdomains (Phase 4): proves the six subdomain e2e cases over the Phase-3
+    // local TLS mimic (make tls-mimic → https://<slug>.localtest.me). GATED behind
+    // SUBDOMAIN_E2E=1 so it only runs via `make e2e-subdomains`; a plain
+    // `npx playwright test` (or `make e2e`) skips it entirely (empty project). It
+    // does NOT depend on `setup` and carries NO cached storageState — cross-origin,
+    // per-satellite session cookies are the subject under test, so every test
+    // builds its own fresh context. Single worker like the rest (config-wide
+    // fullyParallel:false / workers:1).
+    ...(process.env.SUBDOMAIN_E2E === '1'
+      ? [
+          {
+            name: 'subdomains' as const,
+            testMatch: /subdomains\.spec\.ts/,
+            use: {
+              ...devices['Desktop Chrome'],
+              headless: true,
+              baseURL: 'https://localtest.me',
+              ignoreHTTPSErrors: true,
+            },
+          },
+        ]
+      : []),
   ],
   webServer: {
     command: 'bash ../scripts/e2e.sh portforward',

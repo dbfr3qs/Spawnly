@@ -102,6 +102,13 @@ variable "bob_password" {
   default     = ""
 }
 
+variable "carol_password" {
+  description = "Initial password for the non-admin user `carol`, a member of TWO orgs (acme + globex) that drives the org-subdomains silent cross-subdomain SSO e2e. Empty => carol not created."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "nomad_password" {
   description = "Initial password for the non-admin user `nomad`, a member of NO organization (drives the dashboard 'no organization' screen in e2e). Empty => nomad not created."
   type        = string
