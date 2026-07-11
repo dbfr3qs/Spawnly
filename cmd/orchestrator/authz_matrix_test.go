@@ -112,6 +112,14 @@ func spawnWithClaims(t *testing.T, claims tokenvalidator.Claims, body string) (*
 // can control whether the caller's org-membership tuple exists (the guard path).
 func spawnWithClaimsSDB(t *testing.T, claims tokenvalidator.Claims, body string, sdb spicedb.Client) (*httptest.ResponseRecorder, registry.AgentRecord) {
 	t.Helper()
+	return spawnWithClaimsSDBTarget(t, claims, "/spawn", body, sdb)
+}
+
+// spawnWithClaimsSDBTarget is spawnWithClaimsSDB with a caller-supplied request
+// target, so a test can exercise the spawn handler's query string (e.g. the
+// realm-admin view-as-org "?org=" the dashboard forwards).
+func spawnWithClaimsSDBTarget(t *testing.T, claims tokenvalidator.Claims, target, body string, sdb spicedb.Client) (*httptest.ResponseRecorder, registry.AgentRecord) {
+	t.Helper()
 	var preregistered registry.AgentRecord
 	reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -135,7 +143,7 @@ func spawnWithClaimsSDB(t *testing.T, claims tokenvalidator.Claims, body string,
 	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, reg.URL,
 		fakeValidator{claims: claims}, "orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
 
-	req := httptest.NewRequest("POST", "/spawn", strings.NewReader(body))
+	req := httptest.NewRequest("POST", target, strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer human-token")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -209,6 +217,47 @@ func TestSpawnHumanPath_MembershipGuard(t *testing.T) {
 	}
 	if pre.AgentID != "" {
 		t.Errorf("nothing should have been preregistered on a guard failure, got %+v", pre)
+	}
+}
+
+// TestSpawnHumanPath_RealmAdminViewAsOrg is the spawn-side of master-admin
+// view-as-org: an org-less REALM ADMIN (root) who has entered a tenant spawns
+// with the dashboard's forwarded ?org=<viewingOrg>, and the agent is tagged with
+// THAT tenant's OrgID (so it appears in the view-as-org list + to the tenant's
+// admins) — not left org-less/global where it would be invisible. The mock is
+// UNSEEDED (root is a member of no org), proving the subject-consistency guard is
+// (correctly) skipped for the admin path: the `admin` role authorizes it.
+func TestSpawnHumanPath_RealmAdminViewAsOrg(t *testing.T) {
+	admin := humanOrgClaims("root", "", []string{"admin"}, "orchestrator:write")
+	rec, pre := spawnWithClaimsSDBTarget(t, admin, "/spawn?org=acme",
+		`{"agentType":"worker","tenantId":"cust-1"}`, spicedb.NewMock())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("realm-admin view-as-org spawn: got %d, want 202 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if pre.OrgID != "acme" {
+		t.Errorf("view-as-org spawn OrgID = %q, want acme (the forwarded viewing org)", pre.OrgID)
+	}
+	if pre.UserID != "root" {
+		t.Errorf("UserID = %q, want root (the owner)", pre.UserID)
+	}
+}
+
+// TestSpawnHumanPath_ViewAsOrgIgnoredForNonAdmin is the isolation invariant on the
+// spawn path: a NON-admin's ?org= is ignored, so a forged query can never place an
+// agent in a foreign tenant — the org comes ONLY from the token claim. (A member
+// of acme aiming ?org=globex still spawns into acme.)
+func TestSpawnHumanPath_ViewAsOrgIgnoredForNonAdmin(t *testing.T) {
+	claims := humanOrgClaims("alice", "acme", nil, "orchestrator:write")
+	enc := spicedb.EncodeObjectID
+	sdb := spicedb.NewMock()
+	sdb.WriteRelationship(context.Background(), "organization:"+enc("acme"), "member", "user:"+enc("alice"))
+	rec, pre := spawnWithClaimsSDBTarget(t, claims, "/spawn?org=globex",
+		`{"agentType":"worker","tenantId":"cust-1"}`, sdb)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("non-admin spawn: got %d, want 202 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if pre.OrgID != "acme" {
+		t.Errorf("non-admin ?org= must be ignored: OrgID = %q, want acme (from the claim)", pre.OrgID)
 	}
 }
 

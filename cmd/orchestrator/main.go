@@ -650,6 +650,21 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			// token carrying an org claim always spawns into that org (admin or not).
 			// Empty when the token is org-less.
 			req.OrgID = claims.OrgID
+			// Master-admin VIEW-AS-ORG spawn (tenant-visibility Phase 3): a realm
+			// admin carries no org claim, so a bare spawn is org-less (global). When
+			// they have ENTERED a tenant, the dashboard forwards ?org=<viewingOrg>
+			// (SERVER-derived from the session, never a browser value) — honored
+			// EXCLUSIVELY for a realm-admin token, the SAME isolation invariant as the
+			// list path (line ~864): the agent is created INSIDE that tenant, so it is
+			// visible in the view-as-org list and to that tenant's admins, rather than
+			// vanishing into the org-less global scope. IGNORED for everyone else — a
+			// non-admin's org comes ONLY from their claim, never the query — so a
+			// forged ?org= can never place an agent in a foreign tenant.
+			if claims.HasRole("admin") {
+				if viewOrg := r.URL.Query().Get("org"); viewOrg != "" && validViewingOrg.MatchString(viewOrg) {
+					req.OrgID = viewOrg
+				}
+			}
 			// A non-admin human MUST have an active organization to spawn: as of
 			// Phase 5 the dashboard mints single-org tokens, so a non-admin with no
 			// active org is refused. A realm admin keeps the org-less (global) spawn
@@ -669,8 +684,10 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			// longer matches the membership-tuple convention (e.g. a future login path
 			// emitting a UUID sub) — fail LOUD rather than silently spawning into an
 			// org whose authorization layer can't see this subject. Fail-closed on a
-			// SpiceDB error (matches the list handler's stance).
-			if req.OrgID != "" && !orgMemberCheck(r.Context(), sdb, req.OrgID, userID) {
+			// SpiceDB error (matches the list handler's stance). SKIPPED for a realm
+			// admin's view-as-org spawn: root is authorized by the `admin` role, not
+			// org membership — it is (deliberately) a member of no tenant.
+			if req.OrgID != "" && !claims.HasRole("admin") && !orgMemberCheck(r.Context(), sdb, req.OrgID, userID) {
 				log.Printf("spawn: user %s carries org claim %q but is not a SpiceDB member (subject/tuple-key mismatch or removed member) — refusing", userID, req.OrgID)
 				http.Error(w, "organization membership could not be verified", http.StatusForbidden)
 				return

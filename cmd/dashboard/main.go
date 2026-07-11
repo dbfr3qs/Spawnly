@@ -314,8 +314,22 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	})))
 
 	// Spawn — the human principal is the token's sub; the orchestrator derives
-	// userId from it (a browser cannot spoof it), so we just forward the body.
-	mux.Handle("POST /api/spawn", auth.require(proxy("POST", orchestratorURL+"/spawn")))
+	// userId from it (a browser cannot spoof it), so we just forward the body. For a
+	// master admin who has ENTERED a tenant (tenant-visibility Phase 3) it appends
+	// ?org=<viewingOrg> — SERVER-derived from the session (auth.activeOrg returns the
+	// admin's viewingOrg), NEVER a browser value — so the orchestrator creates the
+	// agent INSIDE that tenant instead of org-less/global (else it would never appear
+	// in the view-as-org list). The orchestrator honors ?org= for a realm-admin token
+	// only; a non-admin's is ignored there, and we don't append it.
+	mux.Handle("POST /api/spawn", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target := orchestratorURL + "/spawn"
+		if auth.isAdmin(r) {
+			if org := auth.activeOrg(r); org != "" {
+				target += "?org=" + url.QueryEscape(org)
+			}
+		}
+		proxy("POST", target)(w, r)
+	})))
 
 	// For endpoints with path params, extract and forward. Ownership is enforced
 	// at the orchestrator off the token sub, so no userId is carried here.

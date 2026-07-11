@@ -275,6 +275,55 @@ test.describe('organization isolation matrix', () => {
     }
   });
 
+  test('the master admin SPAWNS inside the entered tenant and sees it (view-as-org spawn tagging)', async ({
+    browser,
+  }) => {
+    // Regression: root drills into acme (view-as-org) and spawns an agent. Because
+    // root carries NO org claim, a naive spawn tagged the agent org-less/global —
+    // where the view-as-org list (a.OrgID == viewingOrg) could never match it, so
+    // it VANISHED from the view it was created in. The dashboard now forwards the
+    // session's viewingOrg as ?org= on spawn and the orchestrator honors it for a
+    // realm-admin token, so the agent is created INSIDE acme and appears here. The
+    // isolation invariant still holds: switching to globex must NOT show it.
+    const rootCtx = await contextFor(browser, 'root');
+    let spawnedId = '';
+    let root: Page | undefined;
+    try {
+      root = await rootCtx.newPage();
+      await root.goto('/');
+      await reachDashboardShell(root);
+      await switchOrg(root, 'acme');
+      await expect(root.locator('[data-testid="active-org"]')).toContainText(/acme/i, {
+        timeout: 30_000,
+      });
+
+      spawnedId = await spawn(root, 'weather-monitor');
+      // It must appear in the view-as-org list, tagged to acme, manageable by root.
+      let row: AgentSummary | undefined;
+      await expect
+        .poll(async () => {
+          row = (await listAgents(root!)).find((a) => a.agentId === spawnedId);
+          return row?.orgId ?? '';
+        }, { timeout: 60_000 })
+        .toBe('acme');
+      expect(row?.canManage, 'master admin manages the agent it spawned in the tenant').toBeTruthy();
+
+      // Per-tenant scoping: the acme-tagged agent must not leak into the globex view.
+      await switchOrg(root, 'globex');
+      await expect(root.locator('[data-testid="active-org"]')).toContainText(/globex/i, {
+        timeout: 30_000,
+      });
+      expect(
+        (await listAgents(root)).some((a) => a.agentId === spawnedId),
+        'globex view must NOT show the agent spawned in acme',
+      ).toBe(false);
+    } finally {
+      // Realm-admin bypass lets root delete regardless of the current viewing org.
+      if (spawnedId && root) await killAgent(root, spawnedId);
+      await rootCtx.close();
+    }
+  });
+
   test('an org admin (alice) has NO Global option and /api/me reports her non-admin', async () => {
     // Criteria 4 + 8: alice is acme's ORG admin only (no realm role). Her switcher
     // offers her member orgs but NEVER the Global option, and /api/me reports
