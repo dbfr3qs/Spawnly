@@ -63,6 +63,40 @@ func TestSatelliteAuthorizeURL(t *testing.T) {
 	}
 }
 
+// TestSatelliteViewAsOrgLogin proves the master-admin view-as-org SUBDOMAIN entry:
+// /signin?viewas=1 on a satellite starts an ORG-LESS login (no organization scope
+// or param) so a realm admin — a member of no org — is not denied at the IdP by
+// the organization-param non-member deny; the redirect_uri is still the
+// satellite's own /callback. The viewing org is set from the host by the selfHeal
+// exemption afterwards (not in this authorize request).
+func TestSatelliteViewAsOrgLogin(t *testing.T) {
+	a := satAuth("localtest.me")
+	req := httptest.NewRequest("GET", "/signin?viewas=1", nil)
+	req.Host = "acme.localtest.me"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+	a.handleLogin(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302", rec.Code)
+	}
+	loc, _ := url.Parse(rec.Header().Get("Location"))
+	q := loc.Query()
+	// Org-less: no organization scope and no organization param, so Keycloak does
+	// not apply its non-member deny to the org-less realm admin.
+	if strings.Contains(q.Get("scope"), "organization:") {
+		t.Errorf("viewas login scope = %q, want NO organization: scope (org-less)", q.Get("scope"))
+	}
+	if q.Has("organization") {
+		t.Errorf("viewas login must not send the organization param (org-less), got %q", q.Get("organization"))
+	}
+	// Still returns to the satellite's OWN /callback (the master admin lands org-less
+	// on the satellite; selfHeal then sets viewingOrg from the host).
+	if ru := q.Get("redirect_uri"); ru != "https://acme.localtest.me/callback" {
+		t.Errorf("redirect_uri = %q, want https://acme.localtest.me/callback", ru)
+	}
+}
+
 // TestApexAuthorizeURLUnchanged proves a login on the APEX (or in single-origin
 // mode) sends NO redirect_uri override (the config's apex /callback is used) — the
 // existing single-origin behavior. The ?org= still drives the org there.
@@ -236,6 +270,30 @@ func TestSelfHealDecisionMatrix(t *testing.T) {
 		a := newAuth("globex")
 		if a.selfHeal(httptest.NewRecorder(), pageReq("/", "localtest.me", "")) {
 			t.Fatal("the apex must never self-heal")
+		}
+	})
+
+	// Realm-admin exemption (tenant-visibility Phase 3): a master admin on a
+	// satellite is a legitimate VIEW-AS-ORG — the host SELECTS the tenant, the
+	// realm-admin role AUTHORIZES it. selfHeal must NOT redirect (no re-auth loop);
+	// it sets the session's viewingOrg to the host org IN PLACE and falls through,
+	// clearing any heal guard.
+	t.Run("realm admin on satellite views host org in place", func(t *testing.T) {
+		a := satAuth("localtest.me")
+		a.sessions["sid"] = session{username: "root", isAdmin: true, expiresAt: time.Now().Add(time.Hour)}
+		rec := httptest.NewRecorder()
+		// A stale guard is present to prove the exemption clears it.
+		req := pageReq("/", "acme.localtest.me", "acme")
+		if a.selfHeal(rec, req) {
+			t.Fatal("a realm admin on a satellite must NOT self-heal (view-as-org, not a mismatch)")
+		}
+		if a.sessions["sid"].viewingOrg != "acme" {
+			t.Errorf("selfHeal must set the admin session's viewingOrg to the host org, got %q", a.sessions["sid"].viewingOrg)
+		}
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == orgHealCookie && c.MaxAge >= 0 {
+				t.Error("the heal guard must be cleared on the admin exemption")
+			}
 		}
 	})
 }

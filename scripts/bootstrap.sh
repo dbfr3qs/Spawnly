@@ -204,14 +204,16 @@ kubectl create secret generic org-admin-auth \
   --from-literal=secret="${ORG_ADMIN_SECRET}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
-# Interactive dashboard login (local demo): alice/alice (the ADMIN user, who
-# can manage agent types), plus an optional non-admin viewer/viewer for
-# exercising authz-deny paths and e2e. The IdP reads these from the
+# Interactive dashboard login (local demo): alice/alice (acme ORG admin only —
+# NOT the realm/platform admin) plus an optional non-admin viewer/viewer for
+# exercising authz-deny paths and e2e. The platform master admin root/root (realm
+# `admin` role, member of no org) is seeded by the realm Terraform via
+# TF_VAR_root_password below, not this secret. The IdP reads these from the
 # `dashboard-user` Secret (optional secretKeyRefs); without the admin password,
 # login is disabled (fail closed). The public AWS deploy generates a strong
-# password and sets NO viewer so the internet-facing
-# dashboard has no guessable login of either kind.
-echo "==> Ensuring dashboard login secret (local demo: alice/alice admin + viewer/viewer non-admin)..."
+# password and sets NO viewer so the internet-facing dashboard has no guessable
+# login of either kind.
+echo "==> Ensuring dashboard login secret (local demo: alice/alice acme org admin + viewer/viewer non-admin)..."
 kubectl create secret generic dashboard-user \
   --from-literal=username="alice" \
   --from-literal=password="alice" \
@@ -344,6 +346,7 @@ KC_TF_DIR="$REPO_ROOT/deploy/keycloak"
   export TF_VAR_idp_consent_client_secret="idp-consent-secret"
   export TF_VAR_machine_client_secret="placeholder"
   export TF_VAR_org_admin_client_secret="${ORG_ADMIN_SECRET}"
+  export TF_VAR_root_password="root"
   export TF_VAR_alice_password="alice"
   export TF_VAR_viewer_password="viewer"
   export TF_VAR_bob_password="bob"

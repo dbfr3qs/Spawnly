@@ -1,6 +1,7 @@
 import { test, expect, type BrowserContext, type Page } from '@playwright/test';
 import {
   contextFor,
+  reachDashboardShell,
   LOGIN_USERNAME,
   LOGIN_PASSWORD,
   LOGIN_SUBMIT,
@@ -44,18 +45,24 @@ async function waitForListedStatus(
 // Scenario — the org authorization matrix, proven end-to-end through the REAL
 // dashboard → orchestrator → registry → SpiceDB path with SINGLE-ORG tokens (the
 // Phase-5 UX). Seed contract (deploy/keycloak/users.tf + scripts/reseed-orgs.sh):
+//   root   = PLATFORM master admin (realm `admin` role, member of NO org)
 //   acme   = alice (org admin) + viewer (member)
 //   globex = bob (org admin)
+//   carol  = member of BOTH acme and globex
 //   nomad  = member of NO org
-// The matrix (spec §Authorization matrix):
-//   • a member sees every org agent but manages only their own (read-only on
-//     others) — and CANNOT mutate another's agent (UI absent AND the direct API
-//     404s);
-//   • an org admin manages every agent in the org;
+// alice is acme's ORG admin ONLY — she is NOT the realm admin (that is root), so
+// she has no Global view. The matrix (spec §Authorization matrix, tightened by
+// tenant-visibility Phase 2 — least-privilege member visibility):
+//   • a member sees ONLY the agents they OWN — a co-member's org agent is
+//     invisible: absent from the member's list AND its direct events/logs GET
+//     404s (no existence oracle);
+//   • an org admin sees + manages every agent in the org;
 //   • a user in another org sees none of it (empty list, 404s);
-//   • switching orgs is a SILENT re-auth (prompt=none on the SSO session — no password);
+//   • switching orgs is a SILENT re-auth (prompt=none on the SSO session — no
+//     password): proven for a multi-org MEMBER (carol: acme ↔ globex);
 //   • an org-less non-admin gets the "no organization" screen and cannot spawn;
-//   • a realm admin keeps the org-less (Global) spawn path.
+//   • the platform master admin (root) lands org-less on the Global view and
+//     keeps the org-less (Global) spawn path.
 
 const acmeMember = (a: AgentSummary, id: string) => a.agentId === id;
 
@@ -92,26 +99,27 @@ test.describe('organization isolation matrix', () => {
     await bobCtx?.close();
   });
 
-  test('a same-org member sees the agent READ-ONLY and cannot mutate it', async () => {
-    // Visible in the member's list, flagged canManage=false.
+  test('a same-org member does NOT see another member’s agent (own-only list + detail 404)', async () => {
+    // tenant-visibility Phase 2: a plain member sees ONLY the agents they own.
+    // alice's acme agent is owned by alice, so it must NEVER appear in viewer's
+    // list — viewer owns none of acme's agents here, so the list excludes it.
+    // Poll a few times to prove it stays absent (not merely slow to appear).
     await expect
       .poll(async () => (await listAgents(viewer)).some((a) => a.agentId === acmeAgentId), {
-        timeout: 30_000,
+        timeout: 15_000,
       })
-      .toBe(true);
-    const row = (await listAgents(viewer)).find((a) => a.agentId === acmeAgentId)!;
-    expect(row.canManage, 'a member must see another owner’s agent as read-only').toBeFalsy();
+      .toBe(false);
 
-    // Render the card and assert the mutating controls are ABSENT (cosmetic gate).
+    // The card is likewise absent from viewer's rendered dashboard.
     await viewer.reload();
-    const card = viewer.locator(`[id="card-${acmeAgentId}"]`);
-    await expect(card).toBeVisible({ timeout: 30_000 });
-    await expect(card.locator('[data-testid="revoke"]')).toHaveCount(0);
-    await expect(card.locator('[data-testid="kill"]')).toHaveCount(0);
+    await expect(viewer.locator('#agent-list')).toBeVisible({ timeout: 30_000 });
+    await expect(viewer.locator(`[id="card-${acmeAgentId}"]`)).toHaveCount(0);
 
-    // The REAL boundary: direct API calls must 404 (no existence oracle), so a
-    // tampered client that forges the buttons still can't mutate the agent.
+    // The REAL boundary: viewer's direct reads AND mutations of a non-owned org
+    // agent all 404 (no existence oracle) — a member has neither view nor manage.
     for (const path of [
+      { method: 'get', url: `/api/agents/${acmeAgentId}/events` },
+      { method: 'get', url: `/api/agents/${acmeAgentId}/logs` },
       { method: 'post', url: `/api/agents/${acmeAgentId}/revoke` },
       { method: 'post', url: `/api/agents/${acmeAgentId}/dismiss` },
       { method: 'delete', url: `/api/agents/${acmeAgentId}` },
@@ -119,11 +127,13 @@ test.describe('organization isolation matrix', () => {
       const resp =
         path.method === 'delete'
           ? await viewer.request.delete(path.url)
-          : await viewer.request.post(path.url);
-      expect(resp.status(), `${path.method} ${path.url} must 404 for a member`).toBe(404);
+          : path.method === 'get'
+            ? await viewer.request.get(path.url)
+            : await viewer.request.post(path.url);
+      expect(resp.status(), `${path.method} ${path.url} must 404 for a non-owning member`).toBe(
+        404,
+      );
     }
-    // ...and the agent is untouched.
-    expect((await listAgents(viewer)).some((a) => a.agentId === acmeAgentId)).toBe(true);
   });
 
   test('the org admin manages every agent in the org', async () => {
@@ -147,40 +157,138 @@ test.describe('organization isolation matrix', () => {
     expect((await bob.request.delete(`/api/agents/${acmeAgentId}`)).status()).toBe(404);
   });
 
-  test('switching orgs is a silent re-auth (acme ↔ Global for the realm admin)', async () => {
-    // alice starts in acme.
+  test('switching between member orgs is a silent re-auth (carol: acme ↔ globex)', async ({
+    browser,
+  }) => {
+    // carol is a plain MEMBER of both acme and globex — the switcher offers her
+    // both, and switching between them must be a SILENT (password-less) re-auth on
+    // the live Keycloak SSO session. (alice is no longer a realm admin, so her
+    // switcher offers NO Global option — only her member orgs; the Global
+    // destination is exercised by root below, not here.)
+    const carolCtx = await contextFor(browser, 'carol', 'acme');
+    try {
+      const carol = await carolCtx.newPage();
+      await carol.goto('/');
+      await expect(carol.locator('[data-testid="active-org"]')).toContainText(/acme/i, {
+        timeout: 30_000,
+      });
+
+      await switchOrg(carol, 'globex');
+      await expect(carol.locator('[data-testid="active-org"]')).toContainText(/globex/i, {
+        timeout: 30_000,
+      });
+
+      await switchOrg(carol, 'acme');
+      await expect(carol.locator('[data-testid="active-org"]')).toContainText(/acme/i, {
+        timeout: 30_000,
+      });
+    } finally {
+      await carolCtx.close();
+    }
+  });
+
+  test('the master admin (root) Global landing is an org directory + counts, NOT an agent list', async ({
+    browser,
+  }) => {
+    // Criterion 5 (tenant-visibility Phase 3): root holds the realm `admin` role and
+    // is a member of NO org, so its org-less landing is the platform DIRECTORY — an
+    // entry card per tenant + minimal counts — and NOT an agent list. alice (an org
+    // admin only) never sees this.
+    const rootCtx = await contextFor(browser, 'root');
+    try {
+      const root = await rootCtx.newPage();
+      await root.goto('/');
+      await reachDashboardShell(root);
+      await expect(root.locator('[data-testid="active-org"]')).toContainText(/global/i, {
+        timeout: 30_000,
+      });
+      // The org directory is shown; the running-agents list is NOT.
+      await expect(root.locator('[data-testid="org-directory"]')).toBeVisible({ timeout: 30_000 });
+      await expect(root.locator('#agent-list')).toBeHidden();
+      // Entry cards for the seeded tenants (acme, globex).
+      await expect(root.locator('[data-testid="org-card"][data-org="acme"]')).toBeVisible();
+      await expect(root.locator('[data-testid="org-card"][data-org="globex"]')).toBeVisible();
+      // Minimal platform counts render (org + agent tallies).
+      await expect(root.locator('[data-testid="global-stats"]')).toContainText(/org/i, {
+        timeout: 30_000,
+      });
+
+      // The master admin keeps the org-less (Global) SPAWN path — asserted via the
+      // API (the Global view has no spawn UI): a global agent carries no org and the
+      // admin owns + manages it.
+      const spawnResp = await root.request.post('/api/spawn', {
+        data: { agentType: 'weather-monitor' },
+      });
+      expect(spawnResp.ok(), `root org-less spawn failed: ${spawnResp.status()}`).toBeTruthy();
+      const globalId = (await spawnResp.json()).workloadName as string;
+      try {
+        await waitForListedStatus(root, globalId, /active|pending/i, 60_000);
+        const rec = (await listAgents(root)).find((a) => a.agentId === globalId)!;
+        expect(rec?.canManage, 'root manages its own global agent').toBeTruthy();
+      } finally {
+        await killAgent(root, globalId);
+      }
+    } finally {
+      await rootCtx.close();
+    }
+  });
+
+  test('the master admin drills into a tenant, manages its agents, and per-tenant scoping holds', async ({
+    browser,
+  }) => {
+    // Criterion 6: root enters acme (view-as-org via the in-place switcher — no
+    // re-auth, the org-less token is unchanged), sees acme's agents with canManage
+    // true, a revoke/resume round-trip works, then switches to globex and sees ONLY
+    // globex — never acme's agent (per-tenant scoping).
+    const rootCtx = await contextFor(browser, 'root');
+    try {
+      const root = await rootCtx.newPage();
+      await root.goto('/');
+      await reachDashboardShell(root);
+
+      // Drill into acme (in-place, silent — no login form).
+      await switchOrg(root, 'acme');
+      await expect(root.locator('[data-testid="active-org"]')).toContainText(/acme/i, {
+        timeout: 30_000,
+      });
+      // Sees alice's acme agent, with manage authority (the realm role authorizes).
+      const acmeRow = (await listAgents(root)).find((a) => a.agentId === acmeAgentId);
+      expect(acmeRow, 'master admin viewing acme must see the acme agent').toBeTruthy();
+      expect(acmeRow?.canManage, 'master admin manages the entered tenant’s agents').toBeTruthy();
+      // A revoke/resume round-trip succeeds (leaves the agent active for afterAll).
+      const revoke = await root.request.post(`/api/agents/${acmeAgentId}/revoke`);
+      expect(revoke.ok(), `master-admin revoke failed: ${revoke.status()}`).toBeTruthy();
+      const resume = await root.request.post(`/api/agents/${acmeAgentId}/resume`);
+      expect(resume.ok(), `master-admin resume failed: ${resume.status()}`).toBeTruthy();
+
+      // Switch to globex: acme's agent must NOT appear (per-tenant scoping).
+      await switchOrg(root, 'globex');
+      await expect(root.locator('[data-testid="active-org"]')).toContainText(/globex/i, {
+        timeout: 30_000,
+      });
+      expect(
+        (await listAgents(root)).some((a) => a.agentId === acmeAgentId),
+        'globex view must NOT leak acme’s agent',
+      ).toBe(false);
+    } finally {
+      await rootCtx.close();
+    }
+  });
+
+  test('an org admin (alice) has NO Global option and /api/me reports her non-admin', async () => {
+    // Criteria 4 + 8: alice is acme's ORG admin only (no realm role). Her switcher
+    // offers her member orgs but NEVER the Global option, and /api/me reports
+    // isAdmin=false — the Global view is master-admin-only.
+    const me = await alice.request.get('/api/me').then((r) => r.json());
+    expect(me.isAdmin, 'alice must not be a realm admin').toBe(false);
+    // The org switcher (if shown) must not carry the Global option.
     await alice.goto('/');
     await expect(alice.locator('[data-testid="active-org"]')).toContainText(/acme/i, {
       timeout: 30_000,
     });
-
-    // Switch to Global (org-less) — a silent (password-less) re-auth through /switch-org.
-    await switchOrg(alice);
-    await expect(alice.locator('[data-testid="active-org"]')).toContainText(/global/i, {
-      timeout: 30_000,
-    });
-
-    // Switch back into acme so the rest of the suite/cleanup runs as the acme admin.
-    await switchOrg(alice, 'acme');
-    await expect(alice.locator('[data-testid="active-org"]')).toContainText(/acme/i, {
-      timeout: 30_000,
-    });
-  });
-
-  test('a realm admin keeps the org-less (Global) spawn path', async () => {
-    await switchOrg(alice); // Global
-    await expect(alice.locator('[data-testid="active-org"]')).toContainText(/global/i, {
-      timeout: 30_000,
-    });
-    const globalId = await spawn(alice, 'weather-monitor');
-    try {
-      await waitForListedStatus(alice, globalId, /active|pending/i, 60_000);
-      // A global (org-less) agent carries no orgId; the admin owns and manages it.
-      const rec = (await listAgents(alice)).find((a) => a.agentId === globalId)!;
-      expect(rec.canManage).toBeTruthy();
-    } finally {
-      await killAgent(alice, globalId);
-      await switchOrg(alice, 'acme');
+    const switcher = alice.locator('[data-testid="org-switcher"]');
+    if (await switcher.isVisible()) {
+      await expect(switcher.locator('option', { hasText: /global/i })).toHaveCount(0);
     }
   });
 });

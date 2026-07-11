@@ -557,8 +557,10 @@ func subtree(ctx context.Context, s registry.Store, id string) ([]string, error)
 }
 
 // SpiceDB agent permissions checked for human lifecycle authority (schema.zed):
-// view = owner + org->view_agents (read: subtree/events/logs/chain);
+// view = owner + org->admin_agents (read: subtree/events/logs/chain);
 // manage = owner + org->admin_agents (mutate: revoke/resume/dismiss/kill/...).
+// Since tenant-visibility Phase 2 view == manage (both owner + org admin): a
+// plain org member sees ONLY the agents they own.
 const (
 	actionView   = "view"
 	actionManage = "manage"
@@ -1739,8 +1741,9 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		userId := r.URL.Query().Get("userId")
 		// subtree is the read side of the DELETE cascade (a mutation the
 		// orchestrator drives), so it takes manage authority per the spec matrix —
-		// not view. A same-org member (view-only) must not be able to enumerate an
-		// admin's agent subtree as a prelude to a delete they can't perform.
+		// not view. (Since tenant-visibility Phase 2 view == manage == owner + org
+		// admin, so a plain member — who owns neither view nor manage on a
+		// non-owned org agent — cannot enumerate an admin's agent subtree.)
 		allowed, exists, err := agentAllowed(r.Context(), s, sdb, id, userId, actionManage)
 		if storeErr(w, err) {
 			return

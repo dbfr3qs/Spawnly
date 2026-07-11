@@ -67,7 +67,9 @@ func TestCanViewCanManage_Matrix(t *testing.T) {
 	}{
 		{"owner+member", "agent-acme", "alice", true, true},
 		{"org admin (not owner)", "agent-acme", "carol", true, true},
-		{"other member: read-only", "agent-acme", "dave", true, false},
+		// tenant-visibility Phase 2: a plain member no longer views a non-owned org
+		// agent — view == manage == owner + org admin.
+		{"other member: no view (own-only)", "agent-acme", "dave", false, false},
 		{"cross-org: invisible", "agent-acme", "eve", false, false},
 		{"empty user", "agent-acme", "", false, false},
 		{"org-less owner", "agent-less", "frank", true, true},
@@ -342,14 +344,19 @@ func TestListAgents_OrgVisibilityAndCanManage(t *testing.T) {
 		return got
 	}
 
-	// bob: SpiceDB member of acme. Sees BOTH acme agents; manages only his own.
-	// Does NOT see globex or other users' org-less agents.
+	// bob: SpiceDB member (NOT admin) of acme. tenant-visibility Phase 2: a plain
+	// member sees ONLY the agents they own — so bob sees his own acme-bob and NOT
+	// alice's acme-alice. He manages his own. He never sees globex or other users'
+	// org-less agents.
 	bob := list("bob", "acme", "member")
-	if len(bob) != 2 {
-		t.Fatalf("bob should see exactly the 2 acme agents, got %v", bob)
+	if len(bob) != 1 {
+		t.Fatalf("bob (member) should see exactly his own acme agent, got %v", bob)
 	}
-	if !bob["acme-bob"] || bob["acme-alice"] {
+	if !bob["acme-bob"] {
 		t.Errorf("bob canManage: want own acme-bob only, got %v", bob)
+	}
+	if _, ok := bob["acme-alice"]; ok {
+		t.Error("bob (plain member) must NOT see another member's org agent (Phase 2)")
 	}
 	if _, ok := bob["globex-x"]; ok {
 		t.Error("bob must not see cross-org globex agent")
@@ -385,5 +392,223 @@ func TestListAgents_OrgVisibilityAndCanManage(t *testing.T) {
 	dave := list("dave", "", "")
 	if len(dave) != 1 || !dave["less-dave"] {
 		t.Errorf("org-less dave should see & manage only less-dave, got %v", dave)
+	}
+}
+
+// TestListAgents_IsolationInvariant is the security core (spec criterion 7): a
+// NON-realm-admin caller CANNOT widen their scope by supplying an org to the
+// orchestrator. The active org is taken ONLY from the token's `organization`
+// claim (orgIDFrom); a client-supplied `?org=<other>` query is ignored, so the
+// response is byte-identical to omitting it. Today the handler never reads
+// `?org=` at all — this test LOCKS that and becomes the permanent guard once
+// Phase 3 introduces the realm-admin-only viewing-org param (which must remain
+// asymmetric: honored for a realm admin, ignored for everyone else).
+func TestListAgents_IsolationInvariant(t *testing.T) {
+	all := []registry.AgentRecord{
+		{AgentID: "acme-bob", UserID: "bob", OrgID: "acme"},
+		{AgentID: "acme-alice", UserID: "alice", OrgID: "acme"},
+		{AgentID: "globex-x", UserID: "zed", OrgID: "globex"},
+	}
+	reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/agents" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(all)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer reg.Close()
+
+	// bob is a plain MEMBER of acme (a non-realm-admin). He owns acme-bob.
+	sdb := spicedb.NewMock()
+	enc := spicedb.EncodeObjectID
+	sdb.WriteRelationship(context.Background(), "organization:"+enc("acme"), "member", "user:"+enc("bob"))
+	fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+	mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, reg.URL,
+		fakeValidator{claims: humanOrgClaims("bob", "acme", nil, "orchestrator:read")},
+		"orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
+
+	get := func(target string) string {
+		req := httptest.NewRequest("GET", target, nil)
+		req.Header.Set("Authorization", "Bearer t")
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("list %s: got %d", target, rr.Code)
+		}
+		return rr.Body.String()
+	}
+
+	base := get("/v1/agents")
+	// A forged/extra org param naming ANOTHER org must NOT widen scope.
+	widened := get("/v1/agents?org=globex")
+	if base != widened {
+		t.Errorf("non-admin ?org= must be ignored (org from token claim only)\n base    = %s\n ?org=   = %s", base, widened)
+	}
+	// Sanity: bob (member) sees ONLY his own agent — never acme-alice or globex-x.
+	if !strings.Contains(base, "acme-bob") || strings.Contains(base, "acme-alice") || strings.Contains(base, "globex-x") {
+		t.Errorf("member list must be own-only, got %s", base)
+	}
+}
+
+// TestListAgents_RealmAdminViewAsOrg is the Phase-3 master-admin view-as-org (spec
+// criteria 5/6): a REALM ADMIN with a validated ?org= lists every agent in THAT
+// tenant (all canManage), per-tenant scoping holds (a different ?org= shows only
+// that org), and an org-less admin keeps the own-only rule. The realm role, not any
+// SpiceDB tuple, authorizes — root has NO tuples here. A NON-admin's ?org= is
+// ignored (the isolation invariant is also locked by TestListAgents_IsolationInvariant).
+func TestListAgents_RealmAdminViewAsOrg(t *testing.T) {
+	all := []registry.AgentRecord{
+		{AgentID: "acme-alice", UserID: "alice", OrgID: "acme"},
+		{AgentID: "acme-viewer", UserID: "viewer", OrgID: "acme"},
+		{AgentID: "globex-bob", UserID: "bob", OrgID: "globex"},
+		{AgentID: "less-x", UserID: "x", OrgID: ""},
+	}
+	reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/agents" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(all)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer reg.Close()
+
+	type item struct {
+		AgentID   string `json:"agentId"`
+		CanManage bool   `json:"canManage"`
+	}
+	// root has NO SpiceDB tuples — a realm admin is a member of nothing; only the
+	// `admin` role in the claims authorizes the view-as-org.
+	list := func(target string, roles []string) map[string]bool {
+		sdb := spicedb.NewMock()
+		fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+		mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, reg.URL,
+			fakeValidator{claims: humanOrgClaims("root", "", roles, "orchestrator:read")},
+			"orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
+		req := httptest.NewRequest("GET", target, nil)
+		req.Header.Set("Authorization", "Bearer t")
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("list %s: got %d", target, rr.Code)
+		}
+		var items []item
+		if err := json.NewDecoder(rr.Body).Decode(&items); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		got := map[string]bool{}
+		for _, it := range items {
+			got[it.AgentID] = it.CanManage
+		}
+		return got
+	}
+
+	// Realm admin viewing acme: ONLY acme's agents, all manageable. Never a
+	// cross-tenant (globex) or org-less agent.
+	acme := list("/v1/agents?org=acme", []string{"admin"})
+	if len(acme) != 2 || !acme["acme-alice"] || !acme["acme-viewer"] {
+		t.Errorf("admin view-as-acme must list both acme agents, all canManage; got %v", acme)
+	}
+	if _, ok := acme["globex-bob"]; ok {
+		t.Error("view-as-acme must NOT leak the cross-tenant globex agent")
+	}
+	if _, ok := acme["less-x"]; ok {
+		t.Error("view-as-acme must NOT include org-less agents")
+	}
+
+	// Switching to globex shows ONLY globex — per-tenant scoping (criterion 6).
+	glob := list("/v1/agents?org=globex", []string{"admin"})
+	if len(glob) != 1 || !glob["globex-bob"] {
+		t.Errorf("admin view-as-globex must list ONLY globex agents, got %v", glob)
+	}
+
+	// Org-less realm admin (no ?org=): the own-only rule — root owns nothing → empty.
+	none := list("/v1/agents", []string{"admin"})
+	if len(none) != 0 {
+		t.Errorf("org-less admin keeps own-only (root owns nothing), got %v", none)
+	}
+
+	// NON-admin supplying ?org=acme: IGNORED — own-only, and root owns nothing here.
+	nonAdmin := list("/v1/agents?org=acme", nil)
+	if len(nonAdmin) != 0 {
+		t.Errorf("a non-admin's ?org= must be ignored (isolation invariant), got %v", nonAdmin)
+	}
+}
+
+// TestAgentAllowed_RealmAdminBypass locks the per-agent realm-admin bypass (Phase 3
+// item 2): a caller with the `admin` role (roles ride the ctx) passes view AND
+// manage on ANY registered agent — org-scoped or org-less — with NO SpiceDB tuple,
+// so events/logs/kill/revoke/resume work inside the entered tenant. An unknown agent
+// still denies for an admin (the existence gate), and a non-admin ctx gets no bypass.
+func TestAgentAllowed_RealmAdminBypass(t *testing.T) {
+	reg := orgAuthzRegistry(t)
+	defer reg.Close()
+	regClient := registry.New(reg.URL)
+	sdb := spicedb.NewMock() // root holds NO tuples
+
+	adminCtx := context.WithValue(context.Background(), ctxRoles, []string{"admin"})
+	if !canView(adminCtx, regClient, sdb, "agent-acme", "root") {
+		t.Error("realm admin must view any org agent")
+	}
+	if !canManage(adminCtx, regClient, sdb, "agent-acme", "root") {
+		t.Error("realm admin must manage any org agent")
+	}
+	if !canManage(adminCtx, regClient, sdb, "agent-less", "root") {
+		t.Error("realm admin must manage any org-less agent")
+	}
+	if canView(adminCtx, regClient, sdb, "agent-nope", "root") {
+		t.Error("an unknown agent must still deny even for a realm admin (no existence oracle)")
+	}
+	// A non-admin context (no roles) gets NO bypass: a non-owner of an org agent
+	// with no membership tuple is denied.
+	if canManage(context.Background(), regClient, sdb, "agent-acme", "root") {
+		t.Error("a non-admin must never get the realm-admin bypass")
+	}
+}
+
+// TestAdminStats covers GET /v1/admin/stats (Phase 3 item 3): realm-admin-gated
+// (403 for a non-admin), returning minimal {orgCount, agentCount} with NO agent
+// records — the counts come from the registry orgs list + ListAgents length.
+func TestAdminStats(t *testing.T) {
+	reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/orgs":
+			w.Write([]byte(`[{"orgId":"acme","name":"Acme"},{"orgId":"globex","name":"Globex"}]`))
+		case "/v1/agents":
+			w.Write([]byte(`[{"agentId":"a1"},{"agentId":"a2"},{"agentId":"a3"}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer reg.Close()
+
+	call := func(roles []string) (int, map[string]int) {
+		sdb := spicedb.NewMock()
+		fakeClient := fake.NewClientBuilder().WithScheme(newScheme()).Build()
+		mux := buildMux(fakeClient, fakeclient.NewSimpleClientset(), sdb, reg.URL,
+			fakeValidator{claims: humanOrgClaims("root", "", roles, "orchestrator:read")},
+			"orchestrator", "orchestrator:spawn", "orchestrator:read", "orchestrator:write")
+		req := httptest.NewRequest("GET", "/v1/admin/stats", nil)
+		req.Header.Set("Authorization", "Bearer t")
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		var body map[string]int
+		json.NewDecoder(rr.Body).Decode(&body)
+		return rr.Code, body
+	}
+
+	// Non-admin → 403 (realm-admin gated).
+	if code, _ := call(nil); code != http.StatusForbidden {
+		t.Errorf("non-admin /v1/admin/stats: got %d, want 403", code)
+	}
+	// Admin → counts.
+	code, body := call([]string{"admin"})
+	if code != http.StatusOK {
+		t.Fatalf("admin /v1/admin/stats: got %d, want 200", code)
+	}
+	if body["orgCount"] != 2 || body["agentCount"] != 3 {
+		t.Errorf("stats = %v, want orgCount=2 agentCount=3", body)
 	}
 }

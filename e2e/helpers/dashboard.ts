@@ -10,6 +10,10 @@ export interface AgentSummary {
   parentId?: string;
   lifecycle?: string;
   supportsChat?: boolean;
+  /** Whether the requesting session may manage this agent (owner or org/realm admin). */
+  canManage?: boolean;
+  /** The org the agent belongs to ("" for an org-less/global agent). */
+  orgId?: string;
 }
 
 export interface SpawnOpts {

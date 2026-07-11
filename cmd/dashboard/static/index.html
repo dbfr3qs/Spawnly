@@ -318,6 +318,36 @@
       gap: 12px;
     }
 
+    /* ── Master-admin Global org directory ── */
+    .org-directory {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 12px;
+    }
+    .org-card {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 4px;
+      text-align: left;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      cursor: pointer;
+      font: inherit;
+      color: inherit;
+      transition: border-color .2s, box-shadow .2s;
+      box-shadow: 0 1px 3px rgba(0,0,0,.08);
+    }
+    .org-card:hover {
+      border-color: var(--accent);
+      box-shadow: 0 2px 8px rgba(0,0,0,.14);
+    }
+    .org-card-name { font-weight: 600; font-size: 15px; }
+    .org-card-id { font-size: 12px; color: var(--text-dim); font-family: ui-monospace, monospace; }
+    .org-directory-empty { color: var(--text-dim); }
+
     .agent-card {
       background: var(--card);
       border: 1px solid var(--border);
@@ -1182,6 +1212,19 @@
   <div id="agent-list"></div>
 </main>
 
+<!-- Master-admin Global landing (tenant-visibility Phase 3). The realm admin (root)
+     is a member of no org, so their org-less landing is a platform OVERSIGHT view —
+     an org DIRECTORY (each tenant is an entry point) + minimal platform counts — and
+     NOT an agent list or spawn controls. Hidden until proceedGlobal() reveals it for
+     an org-less admin session; entering a tenant (a card or the switcher) leaves it. -->
+<section id="global-directory" class="global-directory" hidden data-testid="global-directory">
+  <div class="section-header">
+    <span class="section-title">Organizations</span>
+    <span class="agent-count" id="global-stats" data-testid="global-stats"></span>
+  </div>
+  <div id="org-directory" class="org-directory" data-testid="org-directory"></div>
+</section>
+
 <!-- Org gate overlay (multi-tenancy). Covers the page for the two states an
      ordinary user can't act from: NO organization (0 orgs, non-admin) and the org
      PICKER (>1 orgs, org-less session). A single-org non-admin is auto-selected
@@ -1676,6 +1719,12 @@
   // reads these to navigate to another org's subdomain instead of /switch-org.
   const ME = { isAdmin: false, isOrgAdmin: false, activeOrg: '', hostOrg: '', isApex: true, apexDomain: '' };
 
+  // GLOBAL_DIRECTORY is set when the master-admin Global landing renders (org-less
+  // realm admin): the page shows the org directory + counts, NOT the agent list, so
+  // the agent poll loop no-ops. Entering a tenant reloads the page (viewingOrg set),
+  // so this only ever guards the org-less Global view.
+  let GLOBAL_DIRECTORY = false;
+
   async function fetchAdminTemplates() {
     // Realm admin → global + every org's (full catalog). Org admin (non-realm) →
     // their org's templates only.
@@ -2005,14 +2054,25 @@
   }
 
   // ── Admin view switching ───────────────────────────────────────────────
+  // setPrimaryBodyHidden toggles the ACTIVE primary body — the master-admin Global
+  // directory when GLOBAL_DIRECTORY is set, otherwise the agents <main> — so opening
+  // an admin/members sub-view hides the right one and "Back" restores it (a realm
+  // admin on Global returns to the directory, not an empty agent list).
+  function setPrimaryBodyHidden(hidden) {
+    if (GLOBAL_DIRECTORY) {
+      document.getElementById('global-directory').hidden = hidden;
+    } else {
+      document.getElementById('agent-list').closest('main').hidden = hidden;
+    }
+  }
   function openAgentTypesView() {
-    document.querySelector('main').hidden = true;
+    setPrimaryBodyHidden(true);
     document.getElementById('agent-types-view').hidden = false;
     reloadAdminTemplates();
   }
   function closeAgentTypesView() {
     document.getElementById('agent-types-view').hidden = true;
-    document.querySelector('main').hidden = false;
+    setPrimaryBodyHidden(false);
   }
 
   // ── Org admin: Members management (Phase 6) ────────────────────────────────
@@ -2020,14 +2080,14 @@
   // with requireOrgAdmin over the SESSION's active org — the org is never a client
   // value. This UI is convenience; the server is the boundary.
   function openMembersView() {
-    document.querySelector('main').hidden = true;
+    setPrimaryBodyHidden(true);
     document.getElementById('members-view').hidden = false;
     reloadMembers();
     loadOrgSettings();
   }
   function closeMembersView() {
     document.getElementById('members-view').hidden = true;
-    document.querySelector('main').hidden = false;
+    setPrimaryBodyHidden(false);
   }
 
   async function reloadMembers() {
@@ -3169,6 +3229,9 @@
   // ── Main poll loop ───────────────────────────────────────────────────────
 
   async function poll() {
+    // The master-admin Global landing has NO agent list — don't fetch/render agents
+    // (root owns none anyway) or the spawn-consent banner for the platform view.
+    if (GLOBAL_DIRECTORY) return;
     try { updateAgentList(await fetchAgents()); } catch (_) {}
     try { updateConsentBanner(await fetchPendingConsents()); } catch (_) {}
   }
@@ -3217,8 +3280,70 @@
     document.getElementById('org-gate').hidden = false;
   }
 
+  // enterOrg navigates into the chosen org (empty v = the org-less Global view).
+  // Shared by the header switcher and the master-admin directory cards so both
+  // honor the same topology:
+  //   Org-subdomains: each org lives at its OWN subdomain, so picking an org
+  //   NAVIGATES to its satellite (which silently re-auths from its own host via the
+  //   shared apex SSO session). Global lives on the apex: from a satellite navigate
+  //   to the apex; on the apex do the in-place org-less switch.
+  //   Single-origin (feature off): a full in-place /switch-org — for a realm admin
+  //   that is a session-only view-as-org selection (no re-auth), for a member a
+  //   silent re-auth into the org. The origin never changes.
+  function enterOrg(v) {
+    if (ME.apexDomain) {
+      const proto = window.location.protocol;
+      if (v) {
+        // The master admin (realm admin) is a member of NO org, so the satellite's
+        // normal org-scoped login would be denied at Keycloak. Enter org-less via
+        // ?viewas=1 — the dashboard skips the org scope and the selfHeal exemption
+        // sets the viewing org from the host. A genuine member logs in normally.
+        window.location = ME.isAdmin
+          ? `${proto}//${v}.${ME.apexDomain}/signin?viewas=1`
+          : `${proto}//${v}.${ME.apexDomain}/`;
+      } else {
+        window.location = ME.isApex ? '/switch-org' : `${proto}//${ME.apexDomain}/`;
+      }
+      return;
+    }
+    window.location = v ? `/switch-org?org=${encodeURIComponent(v)}` : '/switch-org';
+  }
+
+  // renderGlobalDirectory paints the master-admin Global landing: an entry card per
+  // org (click = enter that tenant) plus the platform counts from /api/admin/stats.
+  // Purely an oversight view — no agent records. Server gates are authoritative;
+  // /api/admin/stats is realm-admin-gated at both the BFF and the orchestrator.
+  function renderGlobalDirectory(orgs) {
+    const sec = document.getElementById('global-directory');
+    const dir = document.getElementById('org-directory');
+    if (!sec || !dir) return;
+    if (orgs.length === 0) {
+      dir.innerHTML = '<p class="org-directory-empty">No organizations yet.</p>';
+    } else {
+      dir.innerHTML = orgs.map(o =>
+        `<button class="org-card" data-testid="org-card" data-org="${escHtml(o.orgId)}">
+           <span class="org-card-name">${escHtml(o.name || o.orgId)}</span>
+           <span class="org-card-id">${escHtml(o.orgId)}</span>
+         </button>`
+      ).join('');
+      dir.querySelectorAll('button[data-org]').forEach(b =>
+        b.addEventListener('click', () => enterOrg(b.dataset.org)));
+    }
+    sec.hidden = false;
+    // Minimal platform counts (best-effort — the directory renders regardless).
+    fetch('/api/admin/stats')
+      .then(r => r.ok ? r.json() : null)
+      .then(s => {
+        if (!s) return;
+        const el = document.getElementById('global-stats');
+        if (el) el.textContent = `${s.orgCount} orgs · ${s.agentCount} agents`;
+      })
+      .catch(() => {});
+  }
+
   function renderOrgSwitcher(orgs, activeOrg, isAdmin) {
-    // Destinations: each org the user belongs to, plus "Global" for a realm admin.
+    // Destinations: each org (the user's own, or ALL orgs for a realm admin), plus
+    // "Global" for a realm admin.
     const dests = orgs.map(o => ({ value: o.orgId, label: o.name || o.orgId }));
     if (isAdmin) dests.push({ value: '', label: ORG_LABEL_GLOBAL });
     // Only worth showing when there's a real choice.
@@ -3229,25 +3354,7 @@
     ).join('');
     sel.hidden = false;
     sel.addEventListener('change', () => {
-      const v = sel.value;
-      // Org-subdomains topology: each org lives at its OWN subdomain, so picking an
-      // org NAVIGATES to its satellite (which then silently re-auths from its own
-      // host via the shared apex SSO session — no password). This applies from BOTH
-      // the apex picker and a satellite switcher, so the URL always reflects the
-      // active org. "Global" (empty v) is org-less and lives on the apex: from a
-      // satellite navigate to the apex; on the apex do the in-place org-less re-auth.
-      if (ME.apexDomain) {
-        const proto = window.location.protocol;
-        if (v) {
-          window.location = `${proto}//${v}.${ME.apexDomain}/`;
-        } else {
-          window.location = ME.isApex ? '/switch-org' : `${proto}//${ME.apexDomain}/`;
-        }
-        return;
-      }
-      // Single-origin mode (feature off): a full in-place re-auth into the chosen
-      // org (or Global when empty) — no subdomains, so the origin never changes.
-      window.location = v ? `/switch-org?org=${encodeURIComponent(v)}` : '/switch-org';
+      enterOrg(sel.value);
     });
   }
 
@@ -3344,14 +3451,24 @@
       return; // dashboard proceeds
     }
 
-    // Global (org-less) view for a realm admin: label the header + offer a
-    // switcher into any org. Factored so both the "admin has orgs" and the
-    // "admin escaped the create screen" paths land the same way.
+    // Global (org-less) landing for a realm admin (tenant-visibility Phase 3): a
+    // platform OVERSIGHT view — the org DIRECTORY (each tenant an entry point) +
+    // minimal counts — NOT an agent list or spawn controls. Factored so both the
+    // "admin has orgs" and the "admin escaped the create screen" paths land the same
+    // way. Entering a tenant (a card or the switcher) leaves this view.
     const proceedGlobal = () => {
       const ind = document.getElementById('org-indicator');
       ind.textContent = ORG_LABEL_GLOBAL;
       ind.hidden = false;
       renderOrgSwitcher(orgs, '', true);
+      // Suppress the agent surfaces: hide the running-agents list + spawn controls,
+      // stop the agent poll, and reveal the org directory instead.
+      GLOBAL_DIRECTORY = true;
+      const agentsMain = document.getElementById('agent-list').closest('main');
+      if (agentsMain) agentsMain.hidden = true;
+      const spawnBtn = document.getElementById('open-modal-btn');
+      if (spawnBtn) spawnBtn.hidden = true;
+      renderGlobalDirectory(orgs);
     };
 
     // Org-less session.

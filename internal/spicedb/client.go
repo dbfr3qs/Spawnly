@@ -237,14 +237,15 @@ func (m *Mock) DeleteResourceRelationships(_ context.Context, resource string) e
 // CheckPermission checks whether subject holds permission on resource. The mock
 // models the schema permissions the platform actually checks:
 //
-//   - "view"/"manage" on an agent (Phase 4, org multi-tenancy):
-//     view   = owner + org->view_agents (org member OR admin)
-//     manage = owner + org->admin_agents (org admin)
-//     These DELIBERATELY do NOT intersect `enabled` (a revoked agent must stay
-//     manageable so resume works), matching schema.zed.
-//   - "view_agents"/"admin_agents" on an organization (the per-request
-//     "is org admin?" list check): view_agents = member + admin;
-//     admin_agents = admin.
+//   - "view"/"manage" on an agent (org multi-tenancy, tightened by
+//     tenant-visibility Phase 2):
+//     view   = owner + org->admin_agents (owner OR org admin)
+//     manage = owner + org->admin_agents (owner OR org admin)
+//     A plain org member no longer holds agent view — a member sees ONLY the
+//     agents they own. These DELIBERATELY do NOT intersect `enabled` (a revoked
+//     agent must stay manageable so resume works), matching schema.zed.
+//   - "view_agents"/"admin_agents" on an organization (org-membership + org-admin
+//     checks): view_agents = member + admin; admin_agents = admin.
 //   - anything else (e.g. "work_on") falls back to the default schema's
 //     `work_on = agent & agent->enabled`: both the "agent" relation tuple AND
 //     the subject agent's own "enabled" status tuple must be present.
@@ -258,18 +259,13 @@ func (m *Mock) CheckPermission(_ context.Context, resource, permission, subject 
 		if m.tuples[resource+"#owner@"+subject] {
 			return true, nil
 		}
-		// Resolve the agent's org, then check membership/admin on that org.
+		// Resolve the agent's org, then check ADMIN on that org. A plain member
+		// no longer grants agent view — view == manage == owner + org admin.
 		org := m.orgOf(resource)
 		if org == "" {
 			return false, nil
 		}
-		if m.tuples[org+"#admin@"+subject] {
-			return true, nil
-		}
-		if permission == "view" && m.tuples[org+"#member@"+subject] {
-			return true, nil
-		}
-		return false, nil
+		return m.tuples[org+"#admin@"+subject], nil
 	case "view_agents", "admin_agents":
 		if m.tuples[resource+"#admin@"+subject] {
 			return true, nil

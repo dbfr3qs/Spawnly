@@ -263,6 +263,20 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 		if err != nil {
 			log.Printf("api/me: no orchestrator token for orgs fetch: %v", err)
 			out["orgsUnavailable"] = true
+		} else if auth.isAdmin(r) {
+			// Master admin (tenant-visibility Phase 3): the switcher/directory lists
+			// ALL orgs (root belongs to none, so /v1/my/orgs would be empty) from the
+			// realm-admin GET /v1/admin/orgs. activeOrg is the session's viewingOrg
+			// (auth.activeOrg returns it for an admin). isOrgAdmin is true once they've
+			// ENTERED a tenant (viewingOrg set) — they administer it via the realm
+			// bypass — and false on the org-less Global landing (no org to administer).
+			if orgs, ferr := fetchAllOrgs(r.Context(), orchestratorURL, token); ferr != nil {
+				log.Printf("api/me: fetch all orgs (admin): %v", ferr)
+				out["orgsUnavailable"] = true
+			} else {
+				out["orgs"] = orgs
+				out["isOrgAdmin"] = auth.activeOrg(r) != ""
+			}
 		} else if my, ferr := fetchMyOrgs(r.Context(), orchestratorURL, token); ferr != nil {
 			log.Printf("api/me: fetch my orgs: %v", ferr)
 			out["orgsUnavailable"] = true
@@ -283,8 +297,21 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 		json.NewEncoder(w).Encode(map[string]string{"docsUrl": docsURL})
 	})))
 	// List — the orchestrator scopes the result to the token's user (no
-	// cross-user enumeration); the dashboard no longer supplies userId.
-	mux.Handle("GET /api/agents", auth.require(proxy("GET", orchestratorURL+"/v1/agents")))
+	// cross-user enumeration); the dashboard no longer supplies userId. For a
+	// master admin viewing a tenant (tenant-visibility Phase 3) it appends
+	// ?org=<viewingOrg> — SERVER-derived from the session (auth.activeOrg returns
+	// the admin's viewingOrg), NEVER a browser value — so the orchestrator lists
+	// that tenant's agents. The orchestrator honors ?org= for a realm-admin token
+	// only; a non-admin's is ignored there regardless, and we don't append it.
+	mux.Handle("GET /api/agents", auth.require(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target := orchestratorURL + "/v1/agents"
+		if auth.isAdmin(r) {
+			if org := auth.activeOrg(r); org != "" {
+				target += "?org=" + url.QueryEscape(org)
+			}
+		}
+		proxy("GET", target)(w, r)
+	})))
 
 	// Spawn — the human principal is the token's sub; the orchestrator derives
 	// userId from it (a browser cannot spoof it), so we just forward the body.
@@ -349,6 +376,10 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	// access token; the orchestrator forwards to the registry with its
 	// control-plane bearer. Org-admin self-service twins (/api/org/...) come in
 	// Phase 6.
+	// Master admin platform counts for the Global directory landing
+	// (tenant-visibility Phase 3): {orgCount, agentCount}, NO agent records.
+	// Admin-gated at the BFF (defense in depth with the orchestrator's requireAdmin).
+	mux.Handle("GET /api/admin/stats", auth.requireAdmin(proxy("GET", orchestratorURL+"/v1/admin/stats")))
 	mux.Handle("POST /api/admin/orgs", auth.requireAdmin(proxy("POST", orchestratorURL+"/v1/admin/orgs")))
 	mux.Handle("GET /api/admin/orgs", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		target := orchestratorURL + "/v1/admin/orgs"
@@ -508,6 +539,33 @@ func fetchMyOrgs(ctx context.Context, orchestratorURL, token string) (myOrgs, er
 		return out, err
 	}
 	return out, nil
+}
+
+// fetchAllOrgs lists EVERY org from the orchestrator's realm-admin GET
+// /v1/admin/orgs (tenant-visibility Phase 3). It backs the master admin's switcher
+// + Global directory, whose entries are all tenants — root is a member of none, so
+// /v1/my/orgs is empty for them. The orchestrator gates the route on the realm
+// `admin` role; the caller must already be an admin session. Orgs stay raw objects
+// (orgId/name/…) so they pass to the UI without the registry's Organization type.
+func fetchAllOrgs(ctx context.Context, orchestratorURL, token string) ([]map[string]any, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", orchestratorURL+"/v1/admin/orgs", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("orchestrator /v1/admin/orgs: status %d", resp.StatusCode)
+	}
+	var orgs []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&orgs); err != nil {
+		return nil, err
+	}
+	return orgs, nil
 }
 
 // copyResponse copies an upstream response's status, headers, and body verbatim.

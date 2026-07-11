@@ -9,6 +9,11 @@
 #   acme   — alice = org admin, viewer = member   (the primary demo org)
 #   globex — bob   = org admin                      (cross-org isolation)
 #
+# Persona note: `alice` is acme's ORG admin ONLY (the SpiceDB tuple written by
+# `create_org acme … alice` below) — she does NOT hold the realm `admin` role.
+# The platform master admin is `root` (realm `admin` role, member of NO org);
+# reseed-orgs.sh deliberately never adds root to any org, so it stays org-less.
+#
 # Every call is idempotent (org create converges; member add is Keycloak-409 +
 # SpiceDB TOUCH tolerant), so this is safe to re-run. Run after the realm is
 # applied (the org-admin client must exist) and the registry is up.

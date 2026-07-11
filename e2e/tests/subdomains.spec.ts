@@ -17,9 +17,11 @@ import { spawn, type AgentSummary } from '../helpers/dashboard';
 // baseURL https://localtest.me; the default `make e2e` never picks it up.
 //
 // Seed matrix (deploy/keycloak/users.tf + scripts/reseed-orgs.sh):
+//   root   = PLATFORM master admin (realm `admin`, member of NO org) — case (f)
 //   acme   = alice (org admin) + viewer (member) + carol (member)
 //   globex = bob   (org admin) + carol (member)
 //   nomad  = member of NO org
+// alice is acme's ORG admin only — NOT the realm admin (that is root).
 // carol is the two-org fixture that exists ONLY to prove silent cross-subdomain
 // SSO (case b); she is seeded LAST so she never perturbs the single-org matrix.
 //
@@ -135,13 +137,18 @@ test.describe('organization subdomains', () => {
       expect(me.hostOrg, 'host resolves to acme').toBe('acme');
       expect(me.isApex, 'a satellite is not the apex').toBe(false);
 
-      // The scoped list shows the acme agent (member visibility) — a real proof the
-      // satellite session reaches acme's data.
+      // The session genuinely reaches acme's data plane: /api/agents authenticates
+      // (200) on the satellite. But tenant-visibility Phase 2 makes a plain MEMBER
+      // own-only — viewer does NOT see alice's acme agent (she owns none here), so
+      // it must be ABSENT from her scoped list (session scoping already proven via
+      // /api/me above).
+      const listResp = await page.request.get(`${orgOrigin('acme')}/api/agents`);
+      expect(listResp.status(), 'the satellite session authenticates to acme data').toBe(200);
       await expect
         .poll(async () => (await agentsAt(page, orgOrigin('acme'))).some((a) => a.agentId === acmeAgentId), {
-          timeout: 30_000,
+          timeout: 15_000,
         })
-        .toBe(true);
+        .toBe(false);
     } finally {
       await ctx.close();
     }
@@ -227,8 +234,13 @@ test.describe('organization subdomains', () => {
     try {
       const viewer = await viewerCtx.newPage();
       await loginAt(viewer, orgOrigin('acme'), 'viewer', 'viewer');
-      // Token-scoped read works on the matching host: acme session sees acme's agent.
-      expect((await agentsAt(viewer, orgOrigin('acme'))).some((a) => a.agentId === acmeAgentId)).toBe(true);
+      // Token-scoped read works on the matching host: acme session authenticates
+      // (200). Under tenant-visibility Phase 2 the member is own-only, so alice's
+      // acme agent is NOT in viewer's list — the session reaching acme's data plane
+      // is proven by the authenticated 200, not by seeing a co-member's agent.
+      const acmeRead = await viewer.request.get(`${orgOrigin('acme')}/api/agents`);
+      expect(acmeRead.status(), 'acme session authenticates on the matching host').toBe(200);
+      expect((await agentsAt(viewer, orgOrigin('acme'))).some((a) => a.agentId === acmeAgentId)).toBe(false);
 
       // Replay that SAME context against the globex host. The acme session cookie is
       // host-scoped (acme.localtest.me), so the browser refuses to send it to globex:
@@ -287,14 +299,16 @@ test.describe('organization subdomains', () => {
     const ctx = await browser.newContext();
     try {
       const page = await ctx.newPage();
-      // alice (realm admin) at the apex lands on the org-less Global view.
-      await loginAt(page, APEX_ORIGIN, 'alice', 'alice');
+      // root (the platform master admin — realm `admin`, member of no org) at the
+      // apex lands on the org-less Global view. (alice is only an org admin now and
+      // has no Global view.)
+      await loginAt(page, APEX_ORIGIN, 'root', 'root');
       expect(hostOf(page.url())).toBe(APEX_HOST);
       await expect(page.locator('[data-testid="active-org"]')).toContainText(/global/i, { timeout: 30_000 });
       const me = await apiMe(page, APEX_ORIGIN);
       expect(me.isApex, 'the apex is the apex').toBe(true);
       expect(me.activeOrg, 'the Global view is org-less').toBeFalsy();
-      expect(me.isAdmin, 'alice is a realm admin').toBe(true);
+      expect(me.isAdmin, 'root is a realm admin').toBe(true);
 
       // The apex proxies Keycloak (single OIDC issuer lives here)...
       const apexKc = await page.request.get(`${APEX_ORIGIN}/realms/spawnly/.well-known/openid-configuration`);
@@ -334,29 +348,38 @@ test.describe('organization subdomains', () => {
     }
   });
 
-  test('(g) picking an org from the apex switcher NAVIGATES to its subdomain (silently)', async ({ browser }) => {
-    // Each org's home is its subdomain, so choosing an org from the header switcher
-    // must take the browser to <slug>.<apex> — from the apex too, not only from a
-    // satellite. alice (realm admin) starts on the apex Global view.
+  // (g) The master admin's APEX Global switcher lists ALL orgs (directory data,
+  // tenant-visibility Phase 3), so root picks a tenant to jump into. Because root is
+  // a member of NO org, the switcher navigates to <slug>.<apex>/signin?viewas=1 —
+  // an ORG-LESS satellite login (skipping the organization scope/param that would
+  // otherwise deny a non-member at the IdP). Root's apex Keycloak SSO session makes
+  // it password-less; landing org-less on the satellite, the realm-admin selfHeal
+  // EXEMPTION sets viewingOrg to the host org (host selects, the realm-admin role
+  // authorizes), so root views that tenant's scoped dashboard. This is the subdomain
+  // path of the master-admin view-as-org. (A genuine MEMBER navigating via the
+  // switcher logs in normally — org-scoped, not viewas.)
+  test('(g) picking an org from the apex switcher NAVIGATES to its subdomain and views that tenant', async ({ browser }) => {
     const ctx = await browser.newContext();
     try {
       const page = await ctx.newPage();
-      await loginAt(page, APEX_ORIGIN, 'alice', 'alice');
+      await loginAt(page, APEX_ORIGIN, 'root', 'root');
       expect(hostOf(page.url()), 'starts on the apex').toBe(APEX_HOST);
       const switcher = page.locator('#org-switcher');
-      await expect(switcher, 'the apex Global view offers the org switcher').toBeVisible({ timeout: 30_000 });
+      await expect(switcher, 'the apex Global switcher lists all orgs for a realm admin').toBeVisible({ timeout: 30_000 });
+      // The switcher enumerates ALL tenants (not just member orgs) plus Global.
+      await expect(switcher.locator('option[value="acme"]')).toHaveCount(1);
+      await expect(switcher.locator('option[value="globex"]')).toHaveCount(1);
 
-      // Selecting acme fires the switcher's navigate-to-subdomain: the browser goes
-      // to the acme satellite and silently re-auths via the shared apex SSO session
-      // (no login form). The URL must end up on the acme subdomain — the regression
-      // this guards is the switch leaving the browser parked on the apex origin.
+      // Selecting acme navigates to the acme satellite; the browser must END UP on the
+      // acme subdomain (the regression this guards is the switch parking on the apex).
       await Promise.all([
         page.waitForURL(`https://acme.${APEX_HOST}/**`, { timeout: 30_000 }),
         switcher.selectOption('acme'),
       ]);
-      await expect(page.locator(LOGIN_USERNAME), 'apex→satellite switch must be password-less').not.toBeVisible();
+      await expect(page.locator(LOGIN_USERNAME), 'apex→satellite entry must be password-less').not.toBeVisible();
       await expect(page.locator('#agent-list')).toBeVisible({ timeout: 30_000 });
-      expect(hostOf(page.url()), 'the switch lands on the org subdomain, not the apex').toBe(`acme.${APEX_HOST}`);
+      expect(hostOf(page.url()), 'lands on the org subdomain, not the apex').toBe(`acme.${APEX_HOST}`);
+      // The selfHeal exemption put root into acme's view-as-org (activeOrg = acme).
       await expect
         .poll(async () => (await apiMe(page, orgOrigin('acme'))).activeOrg, { timeout: 30_000 })
         .toBe('acme');

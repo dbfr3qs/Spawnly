@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import {
   login,
   DEMO_USER,
+  DEMO_PASS,
   LOGIN_USERNAME,
   LOGIN_PASSWORD,
   LOGIN_SUBMIT,
@@ -51,7 +52,9 @@ test.describe('unauthenticated', () => {
   });
 
   test('login then logout ends the session at the app and the IdP', async ({ page }) => {
-    await login(page);
+    // alice is a multi-org (acme+initech) non-admin now, so an org-less login lands
+    // on the org picker — scope her to acme to reach a concrete shell.
+    await login(page, DEMO_USER, DEMO_PASS, 'acme');
     // Logged in: the API is now reachable.
     expect((await page.request.get('/api/agents')).ok()).toBeTruthy();
 

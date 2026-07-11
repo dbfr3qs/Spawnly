@@ -27,14 +27,17 @@ test.describe('ownership scoping', () => {
     test.setTimeout(120_000);
     await page.goto('/');
 
-    // Spawn an agent as the session user; it must appear in the scoped list.
+    // Spawn an agent as the session user; it must appear in the scoped list. Wait
+    // for `active` (pod self-registered) — the owner/org SpiceDB tuples that
+    // `manage` depends on are written at self-registration, not at preregister, so
+    // the owner-delete below would 404 against a merely-preregistered agent.
     const id = await spawn(page, 'weather-monitor');
     spawned.push(id);
     await expect
-      .poll(async () => (await listAgents(page)).some((a) => a.agentId === id), {
-        timeout: 30_000,
+      .poll(async () => (await listAgents(page)).find((a) => a.agentId === id)?.status ?? '', {
+        timeout: 120_000,
       })
-      .toBe(true);
+      .toMatch(/active/i);
 
     // The Phase-B regression: a crafted agent id that embeds a different
     // `?userId=` must NOT delete the agent. The dashboard PathEscapes the id, so

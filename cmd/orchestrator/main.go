@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -146,12 +147,24 @@ func isContainerNotReadyErr(err error) bool {
 }
 
 // SpiceDB agent permissions (schema.zed): view = read (events/logs/chain);
-// manage = mutate (message/revoke/resume/dismiss/delete). Same names the
-// registry checks — kept here so the orchestrator-tier gate matches.
+// manage = mutate (message/revoke/resume/dismiss/delete). Both are now
+// owner + org admin (tenant-visibility Phase 2): a plain member sees ONLY the
+// agents they own. Same names the registry checks — kept here so the
+// orchestrator-tier gate matches.
 const (
 	actionView   = "view"
 	actionManage = "manage"
 )
+
+// validViewingOrg constrains the realm-admin view-as-org query param (?org=) to
+// the same shape the registry enforces for org ids (cmd/registry/orgs.go
+// validOrgID): a DNS-label alias slug or an opaque GUID (both lowercase, no
+// leading/trailing hyphen, ≤63 chars). It is used ONLY to reject a malformed
+// ?org= before it becomes an equality filter on a.OrgID — the value is never
+// spliced into a query/scope string — and it is honored EXCLUSIVELY for a
+// realm-admin token (the isolation invariant), so a normal caller's ?org= is
+// ignored regardless of shape.
+var validViewingOrg = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // agentAllowed reports whether userId is allowed the given action on the agent —
 // the orchestrator-tier mirror of the registry's agentAllowed (Phase-4 authz
@@ -168,6 +181,16 @@ func agentAllowed(ctx context.Context, regClient registry.Client, sdb spicedb.Cl
 	if err != nil || rec.AgentID == "" {
 		return false
 	}
+	// Realm-admin (platform master admin) bypass: the `admin` role authorizes
+	// view AND manage over ANY registered agent — the per-agent mirror of the
+	// list view-as-org and requireOrgAdmin's realm-admin bypass. Roles ride the
+	// request context (requireToken stashes claims.Roles); only a realm-admin
+	// token carries it, so this widens nothing for a normal user. The GetAgent
+	// above still gates on the agent EXISTING, so an unknown id 404s for an admin
+	// too (no existence oracle beyond what a platform admin may already enumerate).
+	if hasRole(ctx, "admin") {
+		return true
+	}
 	if rec.OrgID == "" {
 		return rec.UserID == userId
 	}
@@ -177,6 +200,29 @@ func agentAllowed(ctx context.Context, regClient registry.Client, sdb spicedb.Cl
 		return false
 	}
 	return ok
+}
+
+// manageUserID resolves the userId the orchestrator presents to the registry's
+// per-agent manage BACKSTOP (the registry re-checks agentAllowed on the forwarded
+// userId as defense in depth). For a normal caller it is their own token sub — the
+// same sub that just passed requireCanManage authorizes at the registry too. For a
+// REALM ADMIN acting via the view-as-org bypass — who holds no owner tuple or
+// org-admin SpiceDB relation the registry could check — it resolves to the TARGET
+// AGENT'S OWNER, whose self-registration owner tuple authorizes the SAME manage op
+// at the registry. The realm admin was already authorized at the orchestrator gate
+// (canManage's admin bypass); this only satisfies the registry's re-check WITHOUT a
+// registry change and WITHOUT a forgeable admin flag. An unresolvable owner (unknown
+// agent / empty owner) falls back to the token sub, so the registry denies — fail-closed.
+func manageUserID(ctx context.Context, regClient registry.Client, id string) string {
+	tokenUser := userIDFrom(ctx)
+	if !hasRole(ctx, "admin") {
+		return tokenUser
+	}
+	rec, err := regClient.GetAgent(ctx, id)
+	if err != nil || rec.UserID == "" {
+		return tokenUser
+	}
+	return rec.UserID
 }
 
 // canView / canManage are the two authority levels the orchestrator gates on.
@@ -434,6 +480,34 @@ func fetchOrg(ctx context.Context, registryURL string, cpBearer func() string, o
 		return registry.Organization{}, err
 	}
 	return org, nil
+}
+
+// fetchOrgs lists every org from the registry over the control-plane bearer (the
+// cp-gated GET /v1/orgs, the SAME source the /v1/admin/orgs forward uses). It
+// backs the master-admin platform counts (GET /v1/admin/stats); a non-200
+// surfaces as an error so the stats handler fails loudly rather than reporting a
+// misleadingly low org count.
+func fetchOrgs(ctx context.Context, registryURL string, cpBearer func() string) ([]registry.Organization, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", registryURL+"/v1/orgs", nil)
+	if err != nil {
+		return nil, err
+	}
+	if t := cpBearer(); t != "" {
+		req.Header.Set("Authorization", "Bearer "+t)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("registry GET /v1/orgs returned %d", resp.StatusCode)
+	}
+	var orgs []registry.Organization
+	if err := json.NewDecoder(resp.Body).Decode(&orgs); err != nil {
+		return nil, err
+	}
+	return orgs, nil
 }
 
 // rolesFrom returns the role claims stashed in the request context by
@@ -774,16 +848,47 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		userID := userIDFrom(ctx)
 		orgID := orgIDFrom(ctx)
 
+		type agentListItem struct {
+			registry.AgentRecord
+			CanManage bool `json:"canManage"`
+		}
+
+		// Master-admin VIEW-AS-ORG (tenant-visibility Phase 3): a realm admin may
+		// enter any tenant. A validated ?org= names the viewing org, honored
+		// EXCLUSIVELY for a realm-admin token — their `admin` role authorizes it (the
+		// same bypass family as requireOrgAdmin). For everyone else ?org= is IGNORED:
+		// a normal caller's org comes ONLY from their token claim (orgIDFrom), so a
+		// forged/extra org param can never widen scope (the isolation invariant, spec
+		// criterion 7 — TestListAgents_IsolationInvariant). An org-less realm admin
+		// (no ?org=) keeps the own-only rule below (root owns nothing → empty list).
+		if hasRole(ctx, "admin") {
+			if viewingOrg := r.URL.Query().Get("org"); viewingOrg != "" && validViewingOrg.MatchString(viewingOrg) {
+				items := make([]agentListItem, 0, len(agents))
+				for _, a := range agents {
+					// Every agent in the entered tenant, all manageable (the realm role
+					// grants full admin over that tenant's agents). Per-tenant scoping
+					// holds: only a.OrgID == viewingOrg, never another org's agents.
+					if a.OrgID != "" && a.OrgID == viewingOrg {
+						items = append(items, agentListItem{AgentRecord: a, CanManage: true})
+					}
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(items)
+				return
+			}
+		}
+
 		// The caller's org authority is resolved against SpiceDB ONCE per request
-		// (not per agent): two facts drive the whole list — is the caller a current
-		// MEMBER of their active org (org read-visibility) and are they an ADMIN
-		// (manage over every org agent). Deriving visibility from SpiceDB, not the
-		// bare `organization` claim, keeps the list consistent with the per-agent
-		// gates: when a member is removed their SpiceDB tuples drop immediately, so
-		// a still-unexpired org token can no longer enumerate the org's agents
-		// (closing a stale-token metadata leak). admin ⊇ member in the schema, so an
-		// admin need not be re-checked for membership.
-		isOrgMember, isOrgAdmin := false, false
+		// (not per agent): a single fact drives the whole list — is the caller an
+		// ADMIN of their active org (view + manage over EVERY org agent, tenant-
+		// visibility Phase 2). A plain member is NOT org-wide visible: a member sees
+		// only agents they own (the own-agent term below), matching the tightened
+		// `agent.view = owner + org->admin_agents` schema and the per-agent gates.
+		// Deriving visibility from SpiceDB, not the bare `organization` claim, keeps
+		// the list consistent with those gates: when an admin is demoted their
+		// SpiceDB tuple drops immediately, so a still-unexpired org token can no
+		// longer enumerate the org's agents (closing a stale-token metadata leak).
+		isOrgAdmin := false
 		if userID != "" && orgID != "" {
 			orgObj := "organization:" + spicedb.EncodeObjectID(orgID)
 			userObj := "user:" + spicedb.EncodeObjectID(userID)
@@ -794,38 +899,25 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 				log.Printf("list: org-admin check for user %s org %s failed (treating as non-admin): %v", userID, orgID, cerr)
 			}
 			isOrgAdmin = adminOK
-			if isOrgAdmin {
-				isOrgMember = true
-			} else {
-				memberOK, merr := sdb.CheckPermission(ctx, orgObj, "view_agents", userObj)
-				if merr != nil {
-					log.Printf("list: org-member check for user %s org %s failed (treating as non-member): %v", userID, orgID, merr)
-				}
-				isOrgMember = memberOK
-			}
 		}
 
 		// Visibility (spec matrix): a caller sees their OWN agents (org-scoped or
-		// org-less, always — the record UserID is the owner) PLUS every agent in
-		// their ACTIVE org when SpiceDB confirms membership. Cross-org agents and
-		// other users' org-less agents are invisible. The own-agent term keeps the
-		// list consistent with the per-agent gates: canView/canManage still succeed
-		// on your own org agent via its owner tuple even in a removed-member window,
-		// so it must still appear here. Per-agent canManage: owner always; org
+		// org-less, always — the record UserID is the owner) PLUS, for an org
+		// ADMIN, every agent in their ACTIVE org. A plain member sees only their
+		// own agents; cross-org agents and other users' org-less agents are always
+		// invisible. The own-agent term keeps the list consistent with the per-agent
+		// gates: canView/canManage still succeed on your own org agent via its owner
+		// tuple, so it must appear here. Per-agent canManage: owner always; org
 		// admins over any agent in their org. Record-field equality on the rows —
-		// no PER-ROW SpiceDB (the two org checks above are per-request).
-		type agentListItem struct {
-			registry.AgentRecord
-			CanManage bool `json:"canManage"`
-		}
+		// no PER-ROW SpiceDB (the org-admin check above is per-request).
 		items := make([]agentListItem, 0, len(agents))
 		for _, a := range agents {
 			own := a.UserID != "" && a.UserID == userID
-			inOrg := isOrgMember && a.OrgID != "" && a.OrgID == orgID
+			inOrg := isOrgAdmin && a.OrgID != "" && a.OrgID == orgID
 			if !own && !inOrg {
 				continue
 			}
-			canManage := own || (inOrg && isOrgAdmin)
+			canManage := own || inOrg
 			items = append(items, agentListItem{AgentRecord: a, CanManage: canManage})
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -834,7 +926,8 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	mux.HandleFunc("GET /v1/agents/{id}/events", requireToken(validator, audience, readScope, func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		// events are a read → view authority (owner or any same-org member).
+		// events are a read → view authority (owner or org admin; a plain member
+		// sees only agents they own, so a non-owned org agent 404s here).
 		if !canView(r.Context(), regClient, sdb, id, userIDFrom(r.Context())) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -850,7 +943,8 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	mux.HandleFunc("GET /v1/agents/{id}/logs", requireToken(validator, audience, readScope, func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
-		// logs are a read → view authority (owner or any same-org member).
+		// logs are a read → view authority (owner or org admin; a plain member
+		// sees only agents they own, so a non-owned org agent 404s here).
 		if !canView(r.Context(), regClient, sdb, id, userIDFrom(r.Context())) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -978,12 +1072,18 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
+		// The registry's subtree read re-checks manage on the forwarded userId. For a
+		// realm admin (view-as-org, no owner/org tuple the registry could verify)
+		// present the ROOT agent's owner, whose owner tuple authorizes the same
+		// enumeration — the manage-backstop parity the mutation forwards use. A
+		// normal caller forwards their own already-authorized sub.
+		subtreeUserID := manageUserID(ctx, regClient, id)
 		const maxPasses = 8
 		deleted := 0
 		failedSet := map[string]bool{} // node ids whose delete errored (non-NotFound)
 
 		for pass := 0; pass < maxPasses; pass++ {
-			nodes, err := regClient.Subtree(ctx, id, userID)
+			nodes, err := regClient.Subtree(ctx, id, subtreeUserID)
 			if err != nil {
 				if pass == 0 {
 					http.Error(w, "registry unavailable", http.StatusBadGateway)
@@ -1063,6 +1163,22 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		return path
 	}
 
+	// withManageUserID is withUserID for the per-agent MANAGE forwards
+	// (dismiss/revoke/resume): it stamps the manageUserID (the caller's sub, or the
+	// target agent's owner for a realm admin) as the authoritative userId so the
+	// registry's manage backstop authorizes the op the orchestrator already gated.
+	withManageUserID := func(path string, r *http.Request, id string) string {
+		q := r.URL.Query()
+		q.Del("userId")
+		if uid := manageUserID(r.Context(), regClient, id); uid != "" {
+			q.Set("userId", uid)
+		}
+		if enc := q.Encode(); enc != "" {
+			return path + "?" + enc
+		}
+		return path
+	}
+
 	// requireCanManage is the primary authorization gate for the per-agent
 	// mutations the orchestrator forwards to the registry (dismiss/revoke/resume).
 	// It sits INSIDE requireToken — which has already validated the access token
@@ -1088,7 +1204,7 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		// forwarded userId keeps the registry's own agentOwnedBy check as a
 		// backstop.
 		req2, err := http.NewRequestWithContext(r.Context(), "POST",
-			registryURL+withUserID("/v1/agents/"+id+"/dismiss", r), nil)
+			registryURL+withManageUserID("/v1/agents/"+id+"/dismiss", r, id), nil)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
@@ -1142,10 +1258,10 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	// Ownership is gated here at the orchestrator (requireOwnedAgent, token sub);
 	// the forwarded userId leaves the registry's agentOwnedBy check as a backstop.
 	mux.HandleFunc("POST /v1/agents/{id}/revoke", requireToken(validator, audience, writeScope, requireCanManage(forwardToRegistry("POST", func(r *http.Request) string {
-		return withUserID("/v1/agents/"+r.PathValue("id")+"/revoke", r)
+		return withManageUserID("/v1/agents/"+r.PathValue("id")+"/revoke", r, r.PathValue("id"))
 	}))))
 	mux.HandleFunc("POST /v1/agents/{id}/resume", requireToken(validator, audience, writeScope, requireCanManage(forwardToRegistry("POST", func(r *http.Request) string {
-		return withUserID("/v1/agents/"+r.PathValue("id")+"/resume", r)
+		return withManageUserID("/v1/agents/"+r.PathValue("id")+"/resume", r, r.PathValue("id"))
 	}))))
 
 	// withCallerOrg appends the caller's active org (the token's organization
@@ -1252,6 +1368,31 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	// so the registry's cp-gated org endpoints authorize. The registry is the
 	// single dual-write choke point (Keycloak + SpiceDB); the orchestrator only
 	// forwards. Org-admin self-service over their OWN org arrives in Phase 6.
+	// GET /v1/admin/stats — the master-admin Global landing's MINIMAL platform
+	// counts (tenant-visibility Phase 3): {orgCount, agentCount}. NO agent records
+	// in the payload — the Global view is an org directory + counts, never a
+	// cross-tenant agent list. Same realm-admin gate (requireAdmin) and same
+	// sources the admin surfaces already use: the registry orgs list (the
+	// /v1/admin/orgs forward's source) and regClient.ListAgents. A source error
+	// fails the request (502) rather than reporting a misleadingly low count.
+	mux.HandleFunc("GET /v1/admin/stats", requireAdmin(validator, audience, readScope, func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		orgs, err := fetchOrgs(ctx, registryURL, controlPlaneBearer)
+		if err != nil {
+			log.Printf("admin/stats: list orgs: %v", err)
+			http.Error(w, "registry unavailable", http.StatusBadGateway)
+			return
+		}
+		agents, err := regClient.ListAgents(ctx)
+		if err != nil {
+			log.Printf("admin/stats: list agents: %v", err)
+			http.Error(w, "registry unavailable", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]int{"orgCount": len(orgs), "agentCount": len(agents)})
+	}))
+
 	mux.HandleFunc("POST /v1/admin/orgs", requireAdmin(validator, audience, writeScope, forwardToRegistry("POST", func(*http.Request) string {
 		return "/v1/orgs"
 	})))

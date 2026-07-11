@@ -1,6 +1,6 @@
 import { test, expect, type Browser, type APIRequestContext } from '@playwright/test';
 import { deleteTemplate, setTemplateStatus } from '../helpers/templates';
-import { login } from '../helpers/auth';
+import { contextFor, reachDashboardShell, login } from '../helpers/auth';
 
 // Admin Agent Types UI — the dashboard's management view for agent templates.
 // Exercises the real UI (click → fill → save) against the admin-gated routes the
@@ -22,15 +22,34 @@ const VIEWER_USER = 'viewer';
 const VIEWER_PASS = 'viewer';
 
 test.describe('admin agent-types UI', () => {
-  test.afterAll(async ({ request }) => {
-    // Best-effort cleanup so a mid-test failure can't leak the throwaway type.
-    await setTemplateStatus(request, TYPE, 'disabled').catch(() => {});
-    await deleteTemplate(request, TYPE).catch(() => {});
+  test.afterAll(async ({ browser }) => {
+    // Best-effort cleanup so a mid-test failure can't leak the throwaway type. The
+    // type is created by root as a GLOBAL template, so clean it as root — the cached
+    // alice request fixture (an org admin) can't touch a global template.
+    const ctx = await contextFor(browser, 'root');
+    try {
+      await setTemplateStatus(ctx.request, TYPE, 'disabled').catch(() => {});
+      await deleteTemplate(ctx.request, TYPE).catch(() => {});
+    } finally {
+      await ctx.close();
+    }
   });
 
-  test('admin: create → appears → edit → delete-while-active blocked → disable → delete', async ({ page }) => {
-    // 1. Open the admin view (the nav button is shown only for admins).
+  test('admin: create → appears → edit → delete-while-active blocked → disable → delete', async ({ browser }: { browser: Browser }) => {
+    // This exercises the REALM-admin template surface: the full list at
+    // /api/admin/templates (realm-admin gated) that the Agent Types view reads for
+    // an admin. The default demo user (alice) is only an ORG admin now, so drive it
+    // in a fresh `root` context (the platform master admin) rather than the cached
+    // alice storage state. (An org admin manages her org's templates via the
+    // /api/org/templates twin — a separate path, covered by org-templates.spec.)
+    const ctx = await contextFor(browser, 'root');
+    const page = await ctx.newPage();
+    try {
+    // 1. Open the admin view (the nav button is shown only for admins). root is an
+    //    org-less realm admin, so a fresh load shows the Global gate — click through
+    //    it first so the overlay can't intercept the nav clicks below.
     await page.goto('/');
+    await reachDashboardShell(page);
     await expect(page.locator('#open-agent-types-btn')).toBeVisible({ timeout: 15_000 });
     await page.locator('#open-agent-types-btn').click();
     // The view replaces the main agent list and fetches the full template set.
@@ -103,10 +122,16 @@ test.describe('admin agent-types UI', () => {
     // 9. Gone from the admin table.
     await expect(row).toHaveCount(0, { timeout: 15_000 });
 
-    // Restore the main agent list when leaving the admin view.
+    // Leaving the admin view restores the primary body. root is an org-less realm
+    // admin, so its primary body is the master-admin Global org DIRECTORY
+    // (tenant-visibility Phase 3) — NOT the agents <main>, which stays hidden on the
+    // Global landing (root has no agent list).
     await page.locator('#agent-types-back-btn').click();
-    await expect(page.locator('main')).toBeVisible();
+    await expect(page.locator('[data-testid="org-directory"]')).toBeVisible();
     await expect(page.locator('#agent-types-view')).toBeHidden();
+    } finally {
+      await ctx.close();
+    }
   });
 
   test('non-admin viewer: nav hidden + admin routes 403', async ({ browser }: { browser: Browser }) => {

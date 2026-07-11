@@ -81,8 +81,15 @@ variable "machine_client_secret" {
 # can omit the viewer entirely by leaving viewer_password = "".
 # ---------------------------------------------------------------------------
 
+variable "root_password" {
+  description = "Initial password for the platform master admin `root` (holds the realm `admin` role, member of no org). Empty => root not created."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "alice_password" {
-  description = "Initial password for the admin user `alice`. Empty => alice not created."
+  description = "Initial password for the acme org admin `alice` (SpiceDB org-admin tuple, NOT a realm role). Empty => alice not created."
   type        = string
   sensitive   = true
   default     = ""

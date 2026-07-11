@@ -34,10 +34,11 @@ endpoints resolve to the in-cluster backchannel host
   the six machine clients `weather-monitor` / `chain-worker` / `travel-planner`
   / `flight-search` / `hotel-search` / `fx-converter` (client-credentials with
   a placeholder secret; 120s token lifespan where Config.cs sets it).
-- **Users** — `alice` (realm role `admin`), `viewer` and `bob` (no realm role),
-  created only when their password variable is non-empty (fail-closed). `bob` is
-  the org admin of the demo `globex` org — via a SpiceDB tuple written by the
-  onboarding API, NOT a realm role (see below).
+- **Users** — `root` (realm role `admin`, member of no org — the platform master
+  admin), `alice` / `viewer` / `bob` (no realm role), created only when their
+  password variable is non-empty (fail-closed). `alice` is the org admin of the
+  demo `acme` org and `bob` of `globex` — each via a SpiceDB tuple written by the
+  onboarding API, NOT a realm role (see below). `root` is the ONLY realm admin.
 - **`org-admin` client** — a confidential client-credentials client the registry
   uses to drive Keycloak Organizations/Users (multi-tenancy). Its service account
   holds exactly two `realm-management` roles, `manage-users` + `manage-realm`

@@ -9,7 +9,10 @@
 definition user {}
 
 // The SaaS-account authorization boundary (the org primitive, distinct from
-// `tenant`). Membership is mirrored here from Keycloak.
+// `tenant`). Membership is mirrored here from Keycloak. admin_agents is what
+// agent view/manage fan into (an org admin sees/manages every org agent);
+// view_agents backs org-MEMBERSHIP checks only, NOT per-agent visibility — a
+// plain member sees ONLY the agents they own.
 definition organization {
     relation member: user
     relation admin: user
@@ -22,10 +25,12 @@ definition agent {
 
     // Human lifecycle authority. view/manage deliberately omit `& agent->enabled`
     // (resume must be checkable on a revoked agent); the enabled intersection is
-    // for agent-runtime permissions like tenant.work_on, not these.
+    // for agent-runtime permissions like tenant.work_on, not these. Both are now
+    // owner + org admin: a plain member sees ONLY agents they own; an org admin
+    // sees and manages every agent in the org.
     relation owner: user
     relation org: organization
-    permission view = owner + org->view_agents
+    permission view = owner + org->admin_agents
     permission manage = owner + org->admin_agents
 }
 
