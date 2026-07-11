@@ -202,6 +202,18 @@ func (a *Authenticator) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "auth unavailable: "+err.Error(), http.StatusBadGateway)
 		return
 	}
+	// Master-admin view-as-org entry on a satellite (tenant-visibility Phase 3):
+	// ?viewas=1 forces an ORG-LESS login (no organization scope/param). The master
+	// admin (root) is a member of NO org, so the normal org-scoped satellite login
+	// below would be DENIED at Keycloak (the organization param's non-member deny);
+	// logging in org-less lets a realm admin authenticate, after which the selfHeal
+	// exemption sets the session's viewingOrg from the host. NOT a privilege grant:
+	// the resulting token is org-less and viewingOrg is honored only for a realm-
+	// admin role — a non-admin who reaches here just gets an org-less session.
+	if r.URL.Query().Get("viewas") == "1" {
+		a.startAuth(w, r, "", false, "")
+		return
+	}
 	org := ""
 	if o := r.URL.Query().Get("org"); o != "" && validOrgAlias.MatchString(o) {
 		org = o

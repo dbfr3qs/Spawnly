@@ -349,18 +349,16 @@ test.describe('organization subdomains', () => {
   });
 
   // (g) The master admin's APEX Global switcher lists ALL orgs (directory data,
-  // tenant-visibility Phase 3), so root can pick a tenant. The IN-APP switcher path
-  // (single-origin /switch-org in-place → viewingOrg) works and is covered by the
-  // default-suite root drill-in tests. The SUBDOMAIN path here is DEFERRED:
-  // navigating root to <slug>.<apex> starts a fresh OIDC login that requests
-  // `organization=<slug>`, which Keycloak DENIES for a non-member (root belongs to
-  // no org) at the IdP — the exact non-member deny org-subdomains established (case
-  // c). The selfHeal view-as-org exemption only applies once root has a satellite
-  // session, which it can't obtain via the org-scoped login. Reconciling the
-  // master-admin subdomain entry with the org `organization`-param non-member deny
-  // (e.g. an org-less-then-view-as-org satellite login for a realm admin) is its own
-  // design pass — tracked as a follow-up. The in-app switcher covers the criterion.
-  test.fixme('(g) picking an org from the apex switcher NAVIGATES to its subdomain and views that tenant', async ({ browser }) => {
+  // tenant-visibility Phase 3), so root picks a tenant to jump into. Because root is
+  // a member of NO org, the switcher navigates to <slug>.<apex>/signin?viewas=1 —
+  // an ORG-LESS satellite login (skipping the organization scope/param that would
+  // otherwise deny a non-member at the IdP). Root's apex Keycloak SSO session makes
+  // it password-less; landing org-less on the satellite, the realm-admin selfHeal
+  // EXEMPTION sets viewingOrg to the host org (host selects, the realm-admin role
+  // authorizes), so root views that tenant's scoped dashboard. This is the subdomain
+  // path of the master-admin view-as-org. (A genuine MEMBER navigating via the
+  // switcher logs in normally — org-scoped, not viewas.)
+  test('(g) picking an org from the apex switcher NAVIGATES to its subdomain and views that tenant', async ({ browser }) => {
     const ctx = await browser.newContext();
     try {
       const page = await ctx.newPage();

@@ -3294,7 +3294,13 @@
     if (ME.apexDomain) {
       const proto = window.location.protocol;
       if (v) {
-        window.location = `${proto}//${v}.${ME.apexDomain}/`;
+        // The master admin (realm admin) is a member of NO org, so the satellite's
+        // normal org-scoped login would be denied at Keycloak. Enter org-less via
+        // ?viewas=1 — the dashboard skips the org scope and the selfHeal exemption
+        // sets the viewing org from the host. A genuine member logs in normally.
+        window.location = ME.isAdmin
+          ? `${proto}//${v}.${ME.apexDomain}/signin?viewas=1`
+          : `${proto}//${v}.${ME.apexDomain}/`;
       } else {
         window.location = ME.isApex ? '/switch-org' : `${proto}//${ME.apexDomain}/`;
       }
