@@ -65,9 +65,19 @@ resource "keycloak_authentication_execution" "spawnly_attestation" {
   depends_on        = [keycloak_authentication_execution.client_x509]
 }
 
-# Bind our flow as the realm's client-authentication flow.
+# Bind our custom flows as the realm's client-authentication and registration
+# flows. There is exactly ONE authentication-bindings resource per realm (it
+# manages ALL of the realm's flow bindings together), so the registration-flow
+# binding from registration-flow.tf is set HERE rather than in a second bindings
+# resource — two of them would fight over the realm's binding config on every
+# apply. Any binding left unset falls back to Keycloak's built-in flow of that
+# name (e.g. browser/reset-credentials stay stock).
 resource "keycloak_authentication_bindings" "spawnly" {
   realm_id                   = keycloak_realm.spawnly.id
   client_authentication_flow = keycloak_authentication_flow.clients_spawnly.alias
-  depends_on                 = [keycloak_authentication_execution.spawnly_attestation]
+  registration_flow          = keycloak_authentication_flow.registration_spawnly.alias
+  depends_on = [
+    keycloak_authentication_execution.spawnly_attestation,
+    keycloak_authentication_execution.spawnly_user_cap,
+  ]
 }

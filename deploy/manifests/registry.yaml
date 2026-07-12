@@ -94,6 +94,16 @@ spec:
             # `dashboard` (matches deploy/keycloak/clients.tf); only set to override.
             # - name: DASHBOARD_CLIENT_ID
             #   value: "dashboard"
+            # Global org cap (signup-lifecycle Phase 2): when set to a positive
+            # integer, self-serve org creation (POST /v1/orgs?selfServe=1, i.e. the
+            # dashboard no-org screen -> /api/signup/org) is rejected with a
+            # friendly 403 once the platform holds this many orgs OR MORE. UNSET (as
+            # here on kind) / empty / 0 = UNLIMITED. The platform-admin onboarding
+            # path (POST /v1/orgs with no selfServe flag, /api/admin/orgs) is NOT
+            # gated, so a master admin always provisions beyond the cap. Uncomment
+            # to enable a ceiling:
+            # - name: MAX_ORGS
+            #   value: "100"
             # --- oidc tier ---
             # - name: CONTROL_PLANE_OIDC_JWKS_URL
             #   value: "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs"

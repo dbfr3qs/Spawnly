@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1030,7 +1031,20 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	// satellite lives (e.g. spawnly.run / localtest.me). Empty = feature off →
 	// org create/delete skip registering satellite redirect URIs on the dashboard
 	// client.
-	registerOrgRoutes(mux, s, sdb, dir, getEnv("ORG_APEX_DOMAIN", ""), cp)
+	// MAX_ORGS (signup-lifecycle Phase 2): a global ceiling on self-serve org
+	// creation. Unset/empty/0/non-positive/unparseable ⇒ unlimited (0 sentinel);
+	// only a well-formed positive integer arms the cap, enforced on the
+	// ?selfServe=1 path in registerOrgRoutes. The platform-admin onboarding path
+	// is deliberately NOT gated (admin bypass).
+	maxOrgs := 0
+	if v := strings.TrimSpace(os.Getenv("MAX_ORGS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxOrgs = n
+		} else {
+			log.Printf("ignoring invalid MAX_ORGS=%q (treating as unlimited)", v)
+		}
+	}
+	registerOrgRoutes(mux, s, sdb, dir, getEnv("ORG_APEX_DOMAIN", ""), maxOrgs, cp)
 
 	// Template management (create/disable/delete) is a control-plane operation,
 	// so it sits behind the same control-plane authenticator as the consent

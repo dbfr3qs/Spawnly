@@ -69,7 +69,10 @@ func requireOrg(w http.ResponseWriter, ctx context.Context, s registry.Store, id
 // deploy/keycloak/README.md). These endpoints are platform-admin only in Phase 3
 // (the orchestrator gates them with requireAdmin); org-admin self-service arrives
 // in Phase 6.
-func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client, dir orgdirectory.Directory, apexDomain string, cp func(http.HandlerFunc) http.HandlerFunc) {
+// maxOrgs is the global self-serve org ceiling (signup-lifecycle Phase 2): 0
+// means unlimited; a positive value rejects a self-serve create once the
+// platform holds that many orgs OR MORE. The platform-admin path is never gated.
+func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client, dir orgdirectory.Directory, apexDomain string, maxOrgs int, cp func(http.HandlerFunc) http.HandlerFunc) {
 	// Per-org attestation-anchor lifecycle (Phase 8): PUT/DELETE .../anchor and
 	// POST .../anchor/activate. Same org-endpoints family, same cp gate; the
 	// anchor is also visible read-only in GET /v1/orgs/{id} below.
@@ -142,6 +145,26 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 			return
 		}
 		if selfServe {
+			// Global self-serve ceiling (signup-lifecycle Phase 2): reject once the
+			// platform already holds maxOrgs orgs OR MORE. 0 = unlimited. Only the
+			// self-serve path reaches here (the admin onboarding path has
+			// selfServe=false), so a master admin's POST /v1/orgs always bypasses the
+			// cap. A friendly 403 JSON body (not the plain-text guards below) so the
+			// signup UX can surface it distinctly; the count is a live ListOrgs read.
+			if maxOrgs > 0 {
+				orgs, lerr := s.ListOrgs(ctx)
+				if storeErr(w, lerr) {
+					return
+				}
+				if len(orgs) >= maxOrgs {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"error": "organization creation is currently at capacity",
+					})
+					return
+				}
+			}
 			// NOTE the deliberate asymmetry with the admin path: an admin re-POST of an
 			// existing slug idempotently converges (adds the caller as admin), but a
 			// self-serve re-POST is a hard 409 — we must never adopt a caller onto an

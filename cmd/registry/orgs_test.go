@@ -575,6 +575,88 @@ func TestSelfServeCreate_SecondOrgRejected(t *testing.T) {
 	}
 }
 
+// ── Global org cap (signup-lifecycle Phase 2) ───────────────────────────────
+// MAX_ORGS is read from the env inside buildMux, so these set it with t.Setenv
+// before building the mux. 0/unset = unlimited; the platform-admin path bypasses.
+
+func TestMaxOrgs_SelfServeAtCapRejected(t *testing.T) {
+	t.Setenv("MAX_ORGS", "1")
+	s := newStore()
+	sdb := spicedb.NewMock()
+	dir := newFakeDirectory()
+	mux := orgMux(s, sdb, dir)
+
+	// Seed one org via the platform-admin path (not gated) → count is now 1 == cap.
+	if rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "acme", "adminUser": "alice"}); rec.Code != http.StatusCreated {
+		t.Fatalf("seed admin create status = %d", rec.Code)
+	}
+	// A brand-new user's self-serve create is refused with a friendly 403 JSON.
+	rec := selfServeCreate(t, mux, "globex", "bob")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("self-serve at cap status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response body is not JSON: %v (%s)", err, rec.Body.String())
+	}
+	if !strings.Contains(body.Error, "capacity") {
+		t.Fatalf("error message = %q, want a capacity message", body.Error)
+	}
+	// Nothing was written for the rejected org.
+	if _, ok, _ := s.GetOrg(context.Background(), "globex"); ok {
+		t.Fatal("over-cap org must not be created")
+	}
+	if dir.hasCall("CreateOrg:globex") {
+		t.Fatalf("keycloak org must not be created; calls=%v", dir.calls)
+	}
+}
+
+func TestMaxOrgs_SelfServeUnderCapAllowed(t *testing.T) {
+	t.Setenv("MAX_ORGS", "5")
+	s := newStore()
+	mux := orgMux(s, spicedb.NewMock(), newFakeDirectory())
+
+	// Zero existing orgs, cap 5 → the first self-serve create succeeds.
+	if rec := selfServeCreate(t, mux, "acme", "alice"); rec.Code != http.StatusCreated {
+		t.Fatalf("under-cap self-serve status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMaxOrgs_UnsetUnlimited(t *testing.T) {
+	t.Setenv("MAX_ORGS", "") // explicit unset ⇒ unlimited
+	s := newStore()
+	mux := orgMux(s, spicedb.NewMock(), newFakeDirectory())
+
+	// Seed one org, then a different user's self-serve create still succeeds —
+	// there is no ceiling.
+	if rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "acme", "adminUser": "alice"}); rec.Code != http.StatusCreated {
+		t.Fatalf("seed create status = %d", rec.Code)
+	}
+	if rec := selfServeCreate(t, mux, "globex", "bob"); rec.Code != http.StatusCreated {
+		t.Fatalf("unlimited self-serve status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMaxOrgs_AdminPathBypassesAtCap(t *testing.T) {
+	t.Setenv("MAX_ORGS", "1")
+	s := newStore()
+	mux := orgMux(s, spicedb.NewMock(), newFakeDirectory())
+
+	// One org already exists (count == cap).
+	if rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "acme", "adminUser": "alice"}); rec.Code != http.StatusCreated {
+		t.Fatalf("first admin create status = %d", rec.Code)
+	}
+	// The platform-admin path (no selfServe) creates a SECOND org past the cap.
+	if rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "globex", "adminUser": "carol"}); rec.Code != http.StatusCreated {
+		t.Fatalf("admin bypass status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok, _ := s.GetOrg(context.Background(), "globex"); !ok {
+		t.Fatal("admin-created org past the cap should exist")
+	}
+}
+
 func TestSelfServeCreate_NoHijackOfExistingOrg(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()

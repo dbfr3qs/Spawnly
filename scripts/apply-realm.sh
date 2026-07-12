@@ -84,8 +84,15 @@ echo "==> Applying Keycloak realm via Terraform..."
 echo "  Keycloak realm applied (spawnly)."
 
 echo "==> Restarting realm-dependent services..."
+# The registry MUST restart too: re-applying the realm recreates the `org-admin`
+# Keycloak client, so the registry's cached admin token/session goes stale and its
+# org-directory calls (CreateOrg/AddMember) start failing with 401 until it
+# re-authenticates. Restarting it also gives a clean in-memory store that the
+# reseed below repopulates deterministically. (Without this, a mid-session
+# apply-realm — e.g. caps.spec.ts toggling MAX_USERS — leaves the registry 401ing.)
 kubectl rollout restart \
-  deployment/orchestrator deployment/dashboard deployment/agent-operator >/dev/null
+  deployment/registry deployment/orchestrator deployment/dashboard deployment/agent-operator >/dev/null
+kubectl rollout status deployment/registry --timeout=120s
 kubectl rollout status deployment/orchestrator --timeout=120s
 kubectl rollout status deployment/dashboard --timeout=120s
 

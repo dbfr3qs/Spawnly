@@ -3392,7 +3392,16 @@
             : '/';
           return;
         }
-        const msg = (await r.text()).trim();
+        // The registry surfaces the global-cap rejection (signup-lifecycle
+        // Phase 2) as a JSON {"error":"...at capacity"} 403, while the older
+        // self-serve guards (slug taken, one-org-per-user) are plain text. Prefer
+        // the JSON .error when present, else fall back to the raw text.
+        const raw = (await r.text()).trim();
+        let msg = raw;
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed.error === 'string') msg = parsed.error;
+        } catch (_) { /* not JSON — use the plain-text body */ }
         errEl.textContent = msg || 'Could not create the organization. Try again.';
         errEl.hidden = false;
       } catch (_) {

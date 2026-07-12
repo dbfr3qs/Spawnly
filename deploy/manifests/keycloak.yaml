@@ -227,6 +227,17 @@ spec:
             #   value: "idp-consent-secret"
             # - name: CONTROL_PLANE_SCOPE
             #   value: "registry.consent"
+            # ── Global user cap (signup-lifecycle Phase 2) ─────────────────
+            # MAX_USERS arms the "spawnly-user-cap" registration form action
+            # (baked into the SPI JAR, bound on the registration flow in
+            # deploy/keycloak/registration-flow.tf): when the realm already holds
+            # this many users OR MORE, the self-serve register page is rejected
+            # with a friendly capacity message. UNSET (as here on kind) / empty /
+            # non-positive = UNLIMITED — byte-identical to no cap. Admin-API user
+            # creation (org onboarding/membership) does not run the registration
+            # flow, so it bypasses the cap. Uncomment to enable a ceiling:
+            # - name: MAX_USERS
+            #   value: "500"
             # DEBUG-level logging for the Spawnly SPI providers so attestation
             # verification failures (bad signature, JWKS fetch, expiry) surface
             # in the pod log. Root stays INFO. Harmless to keep on kind.
