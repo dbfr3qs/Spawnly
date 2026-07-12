@@ -43,6 +43,7 @@ type fakeOrg struct {
 type fakeUser struct {
 	id, username, email string
 	required            []string
+	emailVerified       bool
 }
 
 func newFakeKC(realm string) *fakeKC {
@@ -143,10 +144,12 @@ func (f *fakeKC) handler() http.Handler {
 			var body struct {
 				Username, Email string
 				RequiredActions []string `json:"requiredActions"`
+				EmailVerified   bool     `json:"emailVerified"`
 			}
 			json.NewDecoder(r.Body).Decode(&body)
 			u := f.addUser(body.Username, body.Email)
 			u.required = body.RequiredActions
+			u.emailVerified = body.EmailVerified
 			w.Header().Set("Location", "http://kc"+admin+"/users/"+u.id)
 			w.WriteHeader(http.StatusCreated)
 		case http.MethodGet:
@@ -309,6 +312,11 @@ func TestAddMember_CreatesUnknownUserWithPasswordReset(t *testing.T) {
 	}
 	if len(u.required) != 1 || u.required[0] != "UPDATE_PASSWORD" {
 		t.Fatalf("expected UPDATE_PASSWORD required action, got %v", u.required)
+	}
+	// Admin-created users are pinned emailVerified so they bypass the realm's
+	// self-serve email-verification requirement (signup-lifecycle Phase 1).
+	if !u.emailVerified {
+		t.Fatal("admin-created user must be pinned emailVerified=true")
 	}
 	if !f.orgByAlias("acme").members[u.id] {
 		t.Fatal("user not added as org member")

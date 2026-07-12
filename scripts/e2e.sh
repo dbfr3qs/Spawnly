@@ -23,7 +23,13 @@ case "$cmd" in
     echo "==> Port-forwarding mobile-gateway → http://localhost:8091"
     ( while true; do kubectl port-forward svc/mobile-gateway 8091:8080 || true; sleep 1; done ) &
     GW_PID=$!
-    trap 'kill "$GW_PID" 2>/dev/null || true' EXIT INT TERM
+    # Also forward Mailpit's HTTP API (svc/mailpit 8025) so the signup spec can
+    # poll for the email-verification message and extract the verify link. Same
+    # retry-loop pattern as the mobile-gateway forward above.
+    echo "==> Port-forwarding mailpit API → http://localhost:8025"
+    ( while true; do kubectl port-forward svc/mailpit 8025:8025 || true; sleep 1; done ) &
+    MP_PID=$!
+    trap 'kill "$GW_PID" "$MP_PID" 2>/dev/null || true' EXIT INT TERM
     echo "==> Port-forwarding dashboard → http://localhost:8090"
     exec kubectl port-forward svc/dashboard 8090:8080
     ;;

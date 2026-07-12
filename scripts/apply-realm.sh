@@ -15,6 +15,25 @@ KC_TF_DIR="$REPO_ROOT/deploy/keycloak"
 
 KC_ADMIN_PASSWORD="$(kubectl get secret keycloak-admin -o jsonpath='{.data.password}' | base64 -d)"
 ORG_ADMIN_SECRET="$(kubectl get secret org-admin-auth -o jsonpath='{.data.secret}' 2>/dev/null | base64 -d || true)"
+# SMTP config from the keycloak-smtp Secret (bootstrap.sh; kind default: Mailpit)
+# so a mid-session re-apply keeps email verification consistent. An EMPTY host
+# turns email verification off (verify_email = smtp_host != ""), which is the
+# legitimate no-SMTP config — but because that also disables a security control,
+# we must not conflate "secret intentionally absent" with a transient read error
+# (RBAC denial, wrong context/namespace, API hiccup). So probe existence FIRST and
+# fail LOUD: if the Secret exists we read it (a missing field is empty, fine); if
+# it does NOT exist we warn explicitly that verification will be disabled before
+# proceeding, rather than silently flipping it off.
+SMTP_HOST="" SMTP_PORT="" SMTP_USER="" SMTP_PASS="" SMTP_FROM=""
+if kubectl get secret keycloak-smtp -o name >/dev/null 2>&1; then
+  SMTP_HOST="$(kubectl get secret keycloak-smtp -o jsonpath='{.data.host}' | base64 -d 2>/dev/null || true)"
+  SMTP_PORT="$(kubectl get secret keycloak-smtp -o jsonpath='{.data.port}' | base64 -d 2>/dev/null || true)"
+  SMTP_USER="$(kubectl get secret keycloak-smtp -o jsonpath='{.data.user}' | base64 -d 2>/dev/null || true)"
+  SMTP_PASS="$(kubectl get secret keycloak-smtp -o jsonpath='{.data.password}' | base64 -d 2>/dev/null || true)"
+  SMTP_FROM="$(kubectl get secret keycloak-smtp -o jsonpath='{.data.from}' | base64 -d 2>/dev/null || true)"
+else
+  echo "WARN: keycloak-smtp Secret not found — applying the realm with email verification DISABLED (verify_email=false). Run scripts/bootstrap.sh to (re)create it." >&2
+fi
 
 echo "==> Waiting for keycloak to be ready..."
 kubectl rollout status deployment/keycloak --timeout=300s
@@ -47,6 +66,11 @@ echo "==> Applying Keycloak realm via Terraform..."
   export TF_VAR_idp_consent_client_secret="idp-consent-secret"
   export TF_VAR_machine_client_secret="placeholder"
   export TF_VAR_org_admin_client_secret="${ORG_ADMIN_SECRET}"
+  export TF_VAR_smtp_host="${SMTP_HOST}"
+  export TF_VAR_smtp_port="${SMTP_PORT}"
+  export TF_VAR_smtp_user="${SMTP_USER}"
+  export TF_VAR_smtp_password="${SMTP_PASS}"
+  export TF_VAR_smtp_from="${SMTP_FROM}"
   export TF_VAR_root_password="root"
   export TF_VAR_alice_password="alice"
   export TF_VAR_viewer_password="viewer"

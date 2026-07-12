@@ -21,6 +21,48 @@ variable "keycloak_admin_password" {
 }
 
 # ---------------------------------------------------------------------------
+# SMTP (email verification)
+#
+# When smtp_host is non-empty the realm gets an `smtp_server` block AND
+# `verify_email = true` (self-serve signup then requires a verified email).
+# Empty (the default) leaves email verification OFF — byte-identical to the
+# pre-Phase-1 behaviour. On kind these are set to the in-cluster Mailpit sink by
+# scripts/bootstrap.sh; prod points them at AWS SES (spawnly-infra). The auth
+# sub-block is emitted only when smtp_user is non-empty (Mailpit needs no auth).
+# ---------------------------------------------------------------------------
+
+variable "smtp_host" {
+  description = "SMTP server host for realm email (empty => email verification stays off)."
+  type        = string
+  default     = ""
+}
+
+variable "smtp_port" {
+  description = "SMTP server port."
+  type        = string
+  default     = ""
+}
+
+variable "smtp_user" {
+  description = "SMTP auth username (empty => no SMTP auth block, e.g. Mailpit on kind)."
+  type        = string
+  default     = ""
+}
+
+variable "smtp_password" {
+  description = "SMTP auth password. Never committed; passed as a TF var from the keycloak-smtp Secret."
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "smtp_from" {
+  description = "From address for realm email (e.g. noreply@spawnly.run)."
+  type        = string
+  default     = ""
+}
+
+# ---------------------------------------------------------------------------
 # Human login
 # ---------------------------------------------------------------------------
 

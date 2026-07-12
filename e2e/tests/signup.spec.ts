@@ -2,6 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 import { LOGIN_USERNAME, LOGIN_PASSWORD, LOGIN_SUBMIT } from '../helpers/auth';
 import { spawn, listAgents } from '../helpers/dashboard';
 import { killAgent } from '../helpers/cleanup';
+import { verificationLink, clearMessages } from '../helpers/mailpit';
 
 // Self-serve signup (multi-tenancy Phase 7, spec criterion 9). A brand-new user
 // registers through the Keycloak registration form (realm registration_allowed,
@@ -46,6 +47,33 @@ async function finishReauth(page: Page, user: string, pass: string) {
   await expect(page.locator('#agent-list')).toBeVisible({ timeout: 60_000 });
 }
 
+// verifyEmail completes the Phase-1 email-verification step: poll Mailpit for the
+// verification mail sent to `email`, visit the Keycloak action-token link, and
+// settle on the dashboard. Keycloak either resumes the still-open registration
+// auth session (landing straight on the dashboard) or drops the user back to the
+// login form — handle both by logging in with the just-set credentials when the
+// form reappears. Returns once the browser is back on the dashboard origin.
+async function verifyEmail(page: Page, email: string, user: string, pass: string) {
+  const link = await verificationLink(email);
+  await page.goto(link);
+
+  // After verifying, Keycloak lands on EITHER the dashboard (resumed session →
+  // no-org screen or shell) or its login form (fresh action-token context).
+  const noOrg = page.locator('[data-testid="no-org-screen"]');
+  const uname = page.locator(LOGIN_USERNAME);
+  await expect(noOrg.or(uname).first()).toBeVisible({ timeout: 60_000 });
+  if (await uname.isVisible().catch(() => false)) {
+    await uname.fill(user);
+    const pw = page.locator(LOGIN_PASSWORD);
+    if (!(await pw.isVisible())) {
+      await page.locator(LOGIN_SUBMIT).click(); // identity-first: advance to password
+      await expect(pw).toBeVisible({ timeout: 30_000 });
+    }
+    await pw.fill(pass);
+    await page.locator(LOGIN_SUBMIT).click();
+  }
+}
+
 test.describe('self-serve signup', () => {
   test('a new user registers, creates an org, and spawns from the global catalog', async ({
     browser,
@@ -55,6 +83,10 @@ test.describe('self-serve signup', () => {
     const password = `Pw-${suffix}-9`;
     const email = `${username}@example.test`;
     const orgName = `Org ${suffix}`;
+
+    // Start from an empty sink so the poll can't pick up a stale verification mail
+    // from an earlier run (recipients are per-run unique anyway, but keep it tidy).
+    await clearMessages().catch(() => {});
 
     const ctx = await browser.newContext({ storageState: { cookies: [], origins: [] } });
     let spawnedId = '';
@@ -83,8 +115,15 @@ test.describe('self-serve signup', () => {
       await page.locator('#password-confirm').fill(password);
       await page.locator('#kc-form-buttons input[type="submit"]').click();
 
-      // 3) Registration logs the user in and redirects back to the dashboard. With
-      //    no org (and no org scope requested), they land on the no-organization
+      // 3) Email verification (signup-lifecycle Phase 1). With SMTP configured the
+      //    realm now requires a verified email: instead of logging straight in, the
+      //    submit lands on Keycloak's "verify your email" interstitial and a
+      //    verification mail is sent to Mailpit. Poll for it, then visit the
+      //    action-token link — proving the SMTP path delivered (criterion 1).
+      await verifyEmail(page, email, username, password);
+
+      // 3b) Verified → logged in → redirected back to the dashboard. With no org
+      //    (and no org scope requested), the user lands on the no-organization
       //    screen — which now hosts the self-serve create-org form.
       await expect(page.locator('[data-testid="no-org-screen"]')).toBeVisible({ timeout: 60_000 });
       await expect(page.locator('[data-testid="create-org-form"]')).toBeVisible();

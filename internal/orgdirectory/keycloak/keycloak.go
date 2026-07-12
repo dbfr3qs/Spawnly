@@ -231,10 +231,25 @@ func (c *Client) resolveUserID(ctx context.Context, username string) (string, bo
 // createUser creates a disabled-password user who must set a password on first
 // login (UPDATE_PASSWORD required action). username is the Spawnly userId; when
 // it looks like an email it is also set as the email. Returns the new UUID.
+//
+// emailVerified is pinned true so directory-provisioned users bypass the realm's
+// email-verification requirement (signup-lifecycle Phase 1): verification is a
+// self-serve-registration control only. These accounts are created through the
+// AddMember path — i.e. an ORG ADMIN adding a member by userId/email (note: a
+// self-serve signup becomes admin of their own org, so "org admin" is broader
+// than "master admin") or master-admin user provisioning — not by a prospective
+// user proving control of an inbox. The account is password-disabled with an
+// UPDATE_PASSWORD required action, so no credential is granted here and any reset
+// mail still goes to the real inbox; only VERIFY_EMAIL is withheld. Follow-up
+// (signup GA hardening, tracked in the plan): once SMTP is universal, consider
+// leaving org-admin-invited members UNVERIFIED so the genuine invitee proves the
+// inbox at first login, and pinning verified only on the master-admin path — so
+// the email_verified claim stays a trustworthy signal for arbitrary addresses.
 func (c *Client) createUser(ctx context.Context, username string) (string, error) {
 	body := map[string]any{
 		"username":        username,
 		"enabled":         true,
+		"emailVerified":   true,
 		"requiredActions": []string{"UPDATE_PASSWORD"},
 	}
 	if strings.Contains(username, "@") {

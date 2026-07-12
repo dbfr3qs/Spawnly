@@ -20,16 +20,57 @@ resource "keycloak_realm" "spawnly" {
   # Self-serve signup (multi-tenancy Phase C / Phase 7). Turn on the realm's
   # registration form so a brand-new user can create an account from the login
   # page; they then create their own organization (becoming its admin) via the
-  # dashboard's no-organization screen -> POST /api/signup/org. Email
-  # verification stays OFF: there is no SMTP configured for the closed beta, and
-  # the no-invitations decision means signup is not gated on email delivery.
-  # Abuse controls are an explicit non-goal for the beta (see spec phase C); the
-  # only signup guardrails are the reserved-slug list and one-org-per-user limit
-  # enforced server-side in the registry. The registration page inherits the
-  # `spawnly` login theme (CSS-only child of keycloak.v2, which ships
-  # register.ftl), so it renders in the same palette as the login page.
+  # dashboard's no-organization screen -> POST /api/signup/org. The registration
+  # page inherits the `spawnly` login theme (CSS-only child of keycloak.v2, which
+  # ships register.ftl), so it renders in the same palette as the login page.
+  #
+  # Email verification (signup-lifecycle Phase 1): ON exactly when SMTP is
+  # configured (var.smtp_host non-empty → the smtp_server block below is emitted).
+  # With no SMTP (empty host) it stays OFF, byte-identical to the closed-beta
+  # behaviour — signup is not gated on mail delivery when there is no mail server.
+  # Admin-API-created users are pinned emailVerified=true in the adapter, so
+  # verification applies to the self-serve registration path ONLY.
   registration_allowed = true
-  verify_email         = false
+  verify_email         = var.smtp_host != ""
+
+  # SMTP server for realm email (verification, etc.). Emitted only when an SMTP
+  # host is configured; the nested auth block only when a username is set (the
+  # kind Mailpit sink needs no auth). Prod values come from AWS SES.
+  dynamic "smtp_server" {
+    for_each = var.smtp_host != "" ? [1] : []
+    content {
+      host = var.smtp_host
+      port = var.smtp_port
+      from = var.smtp_from
+
+      dynamic "auth" {
+        for_each = var.smtp_user != "" ? [1] : []
+        content {
+          username = var.smtp_user
+          password = var.smtp_password
+        }
+      }
+    }
+  }
+
+  # Brute-force protection (signup-lifecycle Phase 1) — unconditional, using
+  # Keycloak's stock defaults (temporary per-user lockout after 30 consecutive
+  # failures: 1-min wait increment, 15-min max wait, 12-hour failure reset). This
+  # hardens BOTH the self-serve registration path and every existing login. Set
+  # explicitly rather than relying on the provider's zero-value block defaults,
+  # which would otherwise drive the thresholds to 0 and lock accounts far too
+  # aggressively (breaking normal logins). Single-replica safe (--cache=local).
+  security_defenses {
+    brute_force_detection {
+      permanent_lockout                = false
+      max_login_failures               = 30
+      wait_increment_seconds           = 60
+      quick_login_check_milli_seconds  = 1000
+      minimum_quick_login_wait_seconds = 60
+      max_failure_wait_seconds         = 900
+      failure_reset_time_seconds       = 43200
+    }
+  }
 
   # Spawnly-branded login pages. The `spawnly` theme directory ships in the
   # Keycloak image (root Dockerfile copies keycloak/themes/spawnly into
@@ -77,5 +118,18 @@ resource "keycloak_realm" "spawnly" {
     cibaExpiresIn                    = "300"
     cibaInterval                     = "5"
     cibaAuthRequestedUserHint        = "login_hint"
+  }
+
+  # Guard: Keycloak's SMTP config requires a From address, so if an SMTP host is
+  # configured (which also flips verify_email on) a from address MUST be set —
+  # otherwise the realm would apply a broken mail config and verification mail
+  # would silently fail to send. bootstrap.sh defaults smtp_from on kind, but a
+  # prod/env override that sets host without from is caught here at plan time
+  # instead of at first send.
+  lifecycle {
+    precondition {
+      condition     = var.smtp_host == "" || var.smtp_from != ""
+      error_message = "smtp_from must be set when smtp_host is configured (Keycloak requires a From address for realm email)."
+    }
   }
 }
