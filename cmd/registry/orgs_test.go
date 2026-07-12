@@ -31,6 +31,11 @@ type fakeDirectory struct {
 	members map[string]map[string]bool // alias -> set of userIds
 	calls   []string
 
+	// User lifecycle state (signup-lifecycle Phase 3). users tracks each known
+	// user's enabled flag + disabledByOrg tag; logouts counts session revokes.
+	users   map[string]*fakeUserState // username -> state
+	logouts map[string]int            // username -> revoke count
+
 	failCreateOrg    error
 	failAddMember    error
 	failRemoveMember error
@@ -38,10 +43,36 @@ type fakeDirectory struct {
 	failSetRole      error
 	failListMembers  error
 	failRegisterURIs error
+	failListUsers    error
+	failDisableUser  error
+	failEnableUser   error
+	failDeleteUser   error
+}
+
+type fakeUserState struct {
+	email         string
+	enabled       bool
+	disabledByOrg string
 }
 
 func newFakeDirectory() *fakeDirectory {
-	return &fakeDirectory{orgs: map[string]bool{}, members: map[string]map[string]bool{}}
+	return &fakeDirectory{
+		orgs:    map[string]bool{},
+		members: map[string]map[string]bool{},
+		users:   map[string]*fakeUserState{},
+		logouts: map[string]int{},
+	}
+}
+
+// ensureUser returns (creating if needed) the tracked state for username, so a
+// test that adds a member or references a user directly sees a consistent record.
+func (f *fakeDirectory) ensureUser(username string) *fakeUserState {
+	u := f.users[username]
+	if u == nil {
+		u = &fakeUserState{enabled: true}
+		f.users[username] = u
+	}
+	return u
 }
 
 // testDir returns a permissive fake directory — used by the many existing
@@ -109,6 +140,7 @@ func (f *fakeDirectory) AddMember(_ context.Context, orgID, user string) error {
 		f.members[orgID] = map[string]bool{}
 	}
 	f.members[orgID][user] = true
+	f.ensureUser(user) // a member is a known user (enabled by default)
 	return nil
 }
 
@@ -169,6 +201,73 @@ func (f *fakeDirectory) RemoveOrgRedirectURIs(_ context.Context, redirectURI, po
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("RemoveOrgRedirectURIs:" + redirectURI + "|" + postLogoutURI)
+	return nil
+}
+
+// ── User lifecycle (signup-lifecycle Phase 3) ───────────────────────────────
+
+func (f *fakeDirectory) ListUsers(_ context.Context) ([]orgdirectory.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failListUsers != nil {
+		return nil, f.failListUsers
+	}
+	out := make([]orgdirectory.User, 0, len(f.users))
+	for name, u := range f.users {
+		out = append(out, orgdirectory.User{
+			Username:      name,
+			Email:         u.email,
+			Enabled:       u.enabled,
+			DisabledByOrg: u.disabledByOrg,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Username < out[j].Username })
+	return out, nil
+}
+
+func (f *fakeDirectory) DisableUser(_ context.Context, username, byOrg string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("DisableUser:" + username + "|" + byOrg)
+	if f.failDisableUser != nil {
+		return f.failDisableUser
+	}
+	u := f.ensureUser(username)
+	u.enabled = false
+	if byOrg != "" {
+		u.disabledByOrg = byOrg
+	}
+	f.logouts[username]++
+	return nil
+}
+
+func (f *fakeDirectory) EnableUser(_ context.Context, username, onlyIfDisabledByOrg string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("EnableUser:" + username + "|" + onlyIfDisabledByOrg)
+	if f.failEnableUser != nil {
+		return false, f.failEnableUser
+	}
+	u := f.users[username]
+	if u == nil {
+		return false, nil
+	}
+	if onlyIfDisabledByOrg != "" && u.disabledByOrg != onlyIfDisabledByOrg {
+		return false, nil // not ours to enable
+	}
+	u.enabled = true
+	u.disabledByOrg = ""
+	return true, nil
+}
+
+func (f *fakeDirectory) DeleteUser(_ context.Context, username string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("DeleteUser:" + username)
+	if f.failDeleteUser != nil {
+		return f.failDeleteUser
+	}
+	delete(f.users, username)
 	return nil
 }
 

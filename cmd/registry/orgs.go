@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"regexp"
@@ -586,37 +587,52 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 		if !requireOrg(w, ctx, s, id) {
 			return
 		}
-		for _, role := range []string{orgdirectory.RoleMember, orgdirectory.RoleAdmin} {
-			res, rel, sub := orgTuple(id, role, user)
-			if err := sdb.DeleteRelationship(ctx, res, rel, sub); err != nil {
-				log.Printf("org remove member %s/%s: drop %s tuple: %v", id, user, role, err)
-			}
-		}
-		if err := dir.RemoveMember(ctx, id, user); err != nil {
-			log.Printf("org remove member %s/%s: keycloak RemoveMember: %v", id, user, err)
-			http.Error(w, "remove member failed", http.StatusInternalServerError)
-			return
-		}
-		// Removed-member disposition (Phase 6): the ex-member has now lost all
-		// access (membership tuples + Keycloak membership gone above). Settle the
-		// agents they OWNED in this org per the org's per-org setting — auto-revoke
-		// the cascade, or orphan-to-admin (default). A store hiccup fails loud (the
-		// whole remove is retryable and every step idempotent).
-		disposition := registry.RemovalOrphanToAdmin
-		if org, ok, gerr := s.GetOrg(ctx, id); gerr != nil {
-			log.Printf("org remove member %s/%s: load org for disposition: %v", id, user, gerr)
-			http.Error(w, "remove member failed", http.StatusInternalServerError)
-			return
-		} else if ok && org.RemovalDisposition != "" {
-			disposition = org.RemovalDisposition
-		}
-		if err := applyRemovalDisposition(ctx, s, sdb, id, user, disposition); err != nil {
-			log.Printf("org remove member %s/%s: apply disposition %s: %v", id, user, disposition, err)
+		if err := removeMemberFromOrg(ctx, s, sdb, dir, id, user); err != nil {
+			log.Printf("org remove member %s/%s: %v", id, user, err)
 			http.Error(w, "remove member failed", http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
+}
+
+// removeMemberFromOrg removes user's membership in org id and settles the agents
+// they OWNED there per the org's removal disposition — the shared core of the
+// DELETE members endpoint and the master-admin user delete (users.go), which
+// removes a user from EVERY org they belong to before deleting the identity.
+// Reusing one path keeps every membership teardown flowing through the single
+// dual-write choke point (SpiceDB tuples + Keycloak membership).
+//
+// Order: SpiceDB tuples drop FIRST (kills authorization immediately), then the
+// Keycloak membership, then the disposition — so a partial failure fails toward
+// LESS access and a retry converges (every step is idempotent). A Keycloak or
+// store error is returned so the caller fails loud (5xx) rather than proceeding
+// on a half-removed member.
+func removeMemberFromOrg(ctx context.Context, s registry.Store, sdb spicedb.Client, dir orgdirectory.Directory, id, user string) error {
+	for _, role := range []string{orgdirectory.RoleMember, orgdirectory.RoleAdmin} {
+		res, rel, sub := orgTuple(id, role, user)
+		if err := sdb.DeleteRelationship(ctx, res, rel, sub); err != nil {
+			log.Printf("org remove member %s/%s: drop %s tuple: %v", id, user, role, err)
+		}
+	}
+	if err := dir.RemoveMember(ctx, id, user); err != nil {
+		return fmt.Errorf("keycloak RemoveMember: %w", err)
+	}
+	// Removed-member disposition: the ex-member has now lost all access (membership
+	// tuples + Keycloak membership gone above). Settle the agents they OWNED in this
+	// org per the org's per-org setting — auto-revoke the cascade, or orphan-to-admin
+	// (default). A store hiccup fails loud (the whole remove is retryable, every step
+	// idempotent).
+	disposition := registry.RemovalOrphanToAdmin
+	if org, ok, gerr := s.GetOrg(ctx, id); gerr != nil {
+		return fmt.Errorf("load org for disposition: %w", gerr)
+	} else if ok && org.RemovalDisposition != "" {
+		disposition = org.RemovalDisposition
+	}
+	if err := applyRemovalDisposition(ctx, s, sdb, id, user, disposition); err != nil {
+		return fmt.Errorf("apply disposition %s: %w", disposition, err)
+	}
+	return nil
 }
 
 // writeJSON writes v as a JSON response with a 200 status.

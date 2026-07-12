@@ -424,6 +424,21 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 		proxy("DELETE", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id"))+"/members/"+url.PathEscape(r.PathValue("user")))(w, r)
 	})))
 
+	// Master-admin USER lifecycle twins (signup-lifecycle Phase 3). requireAdmin
+	// gates every twin at this BFF tier (defense in depth with the orchestrator's
+	// requireAdmin); the proxy carries the session's delegated access token and the
+	// orchestrator forwards to the registry with its control-plane bearer.
+	mux.Handle("GET /api/admin/users", auth.requireAdmin(proxy("GET", orchestratorURL+"/v1/admin/users")))
+	mux.Handle("POST /api/admin/users/{username}/disable", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("POST", orchestratorURL+"/v1/admin/users/"+url.PathEscape(r.PathValue("username"))+"/disable")(w, r)
+	})))
+	mux.Handle("POST /api/admin/users/{username}/enable", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("POST", orchestratorURL+"/v1/admin/users/"+url.PathEscape(r.PathValue("username"))+"/enable")(w, r)
+	})))
+	mux.Handle("DELETE /api/admin/users/{username}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("DELETE", orchestratorURL+"/v1/admin/users/"+url.PathEscape(r.PathValue("username")))(w, r)
+	})))
+
 	// Org SELF-SERVICE twins (multi-tenancy Phase 6). These are the ORG ADMIN's
 	// membership + settings surface for their OWN org — the org is taken from the
 	// SESSION's active org (never a client-supplied id), so the browser can only

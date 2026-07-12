@@ -210,6 +210,7 @@ type userRep struct {
 	ID       string              `json:"id"`
 	Username string              `json:"username"`
 	Email    string              `json:"email"`
+	Enabled  bool                `json:"enabled"`
 	Attrs    map[string][]string `json:"attributes,omitempty"`
 }
 
@@ -473,6 +474,220 @@ func (c *Client) ListUserOrgs(ctx context.Context, user string) ([]string, error
 		}
 	}
 	return aliases, nil
+}
+
+// ---- user lifecycle (master-admin surface, signup-lifecycle Phase 3) ------
+
+// disabledByOrgAttr is the Keycloak user-attribute key stamped on an account
+// disabled BY an org (Phase 4), naming the org alias that suspended it. A direct
+// admin disable (byOrg == "") never sets it, so it stays a clean signal that a
+// later org-enable can key off to re-enable ONLY the accounts that org disabled
+// (never clobbering an independently-disabled user).
+//
+// PHASE 4 PREREQUISITE — this tag does NOT persist on a real Keycloak 26 realm as
+// shipped: KC 24+ runs the declarative user profile with the unmanaged-attribute
+// policy DISABLED by default (see the orgdirectory package doc: "this realm's
+// declarative user profile silently drops unmanaged user attributes"), so the
+// admin PUT below silently drops attributes.disabledByOrg and the GET omits it —
+// EnableUser(_, "<org>") would then always see "" and no-op. Phase 3 is unaffected
+// because the registry only ever calls Disable/EnableUser with byOrg=="" (the tag
+// is never written or read live this phase). Before Phase 4 relies on it, declare
+// disabledByOrg in the realm user-profile config or set unmanagedAttributePolicy
+// (ADMIN_EDIT) in deploy/keycloak. WATCH OUT: the httptest fake KC honors arbitrary
+// attributes, so the adapter unit tests pass green while this would fail live.
+const disabledByOrgAttr = "disabledByOrg"
+
+// ListUsers returns every realm user, paginated like ListMembers (a single
+// unpaginated GET would silently truncate at Keycloak's page cap). Role and org
+// membership are deliberately not resolved here — this is the flat platform
+// directory the master-admin surface lists.
+func (c *Client) ListUsers(ctx context.Context) ([]orgdirectory.User, error) {
+	var out []orgdirectory.User
+	for first := 0; ; first += pageSize {
+		var page []userRep
+		if err := c.do(ctx, http.MethodGet,
+			c.adminURL("/users?first=%d&max=%d", first, pageSize), nil, &page); err != nil {
+			return nil, err
+		}
+		for _, u := range page {
+			out = append(out, orgdirectory.User{
+				Username:      u.Username,
+				Email:         u.Email,
+				Enabled:       u.Enabled,
+				DisabledByOrg: firstAttr(u.Attrs, disabledByOrgAttr),
+			})
+		}
+		if len(page) < pageSize {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (c *Client) DisableUser(ctx context.Context, username, byOrg string) error {
+	id, found, err := c.resolveUserID(ctx, username)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil // unknown user => nothing to disable
+	}
+	if err := c.editUser(ctx, id, func(rep map[string]any) bool {
+		changed := false
+		if rep["enabled"] != false {
+			rep["enabled"] = false
+			changed = true
+		}
+		// Only an org-initiated disable stamps the tag; a direct admin disable
+		// (byOrg == "") leaves any existing tag untouched.
+		if byOrg != "" && setUserAttr(rep, disabledByOrgAttr, byOrg) {
+			changed = true
+		}
+		return changed
+	}); err != nil {
+		return err
+	}
+	// Revoke active SSO sessions so the disable bites immediately, not just at the
+	// next login (a live session would otherwise keep working until it expires). A
+	// 404 (user has no sessions / vanished) is a benign success.
+	if err := c.do(ctx, http.MethodPost, c.adminURL("/users/%s/logout", id), nil, nil); err != nil {
+		if statusIs(err, http.StatusNotFound) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (c *Client) EnableUser(ctx context.Context, username, onlyIfDisabledByOrg string) (bool, error) {
+	id, found, err := c.resolveUserID(ctx, username)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil // unknown user => nothing to enable
+	}
+	applied := false
+	if err := c.editUser(ctx, id, func(rep map[string]any) bool {
+		// Conditional (org) enable: only touch the account when THIS org's tag
+		// matches, so an independently-disabled or differently-org-disabled account
+		// is left exactly as-is.
+		if onlyIfDisabledByOrg != "" && firstUserAttr(rep, disabledByOrgAttr) != onlyIfDisabledByOrg {
+			return false
+		}
+		changed := false
+		if rep["enabled"] != true {
+			rep["enabled"] = true
+			changed = true
+		}
+		if clearUserAttr(rep, disabledByOrgAttr) {
+			changed = true
+		}
+		applied = changed
+		return changed
+	}); err != nil {
+		return false, err
+	}
+	return applied, nil
+}
+
+func (c *Client) DeleteUser(ctx context.Context, username string) error {
+	id, found, err := c.resolveUserID(ctx, username)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil // already gone
+	}
+	if err := c.do(ctx, http.MethodDelete, c.adminURL("/users/%s", id), nil, nil); err != nil {
+		if statusIs(err, http.StatusNotFound) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// editUser reads the FULL user representation, applies mut (which mutates the rep
+// in place and reports whether anything actually changed), and PUTs the whole rep
+// back — Keycloak's PUT REPLACES the representation, so round-tripping the full
+// map preserves every field/attribute mut did not touch (read-modify-write). The
+// PUT is skipped when mut reports no change (idempotent no-op), mirroring
+// editDashboardClient.
+func (c *Client) editUser(ctx context.Context, id string, mut func(rep map[string]any) bool) error {
+	var rep map[string]any
+	if err := c.do(ctx, http.MethodGet, c.adminURL("/users/%s", id), nil, &rep); err != nil {
+		// The user was deleted between resolveUserID and this read — nothing to
+		// edit, so converge to success (matches DisableUser/DeleteUser's unknown-user
+		// no-op contract) rather than surfacing a spurious 500.
+		if statusIs(err, http.StatusNotFound) {
+			return nil
+		}
+		return err
+	}
+	if !mut(rep) {
+		return nil
+	}
+	if err := c.do(ctx, http.MethodPut, c.adminURL("/users/%s", id), rep, nil); err != nil {
+		if statusIs(err, http.StatusNotFound) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// firstAttr reads the first value of a typed KC attribute map, "" when absent.
+func firstAttr(attrs map[string][]string, key string) string {
+	if v := attrs[key]; len(v) > 0 {
+		return v[0]
+	}
+	return ""
+}
+
+// userAttrs returns the user rep's attributes map, creating it when absent so
+// callers can write into it. Keycloak serializes each attribute value as a JSON
+// array of strings.
+func userAttrs(rep map[string]any) map[string]any {
+	attrs, ok := rep["attributes"].(map[string]any)
+	if !ok || attrs == nil {
+		attrs = map[string]any{}
+		rep["attributes"] = attrs
+	}
+	return attrs
+}
+
+// firstUserAttr reads the first value of a user-rep attribute (values are JSON
+// string arrays), "" when the attribute is absent/empty.
+func firstUserAttr(rep map[string]any, key string) string {
+	attrs, _ := rep["attributes"].(map[string]any)
+	vals := asStringSlice(attrs[key])
+	if len(vals) > 0 {
+		return vals[0]
+	}
+	return ""
+}
+
+// setUserAttr sets a single-valued user attribute, reporting whether it changed.
+func setUserAttr(rep map[string]any, key, val string) bool {
+	if firstUserAttr(rep, key) == val {
+		return false
+	}
+	userAttrs(rep)[key] = []any{val}
+	return true
+}
+
+// clearUserAttr removes a user attribute, reporting whether it was present.
+func clearUserAttr(rep map[string]any, key string) bool {
+	attrs, _ := rep["attributes"].(map[string]any)
+	if attrs == nil {
+		return false
+	}
+	if _, has := attrs[key]; !has {
+		return false
+	}
+	delete(attrs, key)
+	return true
 }
 
 // ---- satellite redirect-URI editing (org-subdomains) ----------------------

@@ -46,6 +46,21 @@ type Member struct {
 	Role     string `json:"role,omitempty"`
 }
 
+// User is one platform user as the directory knows them (the master-admin user
+// directory, signup-lifecycle Phase 3) — a neutral, platform-shaped subset of
+// the identity backend's user representation. Username is the Spawnly user id
+// (== the Keycloak username / SpiceDB subject id). Enabled reports whether the
+// account may log in. DisabledByOrg carries the org alias that suspended the
+// account when it was disabled BY an org (Phase 4), empty otherwise — it lets an
+// org re-enable only the members IT disabled without clobbering an
+// independently-disabled account.
+type User struct {
+	Username      string `json:"username"`
+	Email         string `json:"email,omitempty"`
+	Enabled       bool   `json:"enabled"`
+	DisabledByOrg string `json:"disabledByOrg,omitempty"`
+}
+
 // Directory is the neutral organization-membership port. All methods are
 // idempotent so a control-plane dual-write can be retried to convergence after a
 // partial failure (a create-if-absent create, a delete-if-present delete): the
@@ -86,4 +101,31 @@ type Directory interface {
 	RegisterOrgRedirectURIs(ctx context.Context, redirectURI, postLogoutURI string) error
 	// RemoveOrgRedirectURIs removes them. Idempotent (absent = success).
 	RemoveOrgRedirectURIs(ctx context.Context, redirectURI, postLogoutURI string) error
+
+	// ── User lifecycle (master-admin surface, signup-lifecycle Phase 3) ────────
+
+	// ListUsers returns every user the directory knows about (paginated
+	// internally). Powers the master-admin user directory.
+	ListUsers(ctx context.Context) ([]User, error)
+	// DisableUser blocks the user from logging in (enabled=false) AND revokes
+	// their active SSO sessions, so a disable takes effect immediately rather than
+	// only on the next login. When byOrg != "" it also stamps a
+	// disabledByOrg=<byOrg> attribute (an org-initiated disable, Phase 4) so a
+	// later org-enable can identify the accounts IT disabled; byOrg == "" is a
+	// direct admin disable and leaves the tag untouched. Read-modify-write
+	// preserves the user's other attributes. Idempotent; an unknown user is a
+	// no-op success.
+	DisableUser(ctx context.Context, username, byOrg string) error
+	// EnableUser re-enables the user (enabled=true). When onlyIfDisabledByOrg ==
+	// "" it is an unconditional enable that also clears any disabledByOrg tag.
+	// When onlyIfDisabledByOrg != "" it enables + clears the tag ONLY if the
+	// user's disabledByOrg tag matches exactly (so an independently-disabled or
+	// differently-org-disabled account is left untouched); it returns whether the
+	// enable applied. Read-modify-write preserves other attributes. Idempotent; an
+	// unknown user returns (false, nil).
+	EnableUser(ctx context.Context, username, onlyIfDisabledByOrg string) (bool, error)
+	// DeleteUser hard-deletes the user account. Idempotent (an absent user is a
+	// success). Callers settle the user's org agents + memberships FIRST (the
+	// registry choke point) — this only removes the identity.
+	DeleteUser(ctx context.Context, username string) error
 }

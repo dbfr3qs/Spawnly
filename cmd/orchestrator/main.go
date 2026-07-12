@@ -1443,6 +1443,25 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members/" + url.PathEscape(r.PathValue("user"))
 	})))
 
+	// Master-admin USER lifecycle admin API (signup-lifecycle Phase 3). Same
+	// PLATFORM-ADMIN-ONLY posture as the /v1/admin/orgs family: requireAdmin gates
+	// every route (realm admin role on top of the delegated token) and
+	// forwardToRegistry carries the control-plane bearer to the registry's cp-gated
+	// /v1/users endpoints — the single dual-write choke point (Keycloak + SpiceDB).
+	// The registry also enforces the root lockout guard; this is defense in depth.
+	mux.HandleFunc("GET /v1/admin/users", requireAdmin(validator, audience, readScope, forwardToRegistry("GET", func(*http.Request) string {
+		return "/v1/users"
+	})))
+	mux.HandleFunc("POST /v1/admin/users/{username}/disable", requireAdmin(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
+		return "/v1/users/" + url.PathEscape(r.PathValue("username")) + "/disable"
+	})))
+	mux.HandleFunc("POST /v1/admin/users/{username}/enable", requireAdmin(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
+		return "/v1/users/" + url.PathEscape(r.PathValue("username")) + "/enable"
+	})))
+	mux.HandleFunc("DELETE /v1/admin/users/{username}", requireAdmin(validator, audience, writeScope, forwardToRegistry("DELETE", func(r *http.Request) string {
+		return "/v1/users/" + url.PathEscape(r.PathValue("username"))
+	})))
+
 	// Org SELF-SERVICE membership + settings API (multi-tenancy Phase 6). Unlike
 	// the /v1/admin/orgs family above (realm-admin only), these let an ORG ADMIN
 	// manage their OWN org — gated by requireOrgAdmin ({id} must equal the token's

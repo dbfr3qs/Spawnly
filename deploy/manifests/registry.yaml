@@ -104,6 +104,13 @@ spec:
             # to enable a ceiling:
             # - name: MAX_ORGS
             #   value: "100"
+            # Master-admin account (signup-lifecycle Phase 3): the username the
+            # user-lifecycle root lockout guard refuses to disable or delete
+            # (POST /v1/users/{u}/disable + DELETE /v1/users/{u} return 403 for it).
+            # Defaults to "root" (the seeded realm-admin, deploy/keycloak/users.tf)
+            # when unset — set only to override the protected account.
+            - name: MASTER_ADMIN_USERNAME
+              value: "root"
             # --- oidc tier ---
             # - name: CONTROL_PLANE_OIDC_JWKS_URL
             #   value: "http://keycloak:8080/realms/spawnly/protocol/openid-connect/certs"

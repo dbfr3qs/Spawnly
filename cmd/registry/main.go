@@ -1046,6 +1046,12 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 	}
 	registerOrgRoutes(mux, s, sdb, dir, getEnv("ORG_APEX_DOMAIN", ""), maxOrgs, cp)
 
+	// Master-admin user lifecycle (signup-lifecycle Phase 3): list/disable/enable/
+	// delete users through the same cp-gated single choke point. MASTER_ADMIN_USERNAME
+	// (default "root") names the platform master-admin account the root lockout guard
+	// refuses to disable or delete.
+	registerUserRoutes(mux, s, sdb, dir, getEnv("MASTER_ADMIN_USERNAME", "root"), cp)
+
 	// Template management (create/disable/delete) is a control-plane operation,
 	// so it sits behind the same control-plane authenticator as the consent
 	// lifecycle. Under the default AllowAll authenticator it runs open.
@@ -2578,5 +2584,17 @@ func (disabledDirectory) RegisterOrgRedirectURIs(context.Context, string, string
 	return errOrgDirectoryDisabled
 }
 func (disabledDirectory) RemoveOrgRedirectURIs(context.Context, string, string) error {
+	return errOrgDirectoryDisabled
+}
+func (disabledDirectory) ListUsers(context.Context) ([]orgdirectory.User, error) {
+	return nil, errOrgDirectoryDisabled
+}
+func (disabledDirectory) DisableUser(context.Context, string, string) error {
+	return errOrgDirectoryDisabled
+}
+func (disabledDirectory) EnableUser(context.Context, string, string) (bool, error) {
+	return false, errOrgDirectoryDisabled
+}
+func (disabledDirectory) DeleteUser(context.Context, string) error {
 	return errOrgDirectoryDisabled
 }
