@@ -801,41 +801,16 @@ func enableOrgMembers(ctx context.Context, dir orgdirectory.Directory, id string
 
 // suspendOrgAgents revokes every agent in org id (signup-lifecycle Phase 4) — the
 // agent-suspension half of an org disable. It runs the shared revoke cascade
-// (subtree + revokeNode) over every org ROOT agent (an in-org record whose parent
-// is not ALSO in the org; a child of an in-org parent is covered by that parent's
-// cascade, and revokeNode is idempotent regardless). Owner tuples are deliberately
-// left intact — a disable is reversible (org enable restores login; agents resume
-// manually). A backend read/write error is returned so the caller fails loud
-// rather than leaving some org agents un-revoked.
+// (revokeCascadeRoots) over every org ROOT agent (an in-org record whose parent is
+// not ALSO in the org; a child of an in-org parent is covered by that parent's
+// cascade, and revokeNode is idempotent regardless). The org case uses the SAME
+// predicate for both scope and root — every in-org agent is a candidate root.
+// Owner tuples are deliberately left intact — a disable is reversible (org enable
+// restores login; agents resume manually). A backend read/write error is returned
+// so the caller fails loud rather than leaving some org agents un-revoked.
 func suspendOrgAgents(ctx context.Context, s registry.Store, sdb spicedb.Client, orgID string) error {
-	agents, err := s.ListAgents(ctx)
-	if err != nil {
-		return err
-	}
-	inOrg := map[string]bool{}
-	for _, a := range agents {
-		if a.OrgID == orgID {
-			inOrg[a.AgentID] = true
-		}
-	}
-	for _, a := range agents {
-		if a.OrgID != orgID {
-			continue
-		}
-		if a.ParentID != "" && inOrg[a.ParentID] {
-			continue // covered by the in-org parent's cascade
-		}
-		nodes, err := subtree(ctx, s, a.AgentID)
-		if err != nil {
-			return err
-		}
-		for _, nid := range nodes {
-			if _, err := revokeNode(ctx, s, sdb, nid); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	inOrg := func(a registry.AgentRecord) bool { return a.OrgID == orgID }
+	return revokeCascadeRoots(ctx, s, sdb, inOrg, inOrg)
 }
 
 // writeJSON writes v as a JSON response with a 200 status.

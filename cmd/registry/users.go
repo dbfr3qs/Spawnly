@@ -179,43 +179,19 @@ func suspendUserAgents(ctx context.Context, s registry.Store, sdb spicedb.Client
 	return revokeOwnedRoots(ctx, s, sdb, user, func(registry.AgentRecord) bool { return true })
 }
 
-// revokeOwnedRoots runs the shared revoke cascade (subtree + revokeNode) over
-// every ROOT agent the user owns for which include(agent) is true — a root being
-// an owned agent whose parent is not ALSO owned by the user (a child of one of
-// their own agents is already covered by the parent's cascade; revokeNode is
-// idempotent regardless). The owned set is computed over ALL the user's agents so
-// the parent-owned skip is correct even when include narrows the starting roots
-// (e.g. org-less-only on delete). A backend read/write error is returned so the
-// caller fails loud rather than leaving some agents un-revoked.
+// revokeOwnedRoots runs the shared revoke cascade (revokeCascadeRoots) over every
+// ROOT agent the user owns for which include(agent) is true — a root being an
+// owned agent whose parent is not ALSO owned by the user (a child of one of their
+// own agents is already covered by the parent's cascade; revokeNode is idempotent
+// regardless). The scope predicate is ALL the user's agents (owned) so the
+// parent-owned skip is correct even when include narrows the starting roots more
+// tightly (e.g. org-less-only on delete): the root predicate is owned && include,
+// but the skip still sees the full owned set. A backend read/write error is
+// returned so the caller fails loud rather than leaving some agents un-revoked.
 func revokeOwnedRoots(ctx context.Context, s registry.Store, sdb spicedb.Client, user string, include func(registry.AgentRecord) bool) error {
-	agents, err := s.ListAgents(ctx)
-	if err != nil {
-		return err
-	}
-	ownedSet := map[string]bool{}
-	for _, a := range agents {
-		if a.UserID == user {
-			ownedSet[a.AgentID] = true
-		}
-	}
-	for _, a := range agents {
-		if a.UserID != user || !include(a) {
-			continue
-		}
-		if a.ParentID != "" && ownedSet[a.ParentID] {
-			continue // covered by the owning parent's cascade
-		}
-		nodes, err := subtree(ctx, s, a.AgentID)
-		if err != nil {
-			return err
-		}
-		for _, id := range nodes {
-			if _, err := revokeNode(ctx, s, sdb, id); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	owned := func(a registry.AgentRecord) bool { return a.UserID == user }
+	root := func(a registry.AgentRecord) bool { return owned(a) && include(a) }
+	return revokeCascadeRoots(ctx, s, sdb, owned, root)
 }
 
 // purgeUserConsents revokes every CIBA consent grant the user holds, so a deleted
