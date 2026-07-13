@@ -194,6 +194,20 @@ test.describe('master-admin lifecycle UI', () => {
       await expect(rootRow.locator('[data-testid="disable-user-btn"]')).toHaveCount(0);
       await expect(rootRow.locator('[data-testid="delete-user-btn"]')).toHaveCount(0);
 
+      // ── (B) Self-disable is refused server-side (account-lifecycle item B) ───
+      // The UI hides the button; prove the curl path is closed too. root's own
+      // disable/delete must 403 at the orchestrator (caller≠target guard), so a
+      // logged-in admin can never lock themselves (and the platform) out. root is
+      // ALSO the registry master-admin, whose lockout guard would 403 too — so we
+      // assert the ORCHESTRATOR guard's distinct body ("your own account") to prove
+      // the caller≠target guard (not the registry lockout) is what fired here.
+      const selfDisable = await root.request.post('/api/admin/users/root/disable');
+      expect(selfDisable.status(), 'admin self-disable must be refused').toBe(403);
+      expect(await selfDisable.text(), 'refused by the caller≠target guard').toContain('your own account');
+      const selfDelete = await root.request.delete('/api/admin/users/root');
+      expect(selfDelete.status(), 'admin self-delete must be refused').toBe(403);
+      expect(await selfDelete.text(), 'refused by the caller≠target guard').toContain('your own account');
+
       // A FRESH owner session to OBSERVE the agent across the disable. Its access
       // token is valid for the token's full lifetime, so reads survive the KC logout
       // the disable triggers — the setup session (minted minutes ago) could hit a

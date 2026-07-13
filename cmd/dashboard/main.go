@@ -249,26 +249,32 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 		// render the scoped satellite view and to make the org switcher NAVIGATE to
 		// <scheme>://<other-slug>.<apex>/ on a satellite. Not an authorization signal.
 		hostOrg, isApex := auth.hosts.resolveOrg(auth.hosts.requestHost(r))
+		isAdmin := auth.isAdmin(r)
 		out := map[string]any{
 			"user":       user,
-			"isAdmin":    auth.isAdmin(r),
+			"isAdmin":    isAdmin,
 			"activeOrg":  auth.activeOrg(r),
 			"orgs":       []any{},
 			"isOrgAdmin": false,
 			"hostOrg":    hostOrg,
 			"isApex":     isApex,
 			"apexDomain": auth.hosts.apexDomain,
-			// The platform master-admin username (registry root lockout guard,
-			// env MASTER_ADMIN_USERNAME, default "root"). The admin Users directory
-			// reads it to hide destructive actions on that account's row, matching
-			// the server guard when a non-default name is configured.
-			"masterAdmin": getenv("MASTER_ADMIN_USERNAME", "root"),
+		}
+		// The platform master-admin username (registry root lockout guard, env
+		// MASTER_ADMIN_USERNAME, default "root") is exposed ONLY to admins
+		// (account-lifecycle follow-up, item C): it is consumed solely by the admin
+		// Users directory, which reads it to hide destructive actions on that
+		// account's row, matching the server guard when a non-default name is
+		// configured. A non-admin has no use for it, so the field is omitted — the
+		// SPA already reads it only inside the admin directory and tolerates absence.
+		if isAdmin {
+			out["masterAdmin"] = getenv("MASTER_ADMIN_USERNAME", "root")
 		}
 		token, err := auth.orchestratorToken(r.Context(), r)
 		if err != nil {
 			log.Printf("api/me: no orchestrator token for orgs fetch: %v", err)
 			out["orgsUnavailable"] = true
-		} else if auth.isAdmin(r) {
+		} else if isAdmin {
 			// Master admin (tenant-visibility Phase 3): the switcher/directory lists
 			// ALL orgs (root belongs to none, so /v1/my/orgs would be empty) from the
 			// realm-admin GET /v1/admin/orgs. activeOrg is the session's viewingOrg

@@ -3672,9 +3672,9 @@
 
     const actionsTd = document.createElement('td');
     // Hide the destructive actions for the platform master-admin row (the registry
-    // 403s any disable/delete of that account — a hard server guard) and for the
-    // logged-in admin's own row (a client-side self-lockout convenience; the server
-    // does NOT block a non-master admin from disabling themselves, so this is UX only).
+    // 403s any disable/delete of that account) and for the logged-in admin's own row
+    // (the orchestrator's caller≠target guard 403s a self disable/delete). Both are
+    // hard server guards; hiding the buttons is just so the UI doesn't offer a 403.
     const locked = username === (ME.masterAdmin || 'root') || username === (ME.user || '');
     if (locked) {
       actionsTd.textContent = '—';
