@@ -43,6 +43,14 @@ resource "keycloak_realm" "spawnly" {
       port = var.smtp_port
       from = var.smtp_from
 
+      # STARTTLS is required exactly when we authenticate: AWS SES submission
+      # (:587) rejects AUTH before a STARTTLS upgrade, so an authed relay must
+      # negotiate it. The kind Mailpit sink is authless plaintext (smtp_user
+      # empty) and must NOT request STARTTLS. Keying starttls off smtp_user thus
+      # turns it on for SES and leaves the kind realm byte-identical — no extra
+      # var to thread through bootstrap.sh / apply-realm.sh / the infra deploy.
+      starttls = var.smtp_user != ""
+
       dynamic "auth" {
         for_each = var.smtp_user != "" ? [1] : []
         content {
