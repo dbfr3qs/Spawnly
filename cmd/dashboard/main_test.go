@@ -563,6 +563,11 @@ func TestApiMeComposesOrgs(t *testing.T) {
 	if _, bad := admin["orgsUnavailable"]; bad {
 		t.Error("orgsUnavailable should be absent when the orchestrator answers")
 	}
+	// masterAdmin (account-lifecycle follow-up, item C) is exposed ONLY to admins:
+	// the admin Users directory needs it to hide destructive actions on that row.
+	if admin["masterAdmin"] != "root" {
+		t.Errorf("admin masterAdmin = %v, want \"root\" (default)", admin["masterAdmin"])
+	}
 
 	// Org-less Global landing: full directory, but no active org and not an org admin.
 	global := get("global-sid")
@@ -585,6 +590,11 @@ func TestApiMeComposesOrgs(t *testing.T) {
 	}
 	if vorgs, _ := viewer["orgs"].([]any); len(vorgs) != 1 {
 		t.Errorf("viewer orgs = %v, want its own one org (from /v1/my/orgs)", viewer["orgs"])
+	}
+	// A non-admin must NOT receive masterAdmin (item C): the field is omitted so it
+	// never leaks the platform operator's username to ordinary users.
+	if _, ok := viewer["masterAdmin"]; ok {
+		t.Errorf("viewer masterAdmin present (%v), want the field OMITTED for a non-admin", viewer["masterAdmin"])
 	}
 }
 

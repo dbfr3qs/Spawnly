@@ -141,6 +141,51 @@ func TestAdminOrgs_AdminForwards(t *testing.T) {
 	}
 }
 
+// TestAdminUsers_SelfTargetForbidden proves the caller≠target guard (account-
+// lifecycle follow-up, item B): an admin cannot disable or delete THEIR OWN
+// account via the API (the UI hides the button; this closes the direct-curl
+// path). The registry is never touched. The match is case-insensitive, mirroring
+// the registry's isMasterAdmin EqualFold, so a mixed-case self target can't slip
+// past. Enable is intentionally NOT guarded.
+func TestAdminUsers_SelfTargetForbidden(t *testing.T) {
+	cases := []struct{ method, path string }{
+		{"POST", "/v1/admin/users/alice/disable"},
+		{"DELETE", "/v1/admin/users/alice"},
+		// Keycloak lowercases usernames; a mixed-case path must still be caught.
+		{"POST", "/v1/admin/users/Alice/disable"},
+		{"DELETE", "/v1/admin/users/ALICE"},
+	}
+	for _, tc := range cases {
+		mux, seen := orgForwardMux(t, adminClaims("alice", "orchestrator:write", "orchestrator:read"))
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer t")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s %s: self-target status = %d, want 403", tc.method, tc.path, rec.Code)
+		}
+		if len(*seen) != 0 {
+			t.Errorf("%s %s: registry must not be called for a self-target; saw %v", tc.method, tc.path, *seen)
+		}
+	}
+}
+
+// TestAdminUsers_SelfEnableAllowed proves ENABLE is intentionally unguarded: an
+// admin re-enabling their own account is harmless and still forwards.
+func TestAdminUsers_SelfEnableAllowed(t *testing.T) {
+	mux, seen := orgForwardMux(t, adminClaims("alice", "orchestrator:write", "orchestrator:read"))
+	req := httptest.NewRequest("POST", "/v1/admin/users/alice/enable", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer t")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("self-enable status = %d, want 201 (forwarded)", rec.Code)
+	}
+	if len(*seen) != 1 || (*seen)[0] != "POST /v1/users/alice/enable" {
+		t.Errorf("self-enable forwarded %v, want POST /v1/users/alice/enable", *seen)
+	}
+}
+
 // TestAdminUsers_NonAdminForbidden proves the master-admin user lifecycle routes
 // (signup-lifecycle Phase 3) are requireAdmin-gated at the orchestrator: a
 // non-admin token is 403'd and the registry is never touched.

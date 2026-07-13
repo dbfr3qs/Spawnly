@@ -107,10 +107,30 @@ resource "keycloak_realm_user_profile" "spawnly" {
     }
   }
 
-  # ── Additive: the org-suspension tag (admin-only, never user-editable) ────────
+  # ── Additive: the org-suspension SET (admin-only, never user-editable) ────────
+  # MULTI-VALUED: a user may be suspended by several orgs at once, so disabledByOrg
+  # holds the SET of suspending org aliases. multi_valued=true is load-bearing — a
+  # single-valued managed attribute would TRUNCATE the array to one value on the
+  # admin PUT, and an org-enable that removed that one value would wrongly re-enable
+  # a member another org still suspends (see keycloak.go disabledByOrgAttr).
   attribute {
     name         = "disabledByOrg"
     display_name = "Disabled by organization"
+    group        = "user-metadata"
+    multi_valued = true
+    permissions {
+      view = ["admin"]
+      edit = ["admin"]
+    }
+  }
+
+  # ── Additive: the direct-admin ban marker (admin-only, never user-editable) ───
+  # A platform ban is tracked SEPARATELY from org suspension so an org-enable that
+  # empties disabledByOrg can never resurrect an admin-banned account, and a direct
+  # admin-enable that clears this marker can never resurrect an org-suspended one.
+  attribute {
+    name         = "disabledByAdmin"
+    display_name = "Disabled by platform admin"
     group        = "user-metadata"
     permissions {
       view = ["admin"]

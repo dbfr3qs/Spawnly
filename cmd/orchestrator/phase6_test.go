@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -16,15 +17,37 @@ import (
 	"github.com/spawnly/platform/internal/tokenvalidator"
 )
 
+// orgRecordPath matches the registry's single-org read GET /v1/orgs/{id} (no
+// further path segments) — the endpoint the member-mutation disabled-org guard and
+// the requireOrgMember GET both hit. A real registry answers it with 200 + the org
+// record, so the stub must too (the guard's fetchOrg requires a 200).
+var orgRecordPath = regexp.MustCompile(`^/v1/orgs/[^/]+$`)
+
 // phase6Mux wires an orchestrator whose registry stub records the forwarded
 // method+request-URI (so gate/forward behaviour can be asserted) and echoes a
-// marker body. The caller supplies pre-seeded SpiceDB tuples.
+// marker body. The org is enabled (not suspended); use phase6MuxOrg to control that.
 func phase6Mux(t *testing.T, claims tokenvalidator.Claims, sdb spicedb.Client) (http.Handler, *[]string) {
+	return phase6MuxOrg(t, claims, sdb, false)
+}
+
+// phase6MuxOrg is phase6Mux with a settable org-suspended flag: the stub reports it
+// on GET /v1/orgs/{id} so the member-mutation guard (refuseIfOrgDisabled) can be
+// exercised.
+func phase6MuxOrg(t *testing.T, claims tokenvalidator.Claims, sdb spicedb.Client, orgDisabled bool) (http.Handler, *[]string) {
 	t.Helper()
 	var seen []string
 	reg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen = append(seen, r.Method+" "+r.URL.RequestURI())
 		w.Header().Set("Content-Type", "application/json")
+		// The single-org read returns the record (200) with the disabled flag; every
+		// other forward echoes a 201 marker as before.
+		if r.Method == http.MethodGet && orgRecordPath.MatchString(r.URL.Path) {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"orgId":    strings.TrimPrefix(r.URL.Path, "/v1/orgs/"),
+				"disabled": orgDisabled,
+			})
+			return
+		}
 		w.WriteHeader(http.StatusCreated)
 		w.Write([]byte(`{"ok":true}`))
 	}))
@@ -59,23 +82,80 @@ func TestOrgSelfService_AdminManagesOwnOrg(t *testing.T) {
 	claims := humanOrgClaims("alice", "acme", nil, "orchestrator:write", "orchestrator:read")
 	mux, seen := phase6Mux(t, claims, sdb)
 
-	cases := []struct{ method, path, want string }{
-		{"PATCH", "/v1/orgs/acme", "PATCH /v1/orgs/acme"},
-		{"GET", "/v1/orgs/acme", "GET /v1/orgs/acme"},
-		{"GET", "/v1/orgs/acme/members", "GET /v1/orgs/acme/members"},
+	// Read/settings routes forward verbatim (one recorded call). GET /v1/orgs/{id}
+	// returns the org record (200); the others echo the stub's 201 marker.
+	reads := []struct {
+		method, path, want string
+		status             int
+	}{
+		{"PATCH", "/v1/orgs/acme", "PATCH /v1/orgs/acme", http.StatusCreated},
+		{"GET", "/v1/orgs/acme", "GET /v1/orgs/acme", http.StatusOK},
+		{"GET", "/v1/orgs/acme/members", "GET /v1/orgs/acme/members", http.StatusCreated},
+	}
+	for _, tc := range reads {
+		*seen = nil
+		rec := doReq(t, mux, tc.method, tc.path, `{}`)
+		if rec.Code != tc.status {
+			t.Errorf("%s %s: status=%d, want %d (body %s)", tc.method, tc.path, rec.Code, tc.status, rec.Body.String())
+		}
+		if len(*seen) != 1 || (*seen)[0] != tc.want {
+			t.Errorf("%s %s: forwarded %v, want %q", tc.method, tc.path, *seen, tc.want)
+		}
+	}
+
+	// Member-MUTATION routes additionally clear the org-disabled guard (org is
+	// enabled), which reads the org record FIRST and then forwards the mutation.
+	muts := []struct{ method, path, want string }{
 		{"POST", "/v1/orgs/acme/members", "POST /v1/orgs/acme/members"},
 		{"PATCH", "/v1/orgs/acme/members/bob", "PATCH /v1/orgs/acme/members/bob"},
 		{"DELETE", "/v1/orgs/acme/members/bob", "DELETE /v1/orgs/acme/members/bob"},
 	}
-	for _, tc := range cases {
+	for _, tc := range muts {
 		*seen = nil
 		rec := doReq(t, mux, tc.method, tc.path, `{}`)
 		if rec.Code != http.StatusCreated {
 			t.Errorf("%s %s: status=%d, want 201 (body %s)", tc.method, tc.path, rec.Code, rec.Body.String())
 		}
-		if len(*seen) != 1 || (*seen)[0] != tc.want {
-			t.Errorf("%s %s: forwarded %v, want %q", tc.method, tc.path, *seen, tc.want)
+		// The guard's org read precedes the forward; the mutation must be forwarded last.
+		if len(*seen) == 0 || (*seen)[len(*seen)-1] != tc.want {
+			t.Errorf("%s %s: forwarded %v, want last=%q", tc.method, tc.path, *seen, tc.want)
 		}
+	}
+}
+
+// TestOrgSelfService_MemberMutationRefusedWhileOrgDisabled proves the item-A/3
+// guard: a stale org-admin token cannot add/remove/re-role members while the org is
+// SUSPENDED — every mutation is a 403 and NEVER reaches the registry's mutation
+// endpoint (so removeMemberFromOrg can't re-enable an ejected member).
+func TestOrgSelfService_MemberMutationRefusedWhileOrgDisabled(t *testing.T) {
+	sdb := spicedb.NewMock()
+	seedMembership(sdb, "acme", "admin", "alice")
+	claims := humanOrgClaims("alice", "acme", nil, "orchestrator:write", "orchestrator:read")
+	mux, seen := phase6MuxOrg(t, claims, sdb, true) // org acme is suspended
+
+	for _, tc := range []struct{ method, path string }{
+		{"POST", "/v1/orgs/acme/members"},
+		{"PATCH", "/v1/orgs/acme/members/bob"},
+		{"DELETE", "/v1/orgs/acme/members/bob"},
+	} {
+		*seen = nil
+		rec := doReq(t, mux, tc.method, tc.path, `{"user":"bob"}`)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s %s on disabled org: status=%d, want 403 (body %s)", tc.method, tc.path, rec.Code, rec.Body.String())
+		}
+		// The registry mutation endpoint must never be reached — only the guard's org
+		// read may appear, never a POST/PATCH/DELETE .../members forward.
+		for _, s := range *seen {
+			if strings.HasPrefix(s, tc.method+" ") {
+				t.Errorf("%s %s must NOT forward to the registry while disabled; saw %v", tc.method, tc.path, *seen)
+			}
+		}
+	}
+
+	// The read-only members route stays available to a member even while suspended.
+	*seen = nil
+	if rec := doReq(t, mux, "GET", "/v1/orgs/acme/members", ``); rec.Code != http.StatusCreated {
+		t.Errorf("GET members while disabled: status=%d, want 201-forward (guard is mutation-only)", rec.Code)
 	}
 }
 
@@ -147,7 +227,9 @@ func TestOrgSelfService_RealmAdminBypass(t *testing.T) {
 	if rec := doReq(t, mux, "POST", "/v1/orgs/globex/members", `{"user":"x"}`); rec.Code != http.StatusCreated {
 		t.Errorf("realm admin POST members: status=%d, want 201-forward (body %s)", rec.Code, rec.Body.String())
 	}
-	if len(*seen) != 1 || (*seen)[0] != "POST /v1/orgs/globex/members" {
+	// The org-disabled guard reads the org record first (org is enabled here), then
+	// forwards the mutation — so the forward is the LAST recorded call.
+	if len(*seen) == 0 || (*seen)[len(*seen)-1] != "POST /v1/orgs/globex/members" {
 		t.Errorf("realm admin forward = %v", *seen)
 	}
 }

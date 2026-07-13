@@ -859,6 +859,68 @@ func revokeNode(ctx context.Context, s registry.Store, sdb spicedb.Client, id st
 	return true, nil
 }
 
+// revokeCascadeRoots runs the shared revoke cascade (subtree + revokeNode) over
+// every ROOT agent selected by root — a root being an agent for which root(a) is
+// true whose parent is not ALSO in scope (a child of an in-scope parent is already
+// covered by that parent's cascade, and revokeNode is idempotent regardless). It
+// is the single implementation behind both org-suspension (suspendOrgAgents) and
+// owner-suspension (suspendUserAgents / the user-delete org-less revoke).
+//
+// Two predicates, deliberately: scope defines the membership set used for the
+// parent-owned skip and is computed over ALL agents up front, while root decides
+// which of those to START a cascade at. They coincide for the org case (scope ==
+// root == "in this org"), but the owner case narrows root MORE tightly than scope
+// (e.g. delete revokes only the user's ORG-LESS roots, root = owned && orgId==""),
+// yet the skip must still see the user's FULL owned set so a narrowed root whose
+// parent is an out-of-root owned agent is correctly treated as covered — folding
+// the two into one predicate would change that edge. root callers pass a predicate
+// that already implies scope. A backend read/write error is returned so the caller
+// fails loud rather than leaving some agents un-revoked.
+func revokeCascadeRoots(ctx context.Context, s registry.Store, sdb spicedb.Client, scope, root func(registry.AgentRecord) bool) error {
+	agents, err := s.ListAgents(ctx)
+	if err != nil {
+		return err
+	}
+	scopeSet := map[string]bool{}
+	var roots []registry.AgentRecord
+	for _, a := range agents {
+		if scope(a) {
+			scopeSet[a.AgentID] = true
+		}
+	}
+	for _, a := range agents {
+		if root(a) {
+			roots = append(roots, a)
+		}
+	}
+	return cascadeOverRoots(ctx, s, sdb, roots, scopeSet)
+}
+
+// cascadeOverRoots revokes the full subtree of each root agent whose parent is not
+// ALSO in scopeSet (a child of an in-scope parent is already covered by that
+// parent's cascade, and revokeNode is idempotent regardless). It is the single
+// cascade implementation shared by revokeCascadeRoots (org/user suspension) and
+// the removal-disposition auto-revoke path, so a future change to the cascade
+// lands in exactly one place. A backend read/write error is returned so the caller
+// fails loud rather than leaving some agents un-revoked.
+func cascadeOverRoots(ctx context.Context, s registry.Store, sdb spicedb.Client, roots []registry.AgentRecord, scopeSet map[string]bool) error {
+	for _, a := range roots {
+		if a.ParentID != "" && scopeSet[a.ParentID] {
+			continue // covered by the in-scope parent's cascade
+		}
+		nodes, err := subtree(ctx, s, a.AgentID)
+		if err != nil {
+			return err
+		}
+		for _, nid := range nodes {
+			if _, err := revokeNode(ctx, s, sdb, nid); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // resumeNode reverses revokeNode by re-writing the agent's single `enabled`
 // status tuple and marking it active again (Phase 5a). It is a no-op (returns
 // false) for any agent not currently "revoked", so resuming a subtree never
@@ -946,23 +1008,9 @@ func applyRemovalDisposition(ctx context.Context, s registry.Store, sdb spicedb.
 		}
 	}
 	if disposition == registry.RemovalAutoRevoke {
-		for _, a := range owned {
-			// Roots only: an owned agent whose parent is also owned is already
-			// covered by the parent's cascade (revokeNode is idempotent regardless).
-			if a.ParentID != "" && ownedSet[a.ParentID] {
-				continue
-			}
-			nodes, err := subtree(ctx, s, a.AgentID)
-			if err != nil {
-				return err
-			}
-			for _, id := range nodes {
-				if _, err := revokeNode(ctx, s, sdb, id); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
+		// The same root-cascade as org/user suspension, over this ex-member's owned
+		// roots (owned already lists them; ownedSet is the parent-skip scope).
+		return cascadeOverRoots(ctx, s, sdb, owned, ownedSet)
 	}
 	// orphan-to-admin: audit each orphaned agent (revokeNode emits its own event on
 	// the auto-revoke path).

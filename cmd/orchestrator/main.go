@@ -454,6 +454,61 @@ func requireOrgMember(v tokenvalidator.TokenValidator, audience, scope string, s
 	})
 }
 
+// refuseIfOrgDisabled wraps a SELF-SERVICE org-admin member-mutation handler
+// (add/remove member, set role) so it refuses (403) while org {id} is SUSPENDED
+// (account-lifecycle follow-up, item A/3). Without it a STALE org-admin token could
+// call these routes during a suspension — and removeMemberFromOrg re-enables the
+// ejected member on the way out, laundering them out of the org lockout. This guard
+// lives on the self-service path ONLY: the master-admin /v1/admin/orgs/{id}/members
+// family is deliberately NOT wrapped, so a platform admin can still manage a
+// disabled org's members. It runs AFTER requireOrgAdmin (an authorized caller only),
+// reusing fetchOrg — the same org-record read the remote-spawn guard uses — over the
+// control-plane bearer. A registry read failure fails CLOSED (502), never fail-open.
+func refuseIfOrgDisabled(registryURL string, cpBearer func() string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		org, err := fetchOrg(r.Context(), registryURL, cpBearer, id)
+		if err != nil {
+			log.Printf("member-mutation guard: fetch org %s: %v", id, err)
+			http.Error(w, "registry unavailable", http.StatusBadGateway)
+			return
+		}
+		if org.Disabled {
+			http.Error(w, "organization is disabled", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// refuseSelfTarget guards the user-lifecycle admin routes (disable/delete)
+// against a caller acting on THEIR OWN account: an admin must not be able to
+// disable or delete themselves and lock the platform out of its own operator.
+// The registry (cp-bearer-gated) only knows the target {username}, not the
+// calling human, so this caller≠target check lives here where the validated
+// token's identity (userIDFrom == token sub) is known. It sits INSIDE
+// requireAdmin, so only an authenticated admin reaches it. The comparison is
+// case-insensitive (EqualFold), mirroring the registry's isMasterAdmin guard,
+// because Keycloak canonicalizes usernames to lowercase while a path value can
+// arrive in any case — a mixed-case self target must not slip past. Enable is
+// intentionally NOT guarded (re-enabling yourself is harmless).
+func refuseSelfTarget(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caller := userIDFrom(r.Context())
+		target := r.PathValue("username")
+		// Fail CLOSED: refuse if the caller identity is missing (unreachable inside
+		// requireToken today, but defends against a future refactor that routes
+		// around it) OR the caller is the target — an admin must not disable/delete
+		// their own account and lock the platform out of its operator.
+		if caller == "" || strings.EqualFold(caller, target) {
+			log.Printf("self-target guard: refusing disable/delete of %q by caller %q", target, caller)
+			http.Error(w, "cannot disable or delete your own account", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // fetchOrg reads a single org record from the registry over the control-plane
 // bearer (the cp-gated GET /v1/orgs/{id}). Used by the remote-agent registration
 // path to check the org's anchor status server-side. A non-200 (including 404)
@@ -1462,15 +1517,21 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	mux.HandleFunc("GET /v1/admin/users", requireAdmin(validator, audience, readScope, forwardToRegistry("GET", func(*http.Request) string {
 		return "/v1/users"
 	})))
-	mux.HandleFunc("POST /v1/admin/users/{username}/disable", requireAdmin(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
+	// disable + delete are additionally wrapped in refuseSelfTarget (account-lifecycle
+	// follow-up, item B): the server-side counterpart to the UI hiding the button on
+	// your own row, closing the direct-curl path where an admin could lock themselves
+	// (and, if they are the last operator, the platform) out. enable is left unguarded
+	// (harmless). The guard sits inside requireAdmin so only an authenticated admin
+	// reaches it. The registry's master-admin lockout guard is orthogonal and remains.
+	mux.HandleFunc("POST /v1/admin/users/{username}/disable", requireAdmin(validator, audience, writeScope, refuseSelfTarget(forwardToRegistry("POST", func(r *http.Request) string {
 		return "/v1/users/" + url.PathEscape(r.PathValue("username")) + "/disable"
-	})))
+	}))))
 	mux.HandleFunc("POST /v1/admin/users/{username}/enable", requireAdmin(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
 		return "/v1/users/" + url.PathEscape(r.PathValue("username")) + "/enable"
 	})))
-	mux.HandleFunc("DELETE /v1/admin/users/{username}", requireAdmin(validator, audience, writeScope, forwardToRegistry("DELETE", func(r *http.Request) string {
+	mux.HandleFunc("DELETE /v1/admin/users/{username}", requireAdmin(validator, audience, writeScope, refuseSelfTarget(forwardToRegistry("DELETE", func(r *http.Request) string {
 		return "/v1/users/" + url.PathEscape(r.PathValue("username"))
-	})))
+	}))))
 
 	// Org SELF-SERVICE membership + settings API (multi-tenancy Phase 6). Unlike
 	// the /v1/admin/orgs family above (realm-admin only), these let an ORG ADMIN
@@ -1489,15 +1550,20 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	mux.HandleFunc("GET /v1/orgs/{id}/members", requireOrgMember(validator, audience, readScope, sdb, forwardToRegistry("GET", func(r *http.Request) string {
 		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members"
 	})))
-	mux.HandleFunc("POST /v1/orgs/{id}/members", requireOrgAdmin(validator, audience, writeScope, sdb, forwardToRegistry("POST", func(r *http.Request) string {
+	// The three member-MUTATION routes are additionally wrapped in refuseIfOrgDisabled
+	// (account-lifecycle follow-up, item A/3): a stale org-admin token must not drive a
+	// remove-member (which re-enables the ejected member) during a suspension. The
+	// guard sits INSIDE requireOrgAdmin so only an authorized caller triggers the org
+	// read. The master-admin /v1/admin/orgs family above is intentionally not guarded.
+	mux.HandleFunc("POST /v1/orgs/{id}/members", requireOrgAdmin(validator, audience, writeScope, sdb, refuseIfOrgDisabled(registryURL, controlPlaneBearer, forwardToRegistry("POST", func(r *http.Request) string {
 		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members"
-	})))
-	mux.HandleFunc("PATCH /v1/orgs/{id}/members/{user}", requireOrgAdmin(validator, audience, writeScope, sdb, forwardToRegistry("PATCH", func(r *http.Request) string {
+	}))))
+	mux.HandleFunc("PATCH /v1/orgs/{id}/members/{user}", requireOrgAdmin(validator, audience, writeScope, sdb, refuseIfOrgDisabled(registryURL, controlPlaneBearer, forwardToRegistry("PATCH", func(r *http.Request) string {
 		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members/" + url.PathEscape(r.PathValue("user"))
-	})))
-	mux.HandleFunc("DELETE /v1/orgs/{id}/members/{user}", requireOrgAdmin(validator, audience, writeScope, sdb, forwardToRegistry("DELETE", func(r *http.Request) string {
+	}))))
+	mux.HandleFunc("DELETE /v1/orgs/{id}/members/{user}", requireOrgAdmin(validator, audience, writeScope, sdb, refuseIfOrgDisabled(registryURL, controlPlaneBearer, forwardToRegistry("DELETE", func(r *http.Request) string {
 		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members/" + url.PathEscape(r.PathValue("user"))
-	})))
+	}))))
 
 	// Per-org attestation anchor (multi-tenancy Phase 8). Registering, clearing,
 	// and ACTIVATING (proof of control) an anchor are all org-admin operations —
