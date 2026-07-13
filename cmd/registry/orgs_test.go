@@ -172,7 +172,11 @@ func (f *fakeDirectory) ListMembers(_ context.Context, orgID string) ([]orgdirec
 	}
 	var out []orgdirectory.Member
 	for u := range f.members[orgID] {
-		out = append(out, orgdirectory.Member{UserID: u, Username: u})
+		enabled := true
+		if st := f.users[u]; st != nil {
+			enabled = st.enabled
+		}
+		out = append(out, orgdirectory.Member{UserID: u, Username: u, Enabled: enabled})
 	}
 	return out, nil
 }

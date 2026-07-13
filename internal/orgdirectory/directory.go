@@ -44,6 +44,12 @@ type Member struct {
 	Username string `json:"username,omitempty"`
 	Email    string `json:"email,omitempty"`
 	Role     string `json:"role,omitempty"`
+	// Enabled reports whether the member's account may currently log in. Populated
+	// by the Keycloak adapter from the members listing (the org-disable path reads
+	// it to skip members that are ALREADY disabled, so it never clobbers an
+	// independently-disabled account's tag). Backends that don't track it leave it
+	// at the zero value (false).
+	Enabled bool `json:"enabled,omitempty"`
 }
 
 // User is one platform user as the directory knows them (the master-admin user

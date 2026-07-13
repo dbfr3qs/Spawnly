@@ -1430,6 +1430,16 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	mux.HandleFunc("DELETE /v1/admin/orgs/{id}", requireAdmin(validator, audience, writeScope, forwardToRegistry("DELETE", func(r *http.Request) string {
 		return "/v1/orgs/" + url.PathEscape(r.PathValue("id"))
 	})))
+	// Org lifecycle disable/enable (signup-lifecycle Phase 4). Platform-admin only,
+	// same requireAdmin posture as the rest of the /v1/admin/orgs family; the
+	// registry is the single dual-write choke point (Keycloak member lockout +
+	// SpiceDB/store agent suspension + org record flag).
+	mux.HandleFunc("POST /v1/admin/orgs/{id}/disable", requireAdmin(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/disable"
+	})))
+	mux.HandleFunc("POST /v1/admin/orgs/{id}/enable", requireAdmin(validator, audience, writeScope, forwardToRegistry("POST", func(r *http.Request) string {
+		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/enable"
+	})))
 	mux.HandleFunc("GET /v1/admin/orgs/{id}/members", requireAdmin(validator, audience, readScope, forwardToRegistry("GET", func(r *http.Request) string {
 		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members"
 	})))

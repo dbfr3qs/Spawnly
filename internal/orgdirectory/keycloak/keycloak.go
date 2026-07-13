@@ -441,6 +441,7 @@ func (c *Client) ListMembers(ctx context.Context, orgID string) ([]orgdirectory.
 				UserID:   u.Username, // Spawnly userId == username == SpiceDB subject id
 				Username: u.Username,
 				Email:    u.Email,
+				Enabled:  u.Enabled, // read by the org-disable no-clobber skip (Phase 4)
 				// Role deliberately empty — resolved from SpiceDB by the UI (Phase 6).
 			})
 		}

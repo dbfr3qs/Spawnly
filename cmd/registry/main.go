@@ -792,6 +792,24 @@ func relationResourceTypes(tpl registry.AgentTemplate, hasTenant bool) []string 
 	return out
 }
 
+// orgIsDisabled reports whether orgID names an org whose record is SUSPENDED
+// (Disabled == true) — the org-lifecycle spawn guard (signup-lifecycle Phase 4).
+// An empty orgID (an org-less / global agent) is never disabled. An unknown org is
+// treated as not-disabled (the create path validates org existence elsewhere; a
+// missing record must not spuriously block a global spawn). A store error is
+// surfaced so the caller fails CLOSED rather than silently spawning into a disabled
+// org on a transient read failure.
+func orgIsDisabled(ctx context.Context, s registry.Store, orgID string) (bool, error) {
+	if orgID == "" {
+		return false, nil
+	}
+	org, ok, err := s.GetOrg(ctx, orgID)
+	if err != nil {
+		return false, err
+	}
+	return ok && org.Disabled, nil
+}
+
 // revokeNode is the per-agent core of revocation, shared by the cascading revoke
 // endpoint: drop the agent's SpiceDB authorization and mark the record "revoked"
 // so any permission check denies in real time. The pod is left running —
@@ -1044,7 +1062,7 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			log.Printf("ignoring invalid MAX_ORGS=%q (treating as unlimited)", v)
 		}
 	}
-	registerOrgRoutes(mux, s, sdb, dir, getEnv("ORG_APEX_DOMAIN", ""), maxOrgs, cp)
+	registerOrgRoutes(mux, s, sdb, dir, getEnv("ORG_APEX_DOMAIN", ""), maxOrgs, getEnv("MASTER_ADMIN_USERNAME", "root"), cp)
 
 	// Master-admin user lifecycle (signup-lifecycle Phase 3): list/disable/enable/
 	// delete users through the same cp-gated single choke point. MASTER_ADMIN_USERNAME
@@ -1256,6 +1274,15 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			http.Error(w, "invalid orgId", http.StatusBadRequest)
 			return
 		}
+		// Spawn guard (signup-lifecycle Phase 4): refuse to preregister an agent into
+		// a SUSPENDED org — the orchestrator's spawn ingress, so a spawn into a
+		// disabled org fails fast here rather than materializing a pending record.
+		if disabled, derr := orgIsDisabled(r.Context(), s, rec.OrgID); storeErr(w, derr) {
+			return
+		} else if disabled {
+			http.Error(w, "organization is disabled", http.StatusForbidden)
+			return
+		}
 		// Placement (Phase 10) is trusted from this cp-gated body (the orchestrator's
 		// remote-registration path sets it), but constrain it to the known values so
 		// a typo can never yield a record that neither the sweep nor the UI expects.
@@ -1368,6 +1395,20 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 			}
 			parentID = existing.ParentID
 			userID = existing.UserID
+		}
+		// Spawn guard (signup-lifecycle Phase 4), defense in depth: refuse a
+		// self-registration whose (server-derived, preregistered) OrgID belongs to a
+		// SUSPENDED org. Covers a token minted before the org was disabled — the
+		// sidecar's registry record was preregistered into the org while it was still
+		// enabled, and this refuses the now-late self-register. (An un-preregistered
+		// brand-new self-register carries no OrgID, so it is org-less and unaffected;
+		// org-scoped agents — including remote STS-anchored ones — are always
+		// preregistered by the orchestrator, where the preregister guard also bites.)
+		if disabled, derr := orgIsDisabled(ctx, s, orgID); storeErr(w, derr) {
+			return
+		} else if disabled {
+			http.Error(w, "organization is disabled", http.StatusForbidden)
+			return
 		}
 
 		rec := registry.AgentRecord{
@@ -1725,6 +1766,22 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		}
 		if !exists || !allowed {
 			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		// Suspension guard (signup-lifecycle Phase 4): while the agent's org is
+		// SUSPENDED, refuse to resume — org disable revokes the org's agents AND
+		// leaves owner tuples + dashboard sessions intact, so without this an owner
+		// could immediately resume their agent and undo the suspension. Once the org
+		// is re-enabled the (asymmetric) manual resume works normally. Fails CLOSED on
+		// a store error.
+		rec, err := s.GetAgent(r.Context(), id)
+		if storeErr(w, err) {
+			return
+		}
+		if disabled, derr := orgIsDisabled(r.Context(), s, rec.OrgID); storeErr(w, derr) {
+			return
+		} else if disabled {
+			http.Error(w, "organization is disabled", http.StatusForbidden)
 			return
 		}
 		nodes, err := subtree(r.Context(), s, id)

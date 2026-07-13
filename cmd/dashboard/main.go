@@ -411,6 +411,14 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	mux.Handle("DELETE /api/admin/orgs/{id}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxy("DELETE", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id")))(w, r)
 	})))
+	// Org lifecycle disable/enable twins (signup-lifecycle Phase 4). requireAdmin at
+	// this BFF tier (defense in depth with the orchestrator's requireAdmin).
+	mux.Handle("POST /api/admin/orgs/{id}/disable", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("POST", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id"))+"/disable")(w, r)
+	})))
+	mux.Handle("POST /api/admin/orgs/{id}/enable", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("POST", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id"))+"/enable")(w, r)
+	})))
 	mux.Handle("GET /api/admin/orgs/{id}/members", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxy("GET", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id"))+"/members")(w, r)
 	})))
