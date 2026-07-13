@@ -370,14 +370,15 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 	}))
 
 	// POST /v1/orgs/{id}/disable — SUSPEND an org (signup-lifecycle Phase 4).
-	// Sets the org record's Disabled flag, disables every member's Keycloak
-	// account (blocking login natively, tagging disabledByOrg=<id> + revoking
-	// sessions) EXCEPT the master admin and EXCEPT members already disabled (no
-	// tag clobber — an independently-disabled member stays independent), and
-	// revokes ALL org agents via the cascade. A defense-in-depth spawn guard in
-	// the agent-create path additionally refuses new spawns into a Disabled org.
-	// Idempotent: a repeat call re-asserts the flag, skips already-disabled
-	// members, and re-revokes nothing new (revokeNode no-ops on non-active).
+	// Sets the org record's Disabled flag, disables every member's Keycloak account
+	// (blocking login natively, ADDING <id> to their multi-valued disabledByOrg set +
+	// revoking sessions) EXCEPT the master admin, and revokes ALL org agents via the
+	// cascade. Members already disabled by another org or a platform ban are tagged
+	// too — the set + the separate admin-ban marker mean adding this org never
+	// clobbers another reason. A defense-in-depth spawn guard in the agent-create
+	// path additionally refuses new spawns into a Disabled org. Idempotent: a repeat
+	// call re-asserts the flag, the org-tag add dedups, and re-revokes nothing new
+	// (revokeNode no-ops on non-active).
 	mux.HandleFunc("POST /v1/orgs/{id}/disable", cp(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		id := r.PathValue("id")
@@ -409,11 +410,11 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 	}))
 
 	// POST /v1/orgs/{id}/enable — LIFT an org suspension (signup-lifecycle Phase 4).
-	// Clears the Disabled flag and re-enables ONLY the members THIS org disabled
-	// (EnableUser matches disabledByOrg=<id> exactly, clearing the tag), so an
-	// independently-disabled member — or one another org disabled — stays disabled.
-	// Suspended agents deliberately STAY suspended (asymmetric resume): the org
-	// admin resumes them manually via the existing resume cascade. Idempotent.
+	// Clears the Disabled flag and REMOVES <id> from each member's disabledByOrg set,
+	// re-enabling a member only once that set is empty AND they carry no admin ban —
+	// so a member another org still suspends, or one under a platform ban, stays
+	// disabled. Suspended agents deliberately STAY suspended (asymmetric resume): the
+	// org admin resumes them manually via the existing resume cascade. Idempotent.
 	mux.HandleFunc("POST /v1/orgs/{id}/enable", cp(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		id := r.PathValue("id")
@@ -456,15 +457,16 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		// Delete hygiene (signup-lifecycle Phase 4): re-enable the members THIS org
-		// disabled (clearing their disabledByOrg=<id> tag) so deleting the org can't
-		// strand permanently-locked accounts. Run UNCONDITIONALLY (not only when the
-		// record still reads Disabled): a prior botched enable could have cleared the
-		// flag while members stayed tagged, and this is the last chance to rescue them
-		// before the tag's org ceases to exist. No-clobber and idempotent —
-		// EnableUser only touches accounts tagged with exactly this org, so it is a
-		// no-op for an enabled org's untagged members. Fail loud on error so the whole
-		// delete stays retryable (every step idempotent) rather than half-done.
+		// Delete hygiene (signup-lifecycle Phase 4): remove THIS org from every
+		// member's disabledByOrg set so deleting the org can't strand an account behind
+		// a suspension whose org no longer exists. Run UNCONDITIONALLY (not only when
+		// the record still reads Disabled): a prior botched enable could have cleared
+		// the flag while members stayed tagged, and this is the last chance to rescue
+		// them before the tag's org ceases to exist. No-clobber and idempotent —
+		// EnableUser only removes THIS org and re-enables solely when no other org and
+		// no admin ban still holds the account, so it is a no-op for an untagged member
+		// and never lifts another reason. Fail loud on error so the whole delete stays
+		// retryable (every step idempotent) rather than half-done.
 		if err := enableOrgMembers(ctx, dir, id); err != nil {
 			log.Printf("org delete %s: re-enable org-tagged members: %v", id, err)
 			http.Error(w, "org delete failed", http.StatusInternalServerError)
@@ -737,13 +739,13 @@ func removeMemberFromOrg(ctx context.Context, s registry.Store, sdb spicedb.Clie
 	if err := applyRemovalDisposition(ctx, s, sdb, id, user, disposition); err != nil {
 		return fmt.Errorf("apply disposition %s: %w", disposition, err)
 	}
-	// If the org is SUSPENDED, a member disabled BY it who is now LEAVING would
-	// otherwise keep their disabledByOrg=<id> tag while dropping off ListMembers —
-	// so a later org enable/delete (which iterate current members) could never
-	// re-enable them, stranding the account permanently locked (signup-lifecycle
-	// Phase 4). Clear THIS org's lock on the way out; no-clobber and idempotent
-	// (EnableUser only touches an account tagged with exactly this org, so an
-	// independently-disabled ex-member is left disabled).
+	// If the org is SUSPENDED, a member it suspended who is now LEAVING would
+	// otherwise keep <id> in their disabledByOrg set while dropping off ListMembers —
+	// so a later org enable/delete (which iterate current members) could never remove
+	// it, stranding the account permanently locked (signup-lifecycle Phase 4). Remove
+	// THIS org's suspension on the way out; no-clobber and idempotent (EnableUser only
+	// drops this org and re-enables solely when no other org and no admin ban remains,
+	// so an ex-member another org or a platform ban still holds is left disabled).
 	if ok && org.Disabled {
 		if _, err := dir.EnableUser(ctx, user, id); err != nil {
 			return fmt.Errorf("clear org lock on removed member %s: %w", user, err)
@@ -754,14 +756,14 @@ func removeMemberFromOrg(ctx context.Context, s registry.Store, sdb spicedb.Clie
 
 // disableOrgMembers disables every member of org id BY the org (signup-lifecycle
 // Phase 4) — the member-lockout half of an org suspension. For each member EXCEPT
-// the master admin: if the account is CURRENTLY enabled, DisableUser(user, id)
-// blocks login, stamps disabledByOrg=<id>, and revokes sessions; if it is ALREADY
-// disabled it is left completely untouched — calling DisableUser again would
-// CLOBBER an independently-disabled member's tag (or absence of one) and cause a
-// later org-enable to wrongly re-enable them. The currently-enabled bit rides on
-// the member listing itself (Member.Enabled, from the Keycloak members endpoint),
-// so no extra full-realm scan is needed. Idempotent. A directory error is returned
-// so the caller fails loud.
+// the master admin, DisableUser(user, id) ADDS this org to the member's multi-valued
+// disabledByOrg SET (dedup) and blocks login. Crucially this runs even for members
+// ALREADY disabled (by another org, or by a direct admin ban): the set + the
+// separate admin-ban marker mean adding this org never clobbers another reason, and
+// recording it is REQUIRED so a later enable of a DIFFERENT org doesn't wrongly
+// re-enable someone this org still suspends. DisableUser is idempotent (a repeat is
+// a no-op) so re-running the suspension is safe. A directory error is returned so
+// the caller fails loud.
 func disableOrgMembers(ctx context.Context, dir orgdirectory.Directory, id, masterAdmin string) error {
 	members, err := dir.ListMembers(ctx, id)
 	if err != nil {
@@ -770,9 +772,6 @@ func disableOrgMembers(ctx context.Context, dir orgdirectory.Directory, id, mast
 	for _, m := range members {
 		if isMasterAdmin(masterAdmin, m.UserID) {
 			continue // the platform master admin is never locked out by an org
-		}
-		if !m.Enabled {
-			continue // already disabled — never clobber their tag
 		}
 		if err := dir.DisableUser(ctx, m.UserID, id); err != nil {
 			return fmt.Errorf("disable member %s: %w", m.UserID, err)

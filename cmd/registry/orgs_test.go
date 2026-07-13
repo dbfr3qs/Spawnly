@@ -49,11 +49,18 @@ type fakeDirectory struct {
 	failDeleteUser   error
 }
 
+// fakeUserState mirrors the real Keycloak adapter's disable-state model: a
+// multi-valued disabledByOrg SET plus a SEPARATE direct-admin ban marker. A user
+// is enabled iff NOT admin-banned AND the org set is empty (see keycloak.go).
 type fakeUserState struct {
-	email         string
-	enabled       bool
-	disabledByOrg string
+	email           string
+	enabled         bool
+	disabledByOrg   []string // set of orgs currently suspending the user
+	disabledByAdmin bool     // direct platform-admin ban
 }
+
+// hasOrg reports whether org is in the user's suspending-org set.
+func (u *fakeUserState) hasOrg(org string) bool { return containsStr(u.disabledByOrg, org) }
 
 func newFakeDirectory() *fakeDirectory {
 	return &fakeDirectory{
@@ -218,11 +225,16 @@ func (f *fakeDirectory) ListUsers(_ context.Context) ([]orgdirectory.User, error
 	}
 	out := make([]orgdirectory.User, 0, len(f.users))
 	for name, u := range f.users {
+		// The adapter surfaces the FIRST org in the set (firstAttr); mirror that.
+		firstOrg := ""
+		if len(u.disabledByOrg) > 0 {
+			firstOrg = u.disabledByOrg[0]
+		}
 		out = append(out, orgdirectory.User{
 			Username:      name,
 			Email:         u.email,
 			Enabled:       u.enabled,
-			DisabledByOrg: u.disabledByOrg,
+			DisabledByOrg: firstOrg,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Username < out[j].Username })
@@ -237,10 +249,23 @@ func (f *fakeDirectory) DisableUser(_ context.Context, username, byOrg string) e
 		return f.failDisableUser
 	}
 	u := f.ensureUser(username)
-	u.enabled = false
+	// Mirror the adapter: an org disable ADDS to the multi-valued set (dedup); a
+	// direct admin disable (byOrg=="") sets the separate ban marker. A disable for
+	// ANY reason blocks login.
 	if byOrg != "" {
-		u.disabledByOrg = byOrg
+		// Mirror the adapter's migration guard: a member already disabled for NO
+		// tracked reason (a legacy/out-of-band disable) is preserved as an admin ban
+		// before the org tag is added, so a later org-enable can't launder it away.
+		if !u.enabled && len(u.disabledByOrg) == 0 && !u.disabledByAdmin {
+			u.disabledByAdmin = true
+		}
+		if !u.hasOrg(byOrg) {
+			u.disabledByOrg = append(u.disabledByOrg, byOrg)
+		}
+	} else {
+		u.disabledByAdmin = true
 	}
+	u.enabled = false
 	f.logouts[username]++
 	return nil
 }
@@ -256,12 +281,31 @@ func (f *fakeDirectory) EnableUser(_ context.Context, username, onlyIfDisabledBy
 	if u == nil {
 		return false, nil
 	}
-	if onlyIfDisabledByOrg != "" && u.disabledByOrg != onlyIfDisabledByOrg {
-		return false, nil // not ours to enable
+	changed := false
+	if onlyIfDisabledByOrg != "" {
+		// Org enable: remove this org from the set; a no-op if it wasn't ours.
+		if !u.hasOrg(onlyIfDisabledByOrg) {
+			return false, nil
+		}
+		out := u.disabledByOrg[:0]
+		for _, o := range u.disabledByOrg {
+			if o != onlyIfDisabledByOrg {
+				out = append(out, o)
+			}
+		}
+		u.disabledByOrg = out
+		changed = true
+	} else if u.disabledByAdmin {
+		u.disabledByAdmin = false // direct admin enable clears the ban marker
+		changed = true
 	}
-	u.enabled = true
-	u.disabledByOrg = ""
-	return true, nil
+	// Invariant: enabled iff NOT admin-banned AND no org still suspends them.
+	wantEnabled := !u.disabledByAdmin && len(u.disabledByOrg) == 0
+	if u.enabled != wantEnabled {
+		u.enabled = wantEnabled
+		changed = true
+	}
+	return changed, nil
 }
 
 func (f *fakeDirectory) DeleteUser(_ context.Context, username string) error {

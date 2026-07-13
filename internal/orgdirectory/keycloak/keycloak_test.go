@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/spawnly/platform/internal/orgdirectory"
@@ -20,6 +21,12 @@ import (
 // to prove resolution (alias->uuid, username->uuid), idempotency (409/existing),
 // and the raw-string member body.
 type fakeKC struct {
+	// mu serializes every request the fake handles so its in-memory maps are safe
+	// under the concurrent-lifecycle test. It is released between requests, so the
+	// adapter's own per-user RMW lock (not this) is what prevents a lost update — a
+	// GET and its follow-up PUT are separate lock acquisitions here, mirroring real
+	// Keycloak (which has no cross-request lock).
+	mu               sync.Mutex
 	realm            string
 	tokens           int                  // count of token mints (asserts caching)
 	orgs             map[string]*fakeOrg  // uuid -> org
@@ -361,7 +368,12 @@ func (f *fakeKC) handler() http.Handler {
 			}
 		}
 	})
-	return mux
+	// Serialize every request so the fake's maps are race-free under concurrency.
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		mux.ServeHTTP(w, r)
+	})
 }
 
 func newTestClient(t *testing.T) (*Client, *fakeKC) {
@@ -766,11 +778,44 @@ func TestDisableUser_SetsDisabledAndRevokesSessions(t *testing.T) {
 	if u.enabled {
 		t.Error("user should be disabled (enabled=false)")
 	}
+	// A direct admin ban sets the SEPARATE disabledByAdmin marker, never disabledByOrg.
+	if got := u.attrs["disabledByAdmin"]; len(got) != 1 || got[0] != "true" {
+		t.Errorf("direct admin disable must set disabledByAdmin=[true], got %v", got)
+	}
 	if len(u.attrs["disabledByOrg"]) != 0 {
 		t.Errorf("direct admin disable must not stamp disabledByOrg, got %v", u.attrs["disabledByOrg"])
 	}
 	if f.logouts[u.id] != 1 {
 		t.Errorf("expected 1 session-revoke (logout), got %d", f.logouts[u.id])
+	}
+}
+
+func TestDisableUser_MultiOrgAccumulatesSet(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	u := f.addUser("bob", "")
+
+	// Two orgs suspend bob → disabledByOrg holds BOTH (a set, not a single value).
+	if err := c.DisableUser(ctx, "bob", "acme"); err != nil {
+		t.Fatalf("disable byOrg acme: %v", err)
+	}
+	if err := c.DisableUser(ctx, "bob", "globex"); err != nil {
+		t.Fatalf("disable byOrg globex: %v", err)
+	}
+	got := append([]string(nil), u.attrs["disabledByOrg"]...)
+	sort.Strings(got)
+	if strings.Join(got, ",") != "acme,globex" {
+		t.Errorf("disabledByOrg = %v, want [acme globex]", u.attrs["disabledByOrg"])
+	}
+	if u.enabled {
+		t.Error("user should be disabled")
+	}
+	// A repeat suspension by an org already in the set is a dedup no-op.
+	if err := c.DisableUser(ctx, "bob", "acme"); err != nil {
+		t.Fatalf("repeat disable byOrg acme: %v", err)
+	}
+	if n := len(u.attrs["disabledByOrg"]); n != 2 {
+		t.Errorf("repeat org-disable must dedup, set now has %d entries: %v", n, u.attrs["disabledByOrg"])
 	}
 }
 
@@ -793,6 +838,66 @@ func TestDisableUser_ByOrgStampsTagAndPreservesAttrs(t *testing.T) {
 	}
 }
 
+// A member disabled for NO tracked reason (legacy/out-of-band disable) is preserved
+// as an admin ban when an org later suspends them, so the org-enable that empties
+// the set can't launder the pre-existing lockout away.
+func TestDisableUser_LegacyDisablePreservedAsBan(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	u := f.addUser("legacy", "")
+	u.enabled = false // disabled out-of-band, with NO attributes
+
+	if err := c.DisableUser(ctx, "legacy", "acme"); err != nil {
+		t.Fatalf("org-disable legacy user: %v", err)
+	}
+	if got := u.attrs["disabledByAdmin"]; len(got) != 1 || got[0] != "true" {
+		t.Errorf("legacy disable should be healed to an admin ban, got %v", got)
+	}
+	if got := u.attrs["disabledByOrg"]; len(got) != 1 || got[0] != "acme" {
+		t.Errorf("org tag should also be recorded, got %v", got)
+	}
+	// Org-enable empties the set but the healed admin ban keeps them disabled.
+	if _, err := c.EnableUser(ctx, "legacy", "acme"); err != nil {
+		t.Fatalf("org-enable: %v", err)
+	}
+	if u.enabled {
+		t.Error("legacy-disabled user must STAY disabled after the org lifts its suspension")
+	}
+}
+
+// Concurrent lifecycle mutations on the SAME user must not lose a suspension reason
+// (the per-user RMW lock closes the last-PUT-wins race). Two org suspensions + a
+// direct ban race; every reason must survive. Run under `go test -race`.
+func TestDisableUser_ConcurrentReasonsNotLost(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	u := f.addUser("racer", "")
+
+	var wg sync.WaitGroup
+	for _, byOrg := range []string{"orgA", "orgB", ""} {
+		wg.Add(1)
+		go func(b string) {
+			defer wg.Done()
+			if err := c.DisableUser(ctx, "racer", b); err != nil {
+				t.Errorf("DisableUser(%q): %v", b, err)
+			}
+		}(byOrg)
+	}
+	wg.Wait()
+
+	set := append([]string(nil), u.attrs["disabledByOrg"]...)
+	sort.Strings(set)
+	if strings.Join(set, ",") != "orgA,orgB" {
+		t.Errorf("disabledByOrg = %v, want [orgA orgB] (a concurrent reason was lost)", u.attrs["disabledByOrg"])
+	}
+	if got := u.attrs["disabledByAdmin"]; len(got) != 1 || got[0] != "true" {
+		t.Errorf("disabledByAdmin = %v, want [true] (the concurrent ban was lost)", got)
+	}
+	if u.enabled {
+		t.Error("user must be disabled")
+	}
+}
+
 func TestDisableUser_UnknownUserNoOp(t *testing.T) {
 	c, _ := newTestClient(t)
 	if err := c.DisableUser(context.Background(), "ghost", ""); err != nil {
@@ -800,24 +905,111 @@ func TestDisableUser_UnknownUserNoOp(t *testing.T) {
 	}
 }
 
-func TestEnableUser_UnconditionalClearsTag(t *testing.T) {
+func TestEnableUser_DirectAdminClearsBanMarker(t *testing.T) {
 	c, f := newTestClient(t)
 	ctx := context.Background()
 	u := f.addUser("carol", "")
 	u.enabled = false
-	u.attrs["disabledByOrg"] = []string{"acme"}
+	u.attrs["disabledByAdmin"] = []string{"true"}
 	applied, err := c.EnableUser(ctx, "carol", "")
 	if err != nil {
 		t.Fatalf("enable: %v", err)
 	}
 	if !applied {
-		t.Error("unconditional enable of a disabled user should report applied=true")
+		t.Error("direct admin enable of an admin-banned user should report applied=true")
 	}
 	if !u.enabled {
 		t.Error("user should be enabled")
 	}
+	if len(u.attrs["disabledByAdmin"]) != 0 {
+		t.Errorf("disabledByAdmin marker should be cleared, got %v", u.attrs["disabledByAdmin"])
+	}
+}
+
+// A direct admin enable clears the ban marker but must NOT resurrect an account an
+// org still suspends (the ban can't be laundered into an org-enable).
+func TestEnableUser_DirectAdminRespectsOrgSuspension(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	u := f.addUser("dana", "")
+	u.enabled = false
+	u.attrs["disabledByAdmin"] = []string{"true"}
+	u.attrs["disabledByOrg"] = []string{"acme"}
+
+	applied, err := c.EnableUser(ctx, "dana", "")
+	if err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if !applied {
+		t.Error("clearing the ban marker is a change → applied=true")
+	}
+	if len(u.attrs["disabledByAdmin"]) != 0 {
+		t.Errorf("ban marker should be cleared, got %v", u.attrs["disabledByAdmin"])
+	}
+	if u.enabled {
+		t.Error("account must STAY disabled while org acme still suspends it")
+	}
+	if got := u.attrs["disabledByOrg"]; len(got) != 1 || got[0] != "acme" {
+		t.Errorf("org suspension must remain, got %v", got)
+	}
+}
+
+// The mirror invariant: an org lifting its suspension must not launder away a
+// concurrent admin ban.
+func TestEnableUser_OrgEnableRespectsAdminBan(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	u := f.addUser("erin", "")
+	u.enabled = false
+	u.attrs["disabledByAdmin"] = []string{"true"}
+	u.attrs["disabledByOrg"] = []string{"acme"}
+
+	applied, err := c.EnableUser(ctx, "erin", "acme")
+	if err != nil {
+		t.Fatalf("org enable: %v", err)
+	}
+	if !applied {
+		t.Error("removing acme from the set is a change → applied=true")
+	}
 	if len(u.attrs["disabledByOrg"]) != 0 {
-		t.Errorf("disabledByOrg tag should be cleared, got %v", u.attrs["disabledByOrg"])
+		t.Errorf("acme should be removed from the set, got %v", u.attrs["disabledByOrg"])
+	}
+	if u.enabled {
+		t.Error("account must STAY disabled while the admin ban is in force")
+	}
+	if got := u.attrs["disabledByAdmin"]; len(got) != 1 || got[0] != "true" {
+		t.Errorf("admin ban must remain, got %v", got)
+	}
+}
+
+// A member suspended by two orgs stays disabled until BOTH lift; enabling only when
+// the set is finally empty.
+func TestEnableUser_MultiOrgStaysDisabledUntilAllLift(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	u := f.addUser("frank", "")
+	u.enabled = false
+	u.attrs["disabledByOrg"] = []string{"acme", "globex"}
+
+	// acme lifts → still suspended by globex.
+	if _, err := c.EnableUser(ctx, "frank", "acme"); err != nil {
+		t.Fatalf("enable acme: %v", err)
+	}
+	if u.enabled {
+		t.Error("frank must stay disabled while globex still suspends him")
+	}
+	if got := u.attrs["disabledByOrg"]; len(got) != 1 || got[0] != "globex" {
+		t.Errorf("set after acme-enable = %v, want [globex]", got)
+	}
+	// globex lifts → set empty → enabled.
+	if _, err := c.EnableUser(ctx, "frank", "globex"); err != nil {
+		t.Fatalf("enable globex: %v", err)
+	}
+	if !u.enabled {
+		t.Error("frank should be enabled once every org has lifted its suspension")
+	}
+	if len(u.attrs["disabledByOrg"]) != 0 {
+		t.Errorf("set should be empty, got %v", u.attrs["disabledByOrg"])
 	}
 }
 

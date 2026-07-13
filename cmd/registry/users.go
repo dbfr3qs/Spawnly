@@ -38,9 +38,10 @@ func registerUserRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client
 
 	// POST /v1/users/{username}/disable — block login + revoke sessions, and
 	// (when suspendAgents) suspend the user's agents via the revoke cascade. Direct
-	// admin disable, so DisableUser is called with byOrg="" (no disabledByOrg tag —
-	// that stamp is the org-lifecycle path in Phase 4). The root lockout guard
-	// refuses to disable the master-admin account.
+	// admin ban, so DisableUser is called with byOrg="" — it sets the separate
+	// disabledByAdmin marker (NOT the org-suspension set) so an org-enable can never
+	// launder the platform ban away. The root lockout guard refuses to disable the
+	// master-admin account.
 	mux.HandleFunc("POST /v1/users/{username}/disable", cp(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		username := r.PathValue("username")
@@ -76,10 +77,12 @@ func registerUserRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client
 		w.WriteHeader(http.StatusNoContent)
 	}))
 
-	// POST /v1/users/{username}/enable — restore login. Agents suspended at disable
-	// time are DELIBERATELY not resumed (asymmetric by design — the admin/user
-	// resumes them manually). onlyIfDisabledByOrg="" = unconditional enable + clear
-	// any tag. Enabling the master admin is harmless, so no root guard here.
+	// POST /v1/users/{username}/enable — lift the direct admin ban. Agents suspended
+	// at disable time are DELIBERATELY not resumed (asymmetric by design — the
+	// admin/user resumes them manually). onlyIfDisabledByOrg="" clears the
+	// disabledByAdmin marker and restores login ONLY when no org still suspends the
+	// account (a user an org also disabled stays disabled until that org enables).
+	// Enabling the master admin is harmless, so no root guard here.
 	mux.HandleFunc("POST /v1/users/{username}/enable", cp(func(w http.ResponseWriter, r *http.Request) {
 		username := r.PathValue("username")
 		if !registry.ValidUserID(username) {

@@ -55,7 +55,7 @@ func seedOrgLifecycle(t *testing.T) (http.Handler, *store, *fakeDirectory, *spic
 	return mux, s, dir, sdb
 }
 
-func TestOrgDisable_LocksMembersSkipsMasterAdminAndBanned_SuspendsAgents(t *testing.T) {
+func TestOrgDisable_LocksMembersSkipsMasterAdmin_TagsBannedToo_SuspendsAgents(t *testing.T) {
 	mux, s, dir, _ := seedOrgLifecycle(t)
 
 	rec := doReq(t, mux, "POST", "/v1/orgs/acme/disable", nil)
@@ -73,27 +73,29 @@ func TestOrgDisable_LocksMembersSkipsMasterAdminAndBanned_SuspendsAgents(t *test
 		if st == nil || st.enabled {
 			t.Errorf("member %s should be disabled", u)
 		}
-		if st != nil && st.disabledByOrg != "acme" {
-			t.Errorf("member %s disabledByOrg = %q, want acme", u, st.disabledByOrg)
+		if st != nil && !st.hasOrg("acme") {
+			t.Errorf("member %s disabledByOrg = %v, want it to include acme", u, st.disabledByOrg)
 		}
 		if dir.logouts[u] == 0 {
 			t.Errorf("member %s sessions should have been revoked", u)
 		}
 	}
 	// The master admin (root) is never touched.
-	if st := dir.users["root"]; st == nil || !st.enabled || st.disabledByOrg != "" {
+	if st := dir.users["root"]; st == nil || !st.enabled || len(st.disabledByOrg) != 0 {
 		t.Errorf("master admin root must be left enabled + untagged, got %+v", st)
 	}
 	if dir.hasCallPrefix("DisableUser:root") {
 		t.Errorf("DisableUser must never be called on the master admin")
 	}
-	// The independently-disabled member (carol) is left EXACTLY as-is: still
-	// disabled, still WITHOUT a disabledByOrg tag (no clobber).
-	if st := dir.users["carol"]; st == nil || st.enabled || st.disabledByOrg != "" {
-		t.Errorf("independently-disabled carol must not be clobbered, got %+v", st)
+	// The independently admin-banned member (carol) is ALSO org-tagged now: the
+	// multi-valued set + the SEPARATE ban marker mean recording this org's suspension
+	// never clobbers the admin ban — and recording it is REQUIRED so a later enable of
+	// a different org can't wrongly resurrect her. She stays disabled.
+	if st := dir.users["carol"]; st == nil || st.enabled || !st.disabledByAdmin || !st.hasOrg("acme") {
+		t.Errorf("admin-banned carol must stay disabled, keep her ban marker, and also be org-tagged, got %+v", st)
 	}
-	if dir.hasCall("DisableUser:carol|acme") {
-		t.Errorf("must not re-disable the already-disabled carol (tag clobber)")
+	if !dir.hasCall("DisableUser:carol|acme") {
+		t.Errorf("org disable must also record its suspension on the already-banned carol")
 	}
 	// All acme agents revoked; globex agent untouched.
 	for _, id := range []string{"ar", "ac"} {
@@ -120,19 +122,63 @@ func TestOrgEnable_ReenablesOnlyOrgTagged_LeavesAgentsSuspended(t *testing.T) {
 	// Members the org disabled are back, tags cleared.
 	for _, u := range []string{"alice", "bob"} {
 		st := dir.users[u]
-		if st == nil || !st.enabled || st.disabledByOrg != "" {
+		if st == nil || !st.enabled || len(st.disabledByOrg) != 0 {
 			t.Errorf("org-disabled member %s should be re-enabled + untagged, got %+v", u, st)
 		}
 	}
-	// The independently-disabled member stays disabled (not ours to enable).
-	if st := dir.users["carol"]; st == nil || st.enabled {
-		t.Errorf("independently-disabled carol must STAY disabled after org enable, got %+v", st)
+	// The admin-banned member stays disabled: org enable removes acme from her set,
+	// but the separate ban marker keeps her locked out (a ban can't be laundered away
+	// by an org-enable).
+	if st := dir.users["carol"]; st == nil || st.enabled || !st.disabledByAdmin {
+		t.Errorf("admin-banned carol must STAY disabled after org enable, got %+v", st)
 	}
 	// Agents stay suspended (asymmetric — manual resume).
 	for _, id := range []string{"ar", "ac"} {
 		if st := agentStatus(t, s, id); st != "revoked" {
 			t.Errorf("agent %s must STAY revoked after org enable, got %q", id, st)
 		}
+	}
+}
+
+// TestOrgDisable_MultiOrgMemberStaysDisabledUntilAllEnable proves the multi-valued
+// set semantics end-to-end at the registry: a member of TWO orgs disabled by both
+// stays locked out until BOTH lift their suspension.
+func TestOrgDisable_MultiOrgMemberStaysDisabledUntilAllEnable(t *testing.T) {
+	s := newStore()
+	sdb := spicedb.NewMock()
+	dir := newFakeDirectory()
+	mux := orgMux(s, sdb, dir)
+
+	if rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "acme", "adminUser": "alice"}); rec.Code != http.StatusCreated {
+		t.Fatalf("create acme: %d", rec.Code)
+	}
+	if rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "globex", "adminUser": "dave"}); rec.Code != http.StatusCreated {
+		t.Fatalf("create globex: %d", rec.Code)
+	}
+	// eve belongs to BOTH orgs.
+	for _, org := range []string{"acme", "globex"} {
+		if rec := doReq(t, mux, "POST", "/v1/orgs/"+org+"/members", map[string]string{"user": "eve"}); rec.Code != http.StatusCreated {
+			t.Fatalf("add eve to %s: %d", org, rec.Code)
+		}
+	}
+
+	// Both orgs suspend → eve is disabled by BOTH (the set carries both).
+	doReq(t, mux, "POST", "/v1/orgs/acme/disable", nil)
+	doReq(t, mux, "POST", "/v1/orgs/globex/disable", nil)
+	if st := dir.users["eve"]; st == nil || st.enabled || !st.hasOrg("acme") || !st.hasOrg("globex") {
+		t.Fatalf("eve should be disabled by BOTH orgs, got %+v", st)
+	}
+
+	// acme lifts — globex still suspends eve, so she STAYS disabled.
+	doReq(t, mux, "POST", "/v1/orgs/acme/enable", nil)
+	if st := dir.users["eve"]; st == nil || st.enabled || st.hasOrg("acme") || !st.hasOrg("globex") {
+		t.Fatalf("eve must stay disabled while globex still suspends her, got %+v", st)
+	}
+
+	// globex lifts — the set is now empty, so eve is finally re-enabled.
+	doReq(t, mux, "POST", "/v1/orgs/globex/enable", nil)
+	if st := dir.users["eve"]; st == nil || !st.enabled || len(st.disabledByOrg) != 0 {
+		t.Fatalf("eve should be enabled once BOTH orgs lifted, got %+v", st)
 	}
 }
 
@@ -144,9 +190,10 @@ func TestOrgDisableEnable_Idempotent(t *testing.T) {
 			t.Fatalf("disable #%d: %d %s", i, rec.Code, rec.Body.String())
 		}
 	}
-	// carol never accrued an org tag across repeat disables.
-	if st := dir.users["carol"]; st == nil || st.disabledByOrg != "" {
-		t.Errorf("carol must not be clobbered by repeat disable, got %+v", st)
+	// carol accrues acme EXACTLY ONCE across repeat disables (dedup), and keeps her
+	// separate admin ban intact.
+	if st := dir.users["carol"]; st == nil || !st.disabledByAdmin || len(st.disabledByOrg) != 1 || !st.hasOrg("acme") {
+		t.Errorf("carol must accrue acme once (dedup) and keep her ban, got %+v", st)
 	}
 	for i := 0; i < 2; i++ {
 		if rec := doReq(t, mux, "POST", "/v1/orgs/acme/enable", nil); rec.Code != http.StatusOK {
@@ -165,7 +212,7 @@ func TestOrgDelete_OnDisabled_ClearsOrgTags(t *testing.T) {
 	mux, _, dir, _ := seedOrgLifecycle(t)
 	doReq(t, mux, "POST", "/v1/orgs/acme/disable", nil)
 	// Precondition: alice was org-tagged + disabled.
-	if st := dir.users["alice"]; st == nil || st.enabled || st.disabledByOrg != "acme" {
+	if st := dir.users["alice"]; st == nil || st.enabled || !st.hasOrg("acme") {
 		t.Fatalf("precondition: alice should be org-disabled, got %+v", st)
 	}
 
@@ -173,12 +220,13 @@ func TestOrgDelete_OnDisabled_ClearsOrgTags(t *testing.T) {
 		t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
 	}
 	// Deleting a disabled org must not strand its org-locked members.
-	if st := dir.users["alice"]; st == nil || !st.enabled || st.disabledByOrg != "" {
+	if st := dir.users["alice"]; st == nil || !st.enabled || len(st.disabledByOrg) != 0 {
 		t.Errorf("alice should be re-enabled + untagged after deleting the disabled org, got %+v", st)
 	}
-	// The independently-disabled member stays disabled (delete hygiene is no-clobber too).
-	if st := dir.users["carol"]; st == nil || st.enabled {
-		t.Errorf("independently-disabled carol must stay disabled after org delete, got %+v", st)
+	// The admin-banned member stays disabled (delete hygiene only lifts THIS org's
+	// suspension; the separate admin ban survives).
+	if st := dir.users["carol"]; st == nil || st.enabled || !st.disabledByAdmin {
+		t.Errorf("admin-banned carol must stay disabled after org delete, got %+v", st)
 	}
 }
 
@@ -267,15 +315,16 @@ func TestRemoveMember_WhileOrgDisabled_ClearsOrgTagOnlyForTagged(t *testing.T) {
 	if rec := doReq(t, mux, "DELETE", "/v1/orgs/acme/members/bob", nil); rec.Code != http.StatusNoContent {
 		t.Fatalf("remove bob: %d %s", rec.Code, rec.Body.String())
 	}
-	if st := dir.users["bob"]; st == nil || !st.enabled || st.disabledByOrg != "" {
+	if st := dir.users["bob"]; st == nil || !st.enabled || len(st.disabledByOrg) != 0 {
 		t.Errorf("org-tagged bob should be re-enabled + untagged on removal, got %+v", st)
 	}
-	// carol was independently disabled (no tag). Removing her must NOT re-enable her.
+	// carol is admin-banned. Removing her lifts THIS org's suspension but the ban
+	// keeps her disabled — removal must NOT launder the ban away.
 	if rec := doReq(t, mux, "DELETE", "/v1/orgs/acme/members/carol", nil); rec.Code != http.StatusNoContent {
 		t.Fatalf("remove carol: %d %s", rec.Code, rec.Body.String())
 	}
-	if st := dir.users["carol"]; st == nil || st.enabled {
-		t.Errorf("independently-disabled carol must stay disabled on removal, got %+v", st)
+	if st := dir.users["carol"]; st == nil || st.enabled || !st.disabledByAdmin {
+		t.Errorf("admin-banned carol must stay disabled on removal, got %+v", st)
 	}
 }
 

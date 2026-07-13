@@ -45,10 +45,8 @@ type Member struct {
 	Email    string `json:"email,omitempty"`
 	Role     string `json:"role,omitempty"`
 	// Enabled reports whether the member's account may currently log in. Populated
-	// by the Keycloak adapter from the members listing (the org-disable path reads
-	// it to skip members that are ALREADY disabled, so it never clobbers an
-	// independently-disabled account's tag). Backends that don't track it leave it
-	// at the zero value (false).
+	// by the Keycloak adapter from the members listing. Backends that don't track it
+	// leave it at the zero value (false).
 	Enabled bool `json:"enabled,omitempty"`
 }
 
@@ -56,10 +54,10 @@ type Member struct {
 // directory, signup-lifecycle Phase 3) — a neutral, platform-shaped subset of
 // the identity backend's user representation. Username is the Spawnly user id
 // (== the Keycloak username / SpiceDB subject id). Enabled reports whether the
-// account may log in. DisabledByOrg carries the org alias that suspended the
-// account when it was disabled BY an org (Phase 4), empty otherwise — it lets an
-// org re-enable only the members IT disabled without clobbering an
-// independently-disabled account.
+// account may log in. DisabledByOrg carries the FIRST org alias in the account's
+// (possibly multi-valued) suspending-org set — empty when no org suspends it — so
+// the master-admin directory can label an org suspension; the full set + the
+// separate admin-ban marker are the adapter's internal state (see keycloak.go).
 type User struct {
 	Username      string `json:"username"`
 	Email         string `json:"email,omitempty"`
@@ -115,20 +113,22 @@ type Directory interface {
 	ListUsers(ctx context.Context) ([]User, error)
 	// DisableUser blocks the user from logging in (enabled=false) AND revokes
 	// their active SSO sessions, so a disable takes effect immediately rather than
-	// only on the next login. When byOrg != "" it also stamps a
-	// disabledByOrg=<byOrg> attribute (an org-initiated disable, Phase 4) so a
-	// later org-enable can identify the accounts IT disabled; byOrg == "" is a
-	// direct admin disable and leaves the tag untouched. Read-modify-write
-	// preserves the user's other attributes. Idempotent; an unknown user is a
-	// no-op success.
+	// only on the next login. When byOrg != "" it ADDS byOrg to the multi-valued
+	// disabledByOrg attribute (the SET of orgs currently suspending the account,
+	// dedup); when byOrg == "" it is a direct admin ban and sets a separate
+	// disabledByAdmin marker instead. The two reasons are tracked independently so
+	// neither clobbers the other. Read-modify-write preserves the user's other
+	// attributes. Idempotent; an unknown user is a no-op success.
 	DisableUser(ctx context.Context, username, byOrg string) error
-	// EnableUser re-enables the user (enabled=true). When onlyIfDisabledByOrg ==
-	// "" it is an unconditional enable that also clears any disabledByOrg tag.
-	// When onlyIfDisabledByOrg != "" it enables + clears the tag ONLY if the
-	// user's disabledByOrg tag matches exactly (so an independently-disabled or
-	// differently-org-disabled account is left untouched); it returns whether the
-	// enable applied. Read-modify-write preserves other attributes. Idempotent; an
-	// unknown user returns (false, nil).
+	// EnableUser lifts ONE suspension reason and re-enables login only when NONE
+	// remain. When onlyIfDisabledByOrg != "" it REMOVES that org from the
+	// disabledByOrg set (a no-op leaving the account untouched if that org wasn't
+	// suspending it); when onlyIfDisabledByOrg == "" it clears the direct-admin ban
+	// marker. In both cases the account is re-enabled ONLY if it is no longer
+	// admin-banned AND the disabledByOrg set is now empty — so an org lifting its
+	// suspension while another org (or the platform admin) still holds one keeps the
+	// account disabled. Returns whether anything changed. Read-modify-write
+	// preserves other attributes. Idempotent; an unknown user returns (false, nil).
 	EnableUser(ctx context.Context, username, onlyIfDisabledByOrg string) (bool, error)
 	// DeleteUser hard-deletes the user account. Idempotent (an absent user is a
 	// success). Callers settle the user's org agents + memberships FIRST (the

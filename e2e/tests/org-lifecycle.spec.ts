@@ -213,6 +213,19 @@ test.describe('org lifecycle', () => {
       });
       expect(guardResp.ok(), `spawn into disabled org must be refused (got ${guardResp.status()})`).toBeFalsy();
 
+      // (A/3) A member-mutation via the ORG-ADMIN self-service path is refused while
+      // the org is disabled. userPageA is the org admin; its dashboard session
+      // OUTLIVES the KC session revoke, so this is the exact stale-org-admin-token
+      // scenario the guard defends: removing a member re-enables them, laundering
+      // them out of the lockout. The registry never sees the DELETE (guard → 403).
+      const staleRemove = await userPageA.request.delete(`/api/org/members/${enc(userB)}`);
+      expect(
+        staleRemove.status(),
+        `stale org-admin member-remove on disabled org must be 403 (got ${staleRemove.status()})`,
+      ).toBe(403);
+      // B is untouched by the refused call (still a disabled member, not re-enabled).
+      expect(await userEnabled(root, userB), 'B stays disabled — refused remove did not re-enable').toBe(false);
+
       // ── (9) ENABLE the org ──────────────────────────────────────────────────
       expect((await root.request.post(`/api/admin/orgs/${enc(orgId)}/enable`)).status(), 'enable org').toBe(
         200,

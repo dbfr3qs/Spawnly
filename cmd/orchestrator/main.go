@@ -454,6 +454,33 @@ func requireOrgMember(v tokenvalidator.TokenValidator, audience, scope string, s
 	})
 }
 
+// refuseIfOrgDisabled wraps a SELF-SERVICE org-admin member-mutation handler
+// (add/remove member, set role) so it refuses (403) while org {id} is SUSPENDED
+// (account-lifecycle follow-up, item A/3). Without it a STALE org-admin token could
+// call these routes during a suspension — and removeMemberFromOrg re-enables the
+// ejected member on the way out, laundering them out of the org lockout. This guard
+// lives on the self-service path ONLY: the master-admin /v1/admin/orgs/{id}/members
+// family is deliberately NOT wrapped, so a platform admin can still manage a
+// disabled org's members. It runs AFTER requireOrgAdmin (an authorized caller only),
+// reusing fetchOrg — the same org-record read the remote-spawn guard uses — over the
+// control-plane bearer. A registry read failure fails CLOSED (502), never fail-open.
+func refuseIfOrgDisabled(registryURL string, cpBearer func() string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		org, err := fetchOrg(r.Context(), registryURL, cpBearer, id)
+		if err != nil {
+			log.Printf("member-mutation guard: fetch org %s: %v", id, err)
+			http.Error(w, "registry unavailable", http.StatusBadGateway)
+			return
+		}
+		if org.Disabled {
+			http.Error(w, "organization is disabled", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // fetchOrg reads a single org record from the registry over the control-plane
 // bearer (the cp-gated GET /v1/orgs/{id}). Used by the remote-agent registration
 // path to check the org's anchor status server-side. A non-200 (including 404)
@@ -1489,15 +1516,20 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	mux.HandleFunc("GET /v1/orgs/{id}/members", requireOrgMember(validator, audience, readScope, sdb, forwardToRegistry("GET", func(r *http.Request) string {
 		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members"
 	})))
-	mux.HandleFunc("POST /v1/orgs/{id}/members", requireOrgAdmin(validator, audience, writeScope, sdb, forwardToRegistry("POST", func(r *http.Request) string {
+	// The three member-MUTATION routes are additionally wrapped in refuseIfOrgDisabled
+	// (account-lifecycle follow-up, item A/3): a stale org-admin token must not drive a
+	// remove-member (which re-enables the ejected member) during a suspension. The
+	// guard sits INSIDE requireOrgAdmin so only an authorized caller triggers the org
+	// read. The master-admin /v1/admin/orgs family above is intentionally not guarded.
+	mux.HandleFunc("POST /v1/orgs/{id}/members", requireOrgAdmin(validator, audience, writeScope, sdb, refuseIfOrgDisabled(registryURL, controlPlaneBearer, forwardToRegistry("POST", func(r *http.Request) string {
 		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members"
-	})))
-	mux.HandleFunc("PATCH /v1/orgs/{id}/members/{user}", requireOrgAdmin(validator, audience, writeScope, sdb, forwardToRegistry("PATCH", func(r *http.Request) string {
+	}))))
+	mux.HandleFunc("PATCH /v1/orgs/{id}/members/{user}", requireOrgAdmin(validator, audience, writeScope, sdb, refuseIfOrgDisabled(registryURL, controlPlaneBearer, forwardToRegistry("PATCH", func(r *http.Request) string {
 		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members/" + url.PathEscape(r.PathValue("user"))
-	})))
-	mux.HandleFunc("DELETE /v1/orgs/{id}/members/{user}", requireOrgAdmin(validator, audience, writeScope, sdb, forwardToRegistry("DELETE", func(r *http.Request) string {
+	}))))
+	mux.HandleFunc("DELETE /v1/orgs/{id}/members/{user}", requireOrgAdmin(validator, audience, writeScope, sdb, refuseIfOrgDisabled(registryURL, controlPlaneBearer, forwardToRegistry("DELETE", func(r *http.Request) string {
 		return "/v1/orgs/" + url.PathEscape(r.PathValue("id")) + "/members/" + url.PathEscape(r.PathValue("user"))
-	})))
+	}))))
 
 	// Per-org attestation anchor (multi-tenancy Phase 8). Registering, clearing,
 	// and ACTIVATING (proof of control) an anchor are all org-admin operations —

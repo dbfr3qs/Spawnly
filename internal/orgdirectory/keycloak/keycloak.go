@@ -49,6 +49,17 @@ type Client struct {
 	// login silently breaks). The registry runs single-replica, so a process-local
 	// mutex is sufficient; a multi-replica registry would need a distributed lock.
 	editMu sync.Mutex
+
+	// userLocks serializes the read-modify-write of a SINGLE user's representation
+	// (editUser), keyed on the resolved user id. Keycloak's user PUT likewise has no
+	// optimistic locking, so two concurrent lifecycle mutations on the SAME user —
+	// e.g. an org suspension racing a direct admin ban, or two orgs suspending at
+	// once — would each GET the same rep and last-PUT-wins, LOSING one reason and
+	// breaking the "enabled iff no reason remains" invariant (a ban laundered away,
+	// or a user left enabled while still suspended). A per-user mutex makes each
+	// user's disable/enable RMW atomic. Single-replica registry ⇒ a process-local
+	// lock suffices; a multi-replica registry would need a distributed lock.
+	userLocks sync.Map // user id -> *sync.Mutex
 }
 
 var _ orgdirectory.Directory = (*Client)(nil)
@@ -479,24 +490,35 @@ func (c *Client) ListUserOrgs(ctx context.Context, user string) ([]string, error
 
 // ---- user lifecycle (master-admin surface, signup-lifecycle Phase 3) ------
 
-// disabledByOrgAttr is the Keycloak user-attribute key stamped on an account
-// disabled BY an org (Phase 4), naming the org alias that suspended it. A direct
-// admin disable (byOrg == "") never sets it, so it stays a clean signal that a
-// later org-enable can key off to re-enable ONLY the accounts that org disabled
-// (never clobbering an independently-disabled user).
+// disabledByOrgAttr is the Keycloak user-attribute key holding the SET of org
+// aliases currently suspending an account (account-lifecycle follow-up, items
+// A/1-2). It is MULTI-VALUED: KC serializes it as a JSON string array, and a user
+// may be suspended by several orgs at once (attributes.disabledByOrg = ["a","b"]).
+// A member is re-enabled only once EVERY org has lifted its suspension (the set is
+// empty) AND no direct admin ban is in force (disabledByAdminAttr).
 //
-// PHASE 4 PREREQUISITE — this tag does NOT persist on a real Keycloak 26 realm as
-// shipped: KC 24+ runs the declarative user profile with the unmanaged-attribute
+// disabledByAdminAttr is the SEPARATE direct-admin-ban marker (value ["true"]).
+// Tracking a platform ban distinctly from org suspension is load-bearing: an
+// org-enable that empties the disabledByOrg set must NOT resurrect an account a
+// platform admin independently banned, and a direct admin-enable that clears the
+// ban must NOT resurrect an account an org still suspends. The invariant both
+// DisableUser and EnableUser maintain: enabled == (NOT admin-banned AND the
+// disabledByOrg set is empty).
+//
+// PERSISTENCE PREREQUISITE — these tags do NOT persist on a real Keycloak 26 realm
+// as shipped: KC 24+ runs the declarative user profile with the unmanaged-attribute
 // policy DISABLED by default (see the orgdirectory package doc: "this realm's
-// declarative user profile silently drops unmanaged user attributes"), so the
-// admin PUT below silently drops attributes.disabledByOrg and the GET omits it —
-// EnableUser(_, "<org>") would then always see "" and no-op. Phase 3 is unaffected
-// because the registry only ever calls Disable/EnableUser with byOrg=="" (the tag
-// is never written or read live this phase). Before Phase 4 relies on it, declare
-// disabledByOrg in the realm user-profile config or set unmanagedAttributePolicy
-// (ADMIN_EDIT) in deploy/keycloak. WATCH OUT: the httptest fake KC honors arbitrary
-// attributes, so the adapter unit tests pass green while this would fail live.
-const disabledByOrgAttr = "disabledByOrg"
+// declarative user profile silently drops unmanaged user attributes"), so an admin
+// PUT carrying an UNDECLARED attribute is silently dropped and the GET omits it.
+// BOTH attributes are declared (admin-only) in deploy/keycloak/user-profile.tf, and
+// disabledByOrg is declared multi_valued so KC keeps every value rather than
+// truncating to one. WATCH OUT: the httptest fake KC honors arbitrary multi-valued
+// attributes, so the adapter unit tests pass green even if the live realm would
+// drop/truncate them — the multi-valued round-trip MUST be verified live.
+const (
+	disabledByOrgAttr   = "disabledByOrg"
+	disabledByAdminAttr = "disabledByAdmin"
+)
 
 // ListUsers returns every realm user, paginated like ListMembers (a single
 // unpaginated GET would silently truncate at Keycloak's page cap). Role and org
@@ -535,13 +557,37 @@ func (c *Client) DisableUser(ctx context.Context, username, byOrg string) error 
 	}
 	if err := c.editUser(ctx, id, func(rep map[string]any) bool {
 		changed := false
+		// An org-initiated disable ADDS byOrg to the multi-valued suspending-org set
+		// (dedup — a repeat is a no-op); a direct admin disable (byOrg == "") sets the
+		// separate ban marker instead. Neither clobbers the other, so a user suspended
+		// by several orgs and/or a platform admin accumulates every reason independently.
+		if byOrg != "" {
+			// Migration/robustness guard: if the account is ALREADY disabled for NO
+			// tracked reason — a legacy disable from before this attribute model, or an
+			// out-of-band KC-admin-console disable — preserve that lockout as an admin
+			// ban BEFORE tagging the org. Otherwise the org-enable that later empties the
+			// set would recompute enabled=true and silently launder the pre-existing
+			// disable away. A disabled-with-no-reason account is illegal in this model, so
+			// healing it to the fail-safe "admin ban" (only a direct admin-enable lifts it)
+			// is the correct default.
+			if rep["enabled"] == false &&
+				len(userAttrSet(rep, disabledByOrgAttr)) == 0 &&
+				firstUserAttr(rep, disabledByAdminAttr) == "" {
+				if setUserAttr(rep, disabledByAdminAttr, "true") {
+					changed = true
+				}
+			}
+			if addToUserAttrSet(rep, disabledByOrgAttr, byOrg) {
+				changed = true
+			}
+		} else {
+			if setUserAttr(rep, disabledByAdminAttr, "true") {
+				changed = true
+			}
+		}
+		// A disable — for ANY reason — blocks login.
 		if rep["enabled"] != false {
 			rep["enabled"] = false
-			changed = true
-		}
-		// Only an org-initiated disable stamps the tag; a direct admin disable
-		// (byOrg == "") leaves any existing tag untouched.
-		if byOrg != "" && setUserAttr(rep, disabledByOrgAttr, byOrg) {
 			changed = true
 		}
 		return changed
@@ -570,18 +616,30 @@ func (c *Client) EnableUser(ctx context.Context, username, onlyIfDisabledByOrg s
 	}
 	applied := false
 	if err := c.editUser(ctx, id, func(rep map[string]any) bool {
-		// Conditional (org) enable: only touch the account when THIS org's tag
-		// matches, so an independently-disabled or differently-org-disabled account
-		// is left exactly as-is.
-		if onlyIfDisabledByOrg != "" && firstUserAttr(rep, disabledByOrgAttr) != onlyIfDisabledByOrg {
-			return false
-		}
 		changed := false
-		if rep["enabled"] != true {
-			rep["enabled"] = true
+		if onlyIfDisabledByOrg != "" {
+			// Conditional (org) enable: REMOVE this org from the suspending-org set. If
+			// this org wasn't suspending the account (independently disabled, or disabled
+			// by a DIFFERENT org), leave everything exactly as-is — never touch enabled.
+			if !removeFromUserAttrSet(rep, disabledByOrgAttr, onlyIfDisabledByOrg) {
+				return false
+			}
 			changed = true
+		} else {
+			// Direct admin enable: lift the ban marker. (An org may still be suspending
+			// them, in which case they stay disabled below.)
+			if clearUserAttr(rep, disabledByAdminAttr) {
+				changed = true
+			}
 		}
-		if clearUserAttr(rep, disabledByOrgAttr) {
+		// Invariant: re-enable login ONLY when no admin ban is in force AND no org still
+		// suspends the account. An org lifting its suspension while another org (or the
+		// platform admin) still holds one keeps the account disabled.
+		banned := firstUserAttr(rep, disabledByAdminAttr) != ""
+		stillSuspended := len(userAttrSet(rep, disabledByOrgAttr)) > 0
+		wantEnabled := !banned && !stillSuspended
+		if rep["enabled"] != wantEnabled {
+			rep["enabled"] = wantEnabled
 			changed = true
 		}
 		applied = changed
@@ -616,6 +674,11 @@ func (c *Client) DeleteUser(ctx context.Context, username string) error {
 // PUT is skipped when mut reports no change (idempotent no-op), mirroring
 // editDashboardClient.
 func (c *Client) editUser(ctx context.Context, id string, mut func(rep map[string]any) bool) error {
+	// Serialize this user's whole GET->mutate->PUT so a concurrent lifecycle call on
+	// the same user can't lose a suspension reason via last-PUT-wins (see userLocks).
+	unlock := c.lockUser(id)
+	defer unlock()
+
 	var rep map[string]any
 	if err := c.do(ctx, http.MethodGet, c.adminURL("/users/%s", id), nil, &rep); err != nil {
 		// The user was deleted between resolveUserID and this read — nothing to
@@ -636,6 +699,16 @@ func (c *Client) editUser(ctx context.Context, id string, mut func(rep map[strin
 		return err
 	}
 	return nil
+}
+
+// lockUser acquires the per-user-id RMW mutex (creating it on first use) and
+// returns its unlock func. Serializes editUser for a single user across concurrent
+// control-plane requests so a disable/enable never loses a reason to a lost update.
+func (c *Client) lockUser(id string) func() {
+	mu, _ := c.userLocks.LoadOrStore(id, &sync.Mutex{})
+	m := mu.(*sync.Mutex)
+	m.Lock()
+	return m.Unlock
 }
 
 // firstAttr reads the first value of a typed KC attribute map, "" when absent.
@@ -675,6 +748,63 @@ func setUserAttr(rep map[string]any, key, val string) bool {
 		return false
 	}
 	userAttrs(rep)[key] = []any{val}
+	return true
+}
+
+// userAttrSet reads the full string set of a multi-valued user attribute (KC
+// serializes attribute values as JSON string arrays), nil when absent/empty.
+func userAttrSet(rep map[string]any, key string) []string {
+	attrs, _ := rep["attributes"].(map[string]any)
+	return asStringSlice(attrs[key])
+}
+
+// toAnySlice widens a []string to the []any KC user-attribute arrays are written
+// as (mirrors asStringSlice's inverse).
+func toAnySlice(ss []string) []any {
+	out := make([]any, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
+}
+
+// addToUserAttrSet adds val to a multi-valued user attribute (dedup), reporting
+// whether the set changed.
+func addToUserAttrSet(rep map[string]any, key, val string) bool {
+	cur := userAttrSet(rep, key)
+	for _, v := range cur {
+		if v == val {
+			return false // already present — no change
+		}
+	}
+	userAttrs(rep)[key] = toAnySlice(append(cur, val))
+	return true
+}
+
+// removeFromUserAttrSet removes val from a multi-valued user attribute, reporting
+// whether it was present. When the set becomes empty the attribute key is DELETED
+// (so an empty disabledByOrg reads as "no org suspends this user" and firstUserAttr
+// / len both agree it is clear).
+func removeFromUserAttrSet(rep map[string]any, key, val string) bool {
+	cur := userAttrSet(rep, key)
+	out := make([]string, 0, len(cur))
+	removed := false
+	for _, v := range cur {
+		if v == val {
+			removed = true
+			continue
+		}
+		out = append(out, v)
+	}
+	if !removed {
+		return false
+	}
+	attrs := userAttrs(rep)
+	if len(out) == 0 {
+		delete(attrs, key)
+	} else {
+		attrs[key] = toAnySlice(out)
+	}
 	return true
 }
 
