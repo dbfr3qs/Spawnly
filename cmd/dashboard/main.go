@@ -258,6 +258,11 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 			"hostOrg":    hostOrg,
 			"isApex":     isApex,
 			"apexDomain": auth.hosts.apexDomain,
+			// The platform master-admin username (registry root lockout guard,
+			// env MASTER_ADMIN_USERNAME, default "root"). The admin Users directory
+			// reads it to hide destructive actions on that account's row, matching
+			// the server guard when a non-default name is configured.
+			"masterAdmin": getenv("MASTER_ADMIN_USERNAME", "root"),
 		}
 		token, err := auth.orchestratorToken(r.Context(), r)
 		if err != nil {
@@ -411,6 +416,14 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	mux.Handle("DELETE /api/admin/orgs/{id}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxy("DELETE", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id")))(w, r)
 	})))
+	// Org lifecycle disable/enable twins (signup-lifecycle Phase 4). requireAdmin at
+	// this BFF tier (defense in depth with the orchestrator's requireAdmin).
+	mux.Handle("POST /api/admin/orgs/{id}/disable", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("POST", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id"))+"/disable")(w, r)
+	})))
+	mux.Handle("POST /api/admin/orgs/{id}/enable", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("POST", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id"))+"/enable")(w, r)
+	})))
 	mux.Handle("GET /api/admin/orgs/{id}/members", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxy("GET", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id"))+"/members")(w, r)
 	})))
@@ -422,6 +435,21 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	})))
 	mux.Handle("DELETE /api/admin/orgs/{id}/members/{user}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxy("DELETE", orchestratorURL+"/v1/admin/orgs/"+url.PathEscape(r.PathValue("id"))+"/members/"+url.PathEscape(r.PathValue("user")))(w, r)
+	})))
+
+	// Master-admin USER lifecycle twins (signup-lifecycle Phase 3). requireAdmin
+	// gates every twin at this BFF tier (defense in depth with the orchestrator's
+	// requireAdmin); the proxy carries the session's delegated access token and the
+	// orchestrator forwards to the registry with its control-plane bearer.
+	mux.Handle("GET /api/admin/users", auth.requireAdmin(proxy("GET", orchestratorURL+"/v1/admin/users")))
+	mux.Handle("POST /api/admin/users/{username}/disable", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("POST", orchestratorURL+"/v1/admin/users/"+url.PathEscape(r.PathValue("username"))+"/disable")(w, r)
+	})))
+	mux.Handle("POST /api/admin/users/{username}/enable", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("POST", orchestratorURL+"/v1/admin/users/"+url.PathEscape(r.PathValue("username"))+"/enable")(w, r)
+	})))
+	mux.Handle("DELETE /api/admin/users/{username}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("DELETE", orchestratorURL+"/v1/admin/users/"+url.PathEscape(r.PathValue("username")))(w, r)
 	})))
 
 	// Org SELF-SERVICE twins (multi-tenancy Phase 6). These are the ORG ADMIN's

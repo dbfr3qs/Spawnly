@@ -240,6 +240,28 @@ kubectl create secret generic keycloak-admin \
   --from-literal=password="${KC_ADMIN_PASSWORD}" \
   --dry-run=client -o yaml | kubectl apply -f -
 
+# Keycloak SMTP config — feeds the realm's email-verification mail (signup-
+# lifecycle Phase 1). The realm Terraform reads these values as TF vars (below)
+# and only turns email verification on when SMTP_HOST is non-empty. On kind we
+# default to the in-cluster Mailpit sink (mailpit:1025, no auth); prod overrides
+# these via env (AWS SES, wired by spawnly-infra Phase 6). Never baked into an
+# image — the password (empty on kind) rides this Secret only. Values come from
+# env with kind-friendly defaults so a bare `make bootstrap` gets a working,
+# testable mail flow with no configuration.
+echo "==> Ensuring keycloak-smtp secret (kind default: Mailpit mailpit:1025)..."
+SMTP_HOST="${SMTP_HOST:-mailpit}"
+SMTP_PORT="${SMTP_PORT:-1025}"
+SMTP_USER="${SMTP_USER:-}"
+SMTP_PASS="${SMTP_PASS:-}"
+SMTP_FROM="${SMTP_FROM:-noreply@spawnly.run}"
+kubectl create secret generic keycloak-smtp \
+  --from-literal=host="${SMTP_HOST}" \
+  --from-literal=port="${SMTP_PORT}" \
+  --from-literal=user="${SMTP_USER}" \
+  --from-literal=password="${SMTP_PASS}" \
+  --from-literal=from="${SMTP_FROM}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
 # travel-tools MCP server upstream keys (Duffel/LiteAPI), from mcp/travel-tools/.env
 # — owned by that one service, kept out of the global .env. Created here so the
 # travel-tools pod has them on first start; absent keys just disable that tool.
@@ -262,6 +284,11 @@ kubectl apply -f deploy/manifests/rbac.yaml
 kubectl apply -f deploy/manifests/spicedb.yaml
 kubectl apply -f deploy/manifests/registry.yaml
 kubectl apply -f deploy/manifests/keycloak.yaml
+# Mailpit dev/e2e mail sink — applied dev-only here (NOT part of the vendored
+# deploy/manifests/kustomization.yaml base, which spawnly-infra pulls for prod
+# where Keycloak's SMTP points at AWS SES instead). Keycloak's keycloak-smtp
+# Secret defaults to this service on kind, so signup verification mail lands here.
+kubectl apply -f deploy/manifests/mailpit.yaml
 kubectl apply -f deploy/manifests/sample-api-a.yaml
 kubectl apply -f deploy/manifests/sample-api-b.yaml
 kubectl apply -f deploy/manifests/travel-tools.yaml
@@ -288,6 +315,7 @@ kubectl rollout restart \
 
 echo "==> Waiting for all services to be ready..."
 kubectl wait --for=condition=ready pod -l app=spicedb --timeout=120s
+kubectl rollout status deployment/mailpit --timeout=120s
 kubectl rollout status deployment/registry --timeout=120s
 # Keycloak's first start builds/imports the realm DB, so give it a longer window.
 kubectl rollout status deployment/keycloak --timeout=300s
@@ -352,6 +380,15 @@ KC_TF_DIR="$REPO_ROOT/deploy/keycloak"
   export TF_VAR_bob_password="bob"
   export TF_VAR_carol_password="carol"
   export TF_VAR_nomad_password="nomad"
+  # SMTP → the realm's email-verification config. Sourced from the keycloak-smtp
+  # Secret set above (kind default: Mailpit). smtp_host non-empty flips
+  # verify_email on in the realm TF; empty leaves it off (byte-identical to the
+  # pre-Phase-1 behaviour).
+  export TF_VAR_smtp_host="${SMTP_HOST}"
+  export TF_VAR_smtp_port="${SMTP_PORT}"
+  export TF_VAR_smtp_user="${SMTP_USER}"
+  export TF_VAR_smtp_password="${SMTP_PASS}"
+  export TF_VAR_smtp_from="${SMTP_FROM}"
 
   terraform -chdir="$KC_TF_DIR" init -input=false >/dev/null
   terraform -chdir="$KC_TF_DIR" apply -input=false -auto-approve

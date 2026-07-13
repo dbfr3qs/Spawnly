@@ -43,11 +43,26 @@ for _ in $(seq 1 30); do
 done
 [ -n "$ready" ] || { echo "ERROR: registry did not start serving on :18080 in time." >&2; exit 1; }
 
+# retry CMD... — run a command up to 5 times with a short backoff. Every mutation
+# below is idempotent (org create converges 200; member add returns 201 even when
+# already present), so a retry is always safe. This absorbs the brief window right
+# after a realm re-apply where Keycloak's org API is still reconciling and a call
+# can transiently fail — otherwise a single blip would kill the whole reseed
+# (curl -sf → non-zero → set -e), which made caps.spec.ts's applyRealm() flaky.
+retry() {
+  local n=0
+  until "$@"; do
+    n=$((n + 1))
+    [ "$n" -ge 5 ] && return 1
+    sleep 2
+  done
+}
+
 # create_org ORGID NAME ADMINUSER
 create_org() {
   local org="$1" name="$2" admin="$3"
   echo "  org ${org} (admin=${admin})"
-  curl -sf -X POST "http://localhost:18080/v1/orgs" \
+  retry curl -sf -X POST "http://localhost:18080/v1/orgs" \
     -H 'Content-Type: application/json' "${auth_header[@]}" \
     -d "{\"orgId\":\"${org}\",\"name\":\"${name}\",\"adminUser\":\"${admin}\"}" >/dev/null
 }
@@ -56,7 +71,7 @@ create_org() {
 add_member() {
   local org="$1" user="$2" role="$3"
   echo "  member ${user} (${role}) -> ${org}"
-  curl -sf -X POST "http://localhost:18080/v1/orgs/${org}/members" \
+  retry curl -sf -X POST "http://localhost:18080/v1/orgs/${org}/members" \
     -H 'Content-Type: application/json' "${auth_header[@]}" \
     -d "{\"user\":\"${user}\",\"role\":\"${role}\"}" >/dev/null
 }

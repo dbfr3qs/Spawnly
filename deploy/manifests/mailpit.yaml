@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mailpit
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mailpit
+  template:
+    metadata:
+      labels:
+        app: mailpit
+    spec:
+      containers:
+        - name: mailpit
+          # Dev/e2e mail sink: Mailpit accepts SMTP on 1025 and exposes a web UI +
+          # JSON API on 8025 so the signup email-verification flow is testable
+          # without a real mail provider. Pinned by digest for a reproducible pull.
+          # PROD does NOT use this — Keycloak's SMTP points at AWS SES there
+          # (spawnly-infra Phase 6). This manifest is therefore applied dev-only by
+          # scripts/bootstrap.sh and is deliberately NOT in deploy/manifests/
+          # kustomization.yaml (the base vendored into spawnly-infra for prod).
+          image: axllent/mailpit:v1.20.5@sha256:cd75e91719cace4e3100eab9f848ecf2ecdd7f4db01e1573a0114769dad4ba2e
+          ports:
+            - containerPort: 1025
+              name: smtp
+            - containerPort: 8025
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8025
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mailpit
+  namespace: default
+spec:
+  selector:
+    app: mailpit
+  ports:
+    - port: 1025
+      targetPort: 1025
+      name: smtp
+    - port: 8025
+      targetPort: 8025
+      name: http

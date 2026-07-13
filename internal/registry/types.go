@@ -57,6 +57,13 @@ type Organization struct {
 	// RemovalDisposition governs a removed member's running agents; empty is
 	// treated as the non-destructive RemovalOrphanToAdmin default (Phase 6).
 	RemovalDisposition string `json:"removalDisposition,omitempty"`
+	// Disabled marks a SUSPENDED org (signup-lifecycle Phase 4). When true every
+	// member's Keycloak login is blocked (accounts disabled, tagged
+	// disabledByOrg=<orgId>), all org agents are revoked, and a defense-in-depth
+	// spawn guard refuses new spawns into the org. The zero value (false) is
+	// enabled — existing records need no migration. Enabling clears this and
+	// re-enables ONLY the members this org disabled (asymmetric agent resume).
+	Disabled bool `json:"disabled,omitempty"`
 	// Anchor is the org's optional attestation anchor. Absent (nil) = the org's
 	// agents attest via the platform default (in-cluster SPIRE), exactly as
 	// today. The lifecycle (pending->active proof-of-control) lands in Phase 8;

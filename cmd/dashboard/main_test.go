@@ -908,6 +908,65 @@ func TestParseOrgClaim(t *testing.T) {
 	}
 }
 
+// TestAdminUserRoutesGatedAtBFF proves the master-admin user-lifecycle twins
+// (signup-lifecycle Phase 3) are requireAdmin-gated at the BFF: a non-admin
+// session is 403'd (orchestrator never hit), an admin session is forwarded.
+func TestAdminUserRoutesGatedAtBFF(t *testing.T) {
+	var upstreamHits int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	oauth := &oauth2.Config{Endpoint: oauth2.Endpoint{TokenURL: "http://refresh.invalid/token"}}
+	a := stubAuth(oauth)
+	a.sessions["admin-sid"] = session{
+		username: "alice", isAdmin: true,
+		tokenSrc:  oauth.TokenSource(context.Background(), &oauth2.Token{AccessToken: "at-1", Expiry: time.Now().Add(time.Hour)}),
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	a.sessions["viewer-sid"] = session{
+		username: "viewer", isAdmin: false,
+		tokenSrc:  oauth.TokenSource(context.Background(), &oauth2.Token{AccessToken: "at-1", Expiry: time.Now().Add(time.Hour)}),
+		expiresAt: time.Now().Add(time.Hour),
+	}
+	mux := buildMux(a, upstream.URL, "http://keycloak:8080", "http://docs", fstest.MapFS{})
+
+	cases := []struct{ method, path string }{
+		{http.MethodGet, "/api/admin/users"},
+		{http.MethodPost, "/api/admin/users/bob/disable"},
+		{http.MethodPost, "/api/admin/users/bob/enable"},
+		{http.MethodDelete, "/api/admin/users/bob"},
+	}
+	for _, tc := range cases {
+		// Non-admin → 403, orchestrator untouched.
+		upstreamHits = 0
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}"))
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "viewer-sid"})
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("non-admin %s %s: status = %d, want 403", tc.method, tc.path, rec.Code)
+		}
+		if upstreamHits != 0 {
+			t.Errorf("non-admin %s %s: orchestrator hit %d times, want 0", tc.method, tc.path, upstreamHits)
+		}
+		// Admin → forwarded once.
+		upstreamHits = 0
+		req = httptest.NewRequest(tc.method, tc.path, strings.NewReader("{}"))
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "admin-sid"})
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("admin %s %s: status = %d, want 200 (forwarded)", tc.method, tc.path, rec.Code)
+		}
+		if upstreamHits != 1 {
+			t.Errorf("admin %s %s: orchestrator hit %d times, want 1", tc.method, tc.path, upstreamHits)
+		}
+	}
+}
+
 // TestRequireAdmin asserts the requireAdmin gate rejects a non-admin session
 // with 403, an unauthenticated call with 401, and passes an admin session
 // through to the wrapped handler. This is the dashboard-BFF enforcement; the

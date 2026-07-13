@@ -31,6 +31,11 @@ type fakeDirectory struct {
 	members map[string]map[string]bool // alias -> set of userIds
 	calls   []string
 
+	// User lifecycle state (signup-lifecycle Phase 3). users tracks each known
+	// user's enabled flag + disabledByOrg tag; logouts counts session revokes.
+	users   map[string]*fakeUserState // username -> state
+	logouts map[string]int            // username -> revoke count
+
 	failCreateOrg    error
 	failAddMember    error
 	failRemoveMember error
@@ -38,10 +43,36 @@ type fakeDirectory struct {
 	failSetRole      error
 	failListMembers  error
 	failRegisterURIs error
+	failListUsers    error
+	failDisableUser  error
+	failEnableUser   error
+	failDeleteUser   error
+}
+
+type fakeUserState struct {
+	email         string
+	enabled       bool
+	disabledByOrg string
 }
 
 func newFakeDirectory() *fakeDirectory {
-	return &fakeDirectory{orgs: map[string]bool{}, members: map[string]map[string]bool{}}
+	return &fakeDirectory{
+		orgs:    map[string]bool{},
+		members: map[string]map[string]bool{},
+		users:   map[string]*fakeUserState{},
+		logouts: map[string]int{},
+	}
+}
+
+// ensureUser returns (creating if needed) the tracked state for username, so a
+// test that adds a member or references a user directly sees a consistent record.
+func (f *fakeDirectory) ensureUser(username string) *fakeUserState {
+	u := f.users[username]
+	if u == nil {
+		u = &fakeUserState{enabled: true}
+		f.users[username] = u
+	}
+	return u
 }
 
 // testDir returns a permissive fake directory — used by the many existing
@@ -109,6 +140,7 @@ func (f *fakeDirectory) AddMember(_ context.Context, orgID, user string) error {
 		f.members[orgID] = map[string]bool{}
 	}
 	f.members[orgID][user] = true
+	f.ensureUser(user) // a member is a known user (enabled by default)
 	return nil
 }
 
@@ -140,7 +172,11 @@ func (f *fakeDirectory) ListMembers(_ context.Context, orgID string) ([]orgdirec
 	}
 	var out []orgdirectory.Member
 	for u := range f.members[orgID] {
-		out = append(out, orgdirectory.Member{UserID: u, Username: u})
+		enabled := true
+		if st := f.users[u]; st != nil {
+			enabled = st.enabled
+		}
+		out = append(out, orgdirectory.Member{UserID: u, Username: u, Enabled: enabled})
 	}
 	return out, nil
 }
@@ -169,6 +205,73 @@ func (f *fakeDirectory) RemoveOrgRedirectURIs(_ context.Context, redirectURI, po
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("RemoveOrgRedirectURIs:" + redirectURI + "|" + postLogoutURI)
+	return nil
+}
+
+// ── User lifecycle (signup-lifecycle Phase 3) ───────────────────────────────
+
+func (f *fakeDirectory) ListUsers(_ context.Context) ([]orgdirectory.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failListUsers != nil {
+		return nil, f.failListUsers
+	}
+	out := make([]orgdirectory.User, 0, len(f.users))
+	for name, u := range f.users {
+		out = append(out, orgdirectory.User{
+			Username:      name,
+			Email:         u.email,
+			Enabled:       u.enabled,
+			DisabledByOrg: u.disabledByOrg,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Username < out[j].Username })
+	return out, nil
+}
+
+func (f *fakeDirectory) DisableUser(_ context.Context, username, byOrg string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("DisableUser:" + username + "|" + byOrg)
+	if f.failDisableUser != nil {
+		return f.failDisableUser
+	}
+	u := f.ensureUser(username)
+	u.enabled = false
+	if byOrg != "" {
+		u.disabledByOrg = byOrg
+	}
+	f.logouts[username]++
+	return nil
+}
+
+func (f *fakeDirectory) EnableUser(_ context.Context, username, onlyIfDisabledByOrg string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("EnableUser:" + username + "|" + onlyIfDisabledByOrg)
+	if f.failEnableUser != nil {
+		return false, f.failEnableUser
+	}
+	u := f.users[username]
+	if u == nil {
+		return false, nil
+	}
+	if onlyIfDisabledByOrg != "" && u.disabledByOrg != onlyIfDisabledByOrg {
+		return false, nil // not ours to enable
+	}
+	u.enabled = true
+	u.disabledByOrg = ""
+	return true, nil
+}
+
+func (f *fakeDirectory) DeleteUser(_ context.Context, username string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("DeleteUser:" + username)
+	if f.failDeleteUser != nil {
+		return f.failDeleteUser
+	}
+	delete(f.users, username)
 	return nil
 }
 
@@ -572,6 +675,88 @@ func TestSelfServeCreate_SecondOrgRejected(t *testing.T) {
 	}
 	if dir.hasCall("CreateOrg:globex") {
 		t.Fatalf("keycloak org must not be created; calls=%v", dir.calls)
+	}
+}
+
+// ── Global org cap (signup-lifecycle Phase 2) ───────────────────────────────
+// MAX_ORGS is read from the env inside buildMux, so these set it with t.Setenv
+// before building the mux. 0/unset = unlimited; the platform-admin path bypasses.
+
+func TestMaxOrgs_SelfServeAtCapRejected(t *testing.T) {
+	t.Setenv("MAX_ORGS", "1")
+	s := newStore()
+	sdb := spicedb.NewMock()
+	dir := newFakeDirectory()
+	mux := orgMux(s, sdb, dir)
+
+	// Seed one org via the platform-admin path (not gated) → count is now 1 == cap.
+	if rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "acme", "adminUser": "alice"}); rec.Code != http.StatusCreated {
+		t.Fatalf("seed admin create status = %d", rec.Code)
+	}
+	// A brand-new user's self-serve create is refused with a friendly 403 JSON.
+	rec := selfServeCreate(t, mux, "globex", "bob")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("self-serve at cap status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response body is not JSON: %v (%s)", err, rec.Body.String())
+	}
+	if !strings.Contains(body.Error, "capacity") {
+		t.Fatalf("error message = %q, want a capacity message", body.Error)
+	}
+	// Nothing was written for the rejected org.
+	if _, ok, _ := s.GetOrg(context.Background(), "globex"); ok {
+		t.Fatal("over-cap org must not be created")
+	}
+	if dir.hasCall("CreateOrg:globex") {
+		t.Fatalf("keycloak org must not be created; calls=%v", dir.calls)
+	}
+}
+
+func TestMaxOrgs_SelfServeUnderCapAllowed(t *testing.T) {
+	t.Setenv("MAX_ORGS", "5")
+	s := newStore()
+	mux := orgMux(s, spicedb.NewMock(), newFakeDirectory())
+
+	// Zero existing orgs, cap 5 → the first self-serve create succeeds.
+	if rec := selfServeCreate(t, mux, "acme", "alice"); rec.Code != http.StatusCreated {
+		t.Fatalf("under-cap self-serve status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMaxOrgs_UnsetUnlimited(t *testing.T) {
+	t.Setenv("MAX_ORGS", "") // explicit unset ⇒ unlimited
+	s := newStore()
+	mux := orgMux(s, spicedb.NewMock(), newFakeDirectory())
+
+	// Seed one org, then a different user's self-serve create still succeeds —
+	// there is no ceiling.
+	if rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "acme", "adminUser": "alice"}); rec.Code != http.StatusCreated {
+		t.Fatalf("seed create status = %d", rec.Code)
+	}
+	if rec := selfServeCreate(t, mux, "globex", "bob"); rec.Code != http.StatusCreated {
+		t.Fatalf("unlimited self-serve status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMaxOrgs_AdminPathBypassesAtCap(t *testing.T) {
+	t.Setenv("MAX_ORGS", "1")
+	s := newStore()
+	mux := orgMux(s, spicedb.NewMock(), newFakeDirectory())
+
+	// One org already exists (count == cap).
+	if rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "acme", "adminUser": "alice"}); rec.Code != http.StatusCreated {
+		t.Fatalf("first admin create status = %d", rec.Code)
+	}
+	// The platform-admin path (no selfServe) creates a SECOND org past the cap.
+	if rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"orgId": "globex", "adminUser": "carol"}); rec.Code != http.StatusCreated {
+		t.Fatalf("admin bypass status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if _, ok, _ := s.GetOrg(context.Background(), "globex"); !ok {
+		t.Fatal("admin-created org past the cap should exist")
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -33,6 +34,9 @@ type fakeKC struct {
 	dashUUID     string
 	dashRep      map[string]any
 	dashPuts     int // count of PUT /clients/<uuid> (asserts idempotent skip)
+
+	logouts  map[string]int // user uuid -> count of POST /users/<id>/logout
+	userPuts int            // count of PUT /users/<id> (asserts idempotent skip)
 }
 
 type fakeOrg struct {
@@ -43,6 +47,9 @@ type fakeOrg struct {
 type fakeUser struct {
 	id, username, email string
 	required            []string
+	emailVerified       bool
+	enabled             bool
+	attrs               map[string][]string
 }
 
 func newFakeKC(realm string) *fakeKC {
@@ -50,6 +57,7 @@ func newFakeKC(realm string) *fakeKC {
 		realm:        realm,
 		orgs:         map[string]*fakeOrg{},
 		users:        map[string]*fakeUser{},
+		logouts:      map[string]int{},
 		dashClientID: "dashboard",
 		dashUUID:     "client-dashboard-uuid",
 		// A representative starting rep: a pre-existing apex callback + an unrelated
@@ -73,9 +81,29 @@ func (f *fakeKC) newID(prefix string) string {
 }
 
 func (f *fakeKC) addUser(username, email string) *fakeUser {
-	u := &fakeUser{id: f.newID("user"), username: username, email: email}
+	u := &fakeUser{id: f.newID("user"), username: username, email: email, enabled: true, attrs: map[string][]string{}}
 	f.users[u.id] = u
 	return u
+}
+
+// userRep renders a fakeUser as Keycloak's user representation (attributes as
+// JSON string arrays), the shape ListUsers/editUser round-trip.
+func (f *fakeKC) userRep(u *fakeUser) map[string]any {
+	attrs := map[string]any{}
+	for k, v := range u.attrs {
+		arr := make([]any, len(v))
+		for i, s := range v {
+			arr[i] = s
+		}
+		attrs[k] = arr
+	}
+	return map[string]any{
+		"id":         u.id,
+		"username":   u.username,
+		"email":      u.email,
+		"enabled":    u.enabled,
+		"attributes": attrs,
+	}
 }
 
 func (f *fakeKC) userByName(name string) *fakeUser {
@@ -136,26 +164,98 @@ func (f *fakeKC) handler() http.Handler {
 			json.NewEncoder(w).Encode(out)
 		}
 	})
-	// Users collection: POST create, GET username lookup.
+	// Users collection: POST create, GET username lookup, GET paginated list.
 	mux.HandleFunc(admin+"/users", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodPost:
 			var body struct {
 				Username, Email string
 				RequiredActions []string `json:"requiredActions"`
+				EmailVerified   bool     `json:"emailVerified"`
+				Enabled         bool     `json:"enabled"`
 			}
 			json.NewDecoder(r.Body).Decode(&body)
 			u := f.addUser(body.Username, body.Email)
 			u.required = body.RequiredActions
+			u.emailVerified = body.EmailVerified
+			u.enabled = body.Enabled
 			w.Header().Set("Location", "http://kc"+admin+"/users/"+u.id)
 			w.WriteHeader(http.StatusCreated)
 		case http.MethodGet:
-			name := r.URL.Query().Get("username")
-			var out []map[string]string
-			if u := f.userByName(name); u != nil {
-				out = append(out, map[string]string{"id": u.id, "username": u.username, "email": u.email})
+			// username lookup (exact) — resolveUserID.
+			if name := r.URL.Query().Get("username"); name != "" {
+				var out []map[string]string
+				if u := f.userByName(name); u != nil {
+					out = append(out, map[string]string{"id": u.id, "username": u.username, "email": u.email})
+				}
+				json.NewEncoder(w).Encode(out)
+				return
+			}
+			// Paginated full-list (ListUsers) — first/max over a stable sort so
+			// pagination is deterministic.
+			first, _ := strconv.Atoi(r.URL.Query().Get("first"))
+			max, _ := strconv.Atoi(r.URL.Query().Get("max"))
+			var ids []string
+			for id := range f.users {
+				ids = append(ids, id)
+			}
+			sort.Slice(ids, func(i, j int) bool { return f.users[ids[i]].username < f.users[ids[j]].username })
+			out := []map[string]any{}
+			for i := first; i < len(ids) && (max <= 0 || i < first+max); i++ {
+				out = append(out, f.userRep(f.users[ids[i]]))
 			}
 			json.NewEncoder(w).Encode(out)
+		}
+	})
+	// Single user: GET full rep, PUT (replaces enabled + attributes), DELETE, and
+	// POST .../logout (session revoke).
+	mux.HandleFunc(admin+"/users/", func(w http.ResponseWriter, r *http.Request) {
+		rest := strings.TrimPrefix(r.URL.Path, admin+"/users/")
+		parts := strings.Split(rest, "/")
+		u := f.users[parts[0]]
+		if u == nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if len(parts) == 2 && parts[1] == "logout" {
+			if r.Method == http.MethodPost {
+				f.logouts[u.id]++
+				w.WriteHeader(http.StatusNoContent)
+			}
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			json.NewEncoder(w).Encode(f.userRep(u))
+		case http.MethodPut:
+			f.userPuts++
+			var rep map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&rep); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			if e, ok := rep["enabled"].(bool); ok {
+				u.enabled = e
+			}
+			// PUT REPLACES attributes with exactly what was sent (read-modify-write).
+			u.attrs = map[string][]string{}
+			if attrs, ok := rep["attributes"].(map[string]any); ok {
+				for k, v := range attrs {
+					if arr, ok := v.([]any); ok {
+						var ss []string
+						for _, e := range arr {
+							if s, ok := e.(string); ok {
+								ss = append(ss, s)
+							}
+						}
+						u.attrs[k] = ss
+					}
+				}
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case http.MethodDelete:
+			delete(f.users, u.id)
+			w.WriteHeader(http.StatusNoContent)
 		}
 	})
 	// Clients collection: GET ?clientId= lookup (dashboard resolution).
@@ -309,6 +409,11 @@ func TestAddMember_CreatesUnknownUserWithPasswordReset(t *testing.T) {
 	}
 	if len(u.required) != 1 || u.required[0] != "UPDATE_PASSWORD" {
 		t.Fatalf("expected UPDATE_PASSWORD required action, got %v", u.required)
+	}
+	// Admin-created users are pinned emailVerified so they bypass the realm's
+	// self-serve email-verification requirement (signup-lifecycle Phase 1).
+	if !u.emailVerified {
+		t.Fatal("admin-created user must be pinned emailVerified=true")
 	}
 	if !f.orgByAlias("acme").members[u.id] {
 		t.Fatal("user not added as org member")
@@ -606,5 +711,182 @@ func TestRegisterOrgRedirectURIs_MissingDashboardClientIsError(t *testing.T) {
 	if err := c.RegisterOrgRedirectURIs(context.Background(),
 		"https://acme.localtest.me/callback", "https://acme.localtest.me/"); err == nil {
 		t.Fatal("expected a hard error when the dashboard client is missing")
+	}
+}
+
+// ---- user lifecycle (signup-lifecycle Phase 3) ----------------------------
+
+func TestListUsers_PaginatesAndReportsState(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	// More than one page (pageSize=100) so the first/max walk is exercised.
+	const n = 150
+	for i := 0; i < n; i++ {
+		f.addUser("user"+string(rune('a'+i%26))+strconv.Itoa(i), "")
+	}
+	// One disabled-by-org user to prove Enabled + DisabledByOrg surface.
+	du := f.addUser("suspended", "s@example.com")
+	du.enabled = false
+	du.attrs["disabledByOrg"] = []string{"acme"}
+
+	users, err := c.ListUsers(ctx)
+	if err != nil {
+		t.Fatalf("list users: %v", err)
+	}
+	if len(users) != n+1 {
+		t.Fatalf("ListUsers returned %d, want %d (pagination truncated?)", len(users), n+1)
+	}
+	var found bool
+	for _, u := range users {
+		if u.Username == "suspended" {
+			found = true
+			if u.Enabled {
+				t.Error("suspended user should report Enabled=false")
+			}
+			if u.DisabledByOrg != "acme" {
+				t.Errorf("DisabledByOrg = %q, want acme", u.DisabledByOrg)
+			}
+			if u.Email != "s@example.com" {
+				t.Errorf("Email = %q, want s@example.com", u.Email)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("suspended user missing from the paginated list")
+	}
+}
+
+func TestDisableUser_SetsDisabledAndRevokesSessions(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	u := f.addUser("alice", "")
+	if err := c.DisableUser(ctx, "alice", ""); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if u.enabled {
+		t.Error("user should be disabled (enabled=false)")
+	}
+	if len(u.attrs["disabledByOrg"]) != 0 {
+		t.Errorf("direct admin disable must not stamp disabledByOrg, got %v", u.attrs["disabledByOrg"])
+	}
+	if f.logouts[u.id] != 1 {
+		t.Errorf("expected 1 session-revoke (logout), got %d", f.logouts[u.id])
+	}
+}
+
+func TestDisableUser_ByOrgStampsTagAndPreservesAttrs(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	u := f.addUser("bob", "")
+	u.attrs["unrelated"] = []string{"keepme"} // must survive the read-modify-write
+	if err := c.DisableUser(ctx, "bob", "acme"); err != nil {
+		t.Fatalf("disable byOrg: %v", err)
+	}
+	if u.enabled {
+		t.Error("user should be disabled")
+	}
+	if got := u.attrs["disabledByOrg"]; len(got) != 1 || got[0] != "acme" {
+		t.Errorf("disabledByOrg = %v, want [acme]", got)
+	}
+	if got := u.attrs["unrelated"]; len(got) != 1 || got[0] != "keepme" {
+		t.Errorf("unrelated attribute clobbered by RMW: %v", got)
+	}
+}
+
+func TestDisableUser_UnknownUserNoOp(t *testing.T) {
+	c, _ := newTestClient(t)
+	if err := c.DisableUser(context.Background(), "ghost", ""); err != nil {
+		t.Fatalf("disabling an unknown user should be a no-op success: %v", err)
+	}
+}
+
+func TestEnableUser_UnconditionalClearsTag(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	u := f.addUser("carol", "")
+	u.enabled = false
+	u.attrs["disabledByOrg"] = []string{"acme"}
+	applied, err := c.EnableUser(ctx, "carol", "")
+	if err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if !applied {
+		t.Error("unconditional enable of a disabled user should report applied=true")
+	}
+	if !u.enabled {
+		t.Error("user should be enabled")
+	}
+	if len(u.attrs["disabledByOrg"]) != 0 {
+		t.Errorf("disabledByOrg tag should be cleared, got %v", u.attrs["disabledByOrg"])
+	}
+}
+
+func TestEnableUser_TagMatchVsMismatch(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+
+	// Tag matches the org → enable + clear.
+	m := f.addUser("match", "")
+	m.enabled = false
+	m.attrs["disabledByOrg"] = []string{"acme"}
+	applied, err := c.EnableUser(ctx, "match", "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applied || !m.enabled || len(m.attrs["disabledByOrg"]) != 0 {
+		t.Errorf("tag-match enable: applied=%v enabled=%v tag=%v", applied, m.enabled, m.attrs["disabledByOrg"])
+	}
+
+	// Independently disabled (no tag) → org-enable must NOT touch it.
+	indep := f.addUser("indep", "")
+	indep.enabled = false
+	applied, err = c.EnableUser(ctx, "indep", "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied {
+		t.Error("org-enable of an untagged user should report applied=false")
+	}
+	if indep.enabled {
+		t.Error("independently-disabled user must stay disabled on a tag-mismatch enable")
+	}
+
+	// Disabled by a DIFFERENT org → this org's enable must NOT touch it.
+	other := f.addUser("other", "")
+	other.enabled = false
+	other.attrs["disabledByOrg"] = []string{"globex"}
+	applied, err = c.EnableUser(ctx, "other", "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied || other.enabled || other.attrs["disabledByOrg"][0] != "globex" {
+		t.Errorf("cross-org enable leaked: applied=%v enabled=%v tag=%v", applied, other.enabled, other.attrs["disabledByOrg"])
+	}
+}
+
+func TestEnableUser_UnknownUser(t *testing.T) {
+	c, _ := newTestClient(t)
+	applied, err := c.EnableUser(context.Background(), "ghost", "")
+	if err != nil {
+		t.Fatalf("enabling an unknown user should not error: %v", err)
+	}
+	if applied {
+		t.Error("unknown user enable should report applied=false")
+	}
+}
+
+func TestDeleteUser_Idempotent(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	u := f.addUser("dave", "")
+	if err := c.DeleteUser(ctx, "dave"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, ok := f.users[u.id]; ok {
+		t.Fatal("user not deleted")
+	}
+	// Deleting an absent user converges to success.
+	if err := c.DeleteUser(ctx, "dave"); err != nil {
+		t.Fatalf("deleting an absent user should be idempotent: %v", err)
 	}
 }

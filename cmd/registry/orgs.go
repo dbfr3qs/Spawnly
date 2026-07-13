@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"regexp"
@@ -69,7 +70,10 @@ func requireOrg(w http.ResponseWriter, ctx context.Context, s registry.Store, id
 // deploy/keycloak/README.md). These endpoints are platform-admin only in Phase 3
 // (the orchestrator gates them with requireAdmin); org-admin self-service arrives
 // in Phase 6.
-func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client, dir orgdirectory.Directory, apexDomain string, cp func(http.HandlerFunc) http.HandlerFunc) {
+// maxOrgs is the global self-serve org ceiling (signup-lifecycle Phase 2): 0
+// means unlimited; a positive value rejects a self-serve create once the
+// platform holds that many orgs OR MORE. The platform-admin path is never gated.
+func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client, dir orgdirectory.Directory, apexDomain string, maxOrgs int, masterAdmin string, cp func(http.HandlerFunc) http.HandlerFunc) {
 	// Per-org attestation-anchor lifecycle (Phase 8): PUT/DELETE .../anchor and
 	// POST .../anchor/activate. Same org-endpoints family, same cp gate; the
 	// anchor is also visible read-only in GET /v1/orgs/{id} below.
@@ -142,6 +146,26 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 			return
 		}
 		if selfServe {
+			// Global self-serve ceiling (signup-lifecycle Phase 2): reject once the
+			// platform already holds maxOrgs orgs OR MORE. 0 = unlimited. Only the
+			// self-serve path reaches here (the admin onboarding path has
+			// selfServe=false), so a master admin's POST /v1/orgs always bypasses the
+			// cap. A friendly 403 JSON body (not the plain-text guards below) so the
+			// signup UX can surface it distinctly; the count is a live ListOrgs read.
+			if maxOrgs > 0 {
+				orgs, lerr := s.ListOrgs(ctx)
+				if storeErr(w, lerr) {
+					return
+				}
+				if len(orgs) >= maxOrgs {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusForbidden)
+					_ = json.NewEncoder(w).Encode(map[string]string{
+						"error": "organization creation is currently at capacity",
+					})
+					return
+				}
+			}
 			// NOTE the deliberate asymmetry with the admin path: an admin re-POST of an
 			// existing slug idempotently converges (adds the caller as admin), but a
 			// self-serve re-POST is a hard 409 — we must never adopt a caller onto an
@@ -178,6 +202,9 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 			org.CreatedAt = prev.CreatedAt
 			org.RemovalDisposition = prev.RemovalDisposition
 			org.Anchor = prev.Anchor
+			// Preserve the suspended flag: a converging re-POST of a disabled org must
+			// not silently re-enable the org record while its members stay disabled.
+			org.Disabled = prev.Disabled
 		}
 		if err := s.PutOrg(ctx, org); err != nil {
 			// Unwind step 1 (only if we just created it).
@@ -342,6 +369,79 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 		writeJSON(w, org)
 	}))
 
+	// POST /v1/orgs/{id}/disable — SUSPEND an org (signup-lifecycle Phase 4).
+	// Sets the org record's Disabled flag, disables every member's Keycloak
+	// account (blocking login natively, tagging disabledByOrg=<id> + revoking
+	// sessions) EXCEPT the master admin and EXCEPT members already disabled (no
+	// tag clobber — an independently-disabled member stays independent), and
+	// revokes ALL org agents via the cascade. A defense-in-depth spawn guard in
+	// the agent-create path additionally refuses new spawns into a Disabled org.
+	// Idempotent: a repeat call re-asserts the flag, skips already-disabled
+	// members, and re-revokes nothing new (revokeNode no-ops on non-active).
+	mux.HandleFunc("POST /v1/orgs/{id}/disable", cp(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		id := r.PathValue("id")
+		org, ok, err := s.GetOrg(ctx, id)
+		if storeErr(w, err) {
+			return
+		}
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		// Flip the flag FIRST so the spawn guard (which reads the record) bites even
+		// if the member/agent teardown below partially fails and the call is retried.
+		org.Disabled = true
+		if err := s.PutOrg(ctx, org); storeErr(w, err) {
+			return
+		}
+		if err := disableOrgMembers(ctx, dir, id, masterAdmin); err != nil {
+			log.Printf("org disable %s: disable members: %v", id, err)
+			http.Error(w, "org disable failed", http.StatusInternalServerError)
+			return
+		}
+		if err := suspendOrgAgents(ctx, s, sdb, id); err != nil {
+			log.Printf("org disable %s: suspend agents: %v", id, err)
+			http.Error(w, "org disable failed", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, org)
+	}))
+
+	// POST /v1/orgs/{id}/enable — LIFT an org suspension (signup-lifecycle Phase 4).
+	// Clears the Disabled flag and re-enables ONLY the members THIS org disabled
+	// (EnableUser matches disabledByOrg=<id> exactly, clearing the tag), so an
+	// independently-disabled member — or one another org disabled — stays disabled.
+	// Suspended agents deliberately STAY suspended (asymmetric resume): the org
+	// admin resumes them manually via the existing resume cascade. Idempotent.
+	mux.HandleFunc("POST /v1/orgs/{id}/enable", cp(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		id := r.PathValue("id")
+		org, ok, err := s.GetOrg(ctx, id)
+		if storeErr(w, err) {
+			return
+		}
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		// Re-enable members FIRST, clear the flag LAST — the mirror of disable's
+		// fail-closed ordering. A transient directory error mid-enable then leaves
+		// Disabled=true (members still locked, spawn guard still armed) and the call
+		// is retried to convergence, rather than clearing the flag while members stay
+		// locked out.
+		if err := enableOrgMembers(ctx, dir, id); err != nil {
+			log.Printf("org enable %s: enable members: %v", id, err)
+			http.Error(w, "org enable failed", http.StatusInternalServerError)
+			return
+		}
+		org.Disabled = false
+		if err := s.PutOrg(ctx, org); storeErr(w, err) {
+			return
+		}
+		writeJSON(w, org)
+	}))
+
 	// DELETE /v1/orgs/{id} — remove an org. Best-effort tuple cleanup (drop each
 	// current member's member+admin tuples) precedes the Keycloak + store delete
 	// so the org's authorization relations don't dangle. Idempotent per step.
@@ -354,6 +454,20 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 		}
 		if !ok {
 			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		// Delete hygiene (signup-lifecycle Phase 4): re-enable the members THIS org
+		// disabled (clearing their disabledByOrg=<id> tag) so deleting the org can't
+		// strand permanently-locked accounts. Run UNCONDITIONALLY (not only when the
+		// record still reads Disabled): a prior botched enable could have cleared the
+		// flag while members stayed tagged, and this is the last chance to rescue them
+		// before the tag's org ceases to exist. No-clobber and idempotent —
+		// EnableUser only touches accounts tagged with exactly this org, so it is a
+		// no-op for an enabled org's untagged members. Fail loud on error so the whole
+		// delete stays retryable (every step idempotent) rather than half-done.
+		if err := enableOrgMembers(ctx, dir, id); err != nil {
+			log.Printf("org delete %s: re-enable org-tagged members: %v", id, err)
+			http.Error(w, "org delete failed", http.StatusInternalServerError)
 			return
 		}
 		// Drop membership tuples for every current member (both relations —
@@ -466,7 +580,20 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 			http.Error(w, "invalid role", http.StatusBadRequest)
 			return
 		}
-		if !requireOrg(w, ctx, s, id) {
+		org, ok, gerr := s.GetOrg(ctx, id)
+		if storeErr(w, gerr) {
+			return
+		}
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		// A SUSPENDED org admits no new members (signup-lifecycle Phase 4): adding one
+		// would create an enabled, untagged account inside a disabled org that a later
+		// org-enable would never touch — a hole in the "all members locked" invariant.
+		// Refuse until the org is re-enabled.
+		if org.Disabled {
+			http.Error(w, "organization is disabled", http.StatusConflict)
 			return
 		}
 		if err := dir.AddMember(ctx, id, body.User); err != nil {
@@ -563,37 +690,153 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 		if !requireOrg(w, ctx, s, id) {
 			return
 		}
-		for _, role := range []string{orgdirectory.RoleMember, orgdirectory.RoleAdmin} {
-			res, rel, sub := orgTuple(id, role, user)
-			if err := sdb.DeleteRelationship(ctx, res, rel, sub); err != nil {
-				log.Printf("org remove member %s/%s: drop %s tuple: %v", id, user, role, err)
-			}
-		}
-		if err := dir.RemoveMember(ctx, id, user); err != nil {
-			log.Printf("org remove member %s/%s: keycloak RemoveMember: %v", id, user, err)
-			http.Error(w, "remove member failed", http.StatusInternalServerError)
-			return
-		}
-		// Removed-member disposition (Phase 6): the ex-member has now lost all
-		// access (membership tuples + Keycloak membership gone above). Settle the
-		// agents they OWNED in this org per the org's per-org setting — auto-revoke
-		// the cascade, or orphan-to-admin (default). A store hiccup fails loud (the
-		// whole remove is retryable and every step idempotent).
-		disposition := registry.RemovalOrphanToAdmin
-		if org, ok, gerr := s.GetOrg(ctx, id); gerr != nil {
-			log.Printf("org remove member %s/%s: load org for disposition: %v", id, user, gerr)
-			http.Error(w, "remove member failed", http.StatusInternalServerError)
-			return
-		} else if ok && org.RemovalDisposition != "" {
-			disposition = org.RemovalDisposition
-		}
-		if err := applyRemovalDisposition(ctx, s, sdb, id, user, disposition); err != nil {
-			log.Printf("org remove member %s/%s: apply disposition %s: %v", id, user, disposition, err)
+		if err := removeMemberFromOrg(ctx, s, sdb, dir, id, user); err != nil {
+			log.Printf("org remove member %s/%s: %v", id, user, err)
 			http.Error(w, "remove member failed", http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
+}
+
+// removeMemberFromOrg removes user's membership in org id and settles the agents
+// they OWNED there per the org's removal disposition — the shared core of the
+// DELETE members endpoint and the master-admin user delete (users.go), which
+// removes a user from EVERY org they belong to before deleting the identity.
+// Reusing one path keeps every membership teardown flowing through the single
+// dual-write choke point (SpiceDB tuples + Keycloak membership).
+//
+// Order: SpiceDB tuples drop FIRST (kills authorization immediately), then the
+// Keycloak membership, then the disposition — so a partial failure fails toward
+// LESS access and a retry converges (every step is idempotent). A Keycloak or
+// store error is returned so the caller fails loud (5xx) rather than proceeding
+// on a half-removed member.
+func removeMemberFromOrg(ctx context.Context, s registry.Store, sdb spicedb.Client, dir orgdirectory.Directory, id, user string) error {
+	for _, role := range []string{orgdirectory.RoleMember, orgdirectory.RoleAdmin} {
+		res, rel, sub := orgTuple(id, role, user)
+		if err := sdb.DeleteRelationship(ctx, res, rel, sub); err != nil {
+			log.Printf("org remove member %s/%s: drop %s tuple: %v", id, user, role, err)
+		}
+	}
+	if err := dir.RemoveMember(ctx, id, user); err != nil {
+		return fmt.Errorf("keycloak RemoveMember: %w", err)
+	}
+	// Removed-member disposition: the ex-member has now lost all access (membership
+	// tuples + Keycloak membership gone above). Settle the agents they OWNED in this
+	// org per the org's per-org setting — auto-revoke the cascade, or orphan-to-admin
+	// (default). A store hiccup fails loud (the whole remove is retryable, every step
+	// idempotent).
+	org, ok, gerr := s.GetOrg(ctx, id)
+	if gerr != nil {
+		return fmt.Errorf("load org for disposition: %w", gerr)
+	}
+	disposition := registry.RemovalOrphanToAdmin
+	if ok && org.RemovalDisposition != "" {
+		disposition = org.RemovalDisposition
+	}
+	if err := applyRemovalDisposition(ctx, s, sdb, id, user, disposition); err != nil {
+		return fmt.Errorf("apply disposition %s: %w", disposition, err)
+	}
+	// If the org is SUSPENDED, a member disabled BY it who is now LEAVING would
+	// otherwise keep their disabledByOrg=<id> tag while dropping off ListMembers —
+	// so a later org enable/delete (which iterate current members) could never
+	// re-enable them, stranding the account permanently locked (signup-lifecycle
+	// Phase 4). Clear THIS org's lock on the way out; no-clobber and idempotent
+	// (EnableUser only touches an account tagged with exactly this org, so an
+	// independently-disabled ex-member is left disabled).
+	if ok && org.Disabled {
+		if _, err := dir.EnableUser(ctx, user, id); err != nil {
+			return fmt.Errorf("clear org lock on removed member %s: %w", user, err)
+		}
+	}
+	return nil
+}
+
+// disableOrgMembers disables every member of org id BY the org (signup-lifecycle
+// Phase 4) — the member-lockout half of an org suspension. For each member EXCEPT
+// the master admin: if the account is CURRENTLY enabled, DisableUser(user, id)
+// blocks login, stamps disabledByOrg=<id>, and revokes sessions; if it is ALREADY
+// disabled it is left completely untouched — calling DisableUser again would
+// CLOBBER an independently-disabled member's tag (or absence of one) and cause a
+// later org-enable to wrongly re-enable them. The currently-enabled bit rides on
+// the member listing itself (Member.Enabled, from the Keycloak members endpoint),
+// so no extra full-realm scan is needed. Idempotent. A directory error is returned
+// so the caller fails loud.
+func disableOrgMembers(ctx context.Context, dir orgdirectory.Directory, id, masterAdmin string) error {
+	members, err := dir.ListMembers(ctx, id)
+	if err != nil {
+		return fmt.Errorf("list members: %w", err)
+	}
+	for _, m := range members {
+		if isMasterAdmin(masterAdmin, m.UserID) {
+			continue // the platform master admin is never locked out by an org
+		}
+		if !m.Enabled {
+			continue // already disabled — never clobber their tag
+		}
+		if err := dir.DisableUser(ctx, m.UserID, id); err != nil {
+			return fmt.Errorf("disable member %s: %w", m.UserID, err)
+		}
+	}
+	return nil
+}
+
+// enableOrgMembers re-enables ONLY the members that org id disabled (signup-
+// lifecycle Phase 4) — the reverse of disableOrgMembers, used by both the enable
+// endpoint and the delete-hygiene path. EnableUser(user, id) enables + clears the
+// tag ONLY on an exact disabledByOrg==id match, so an independently-disabled
+// member (no tag / a different org's tag) is left disabled. Idempotent. A
+// directory error is returned so the caller fails loud.
+func enableOrgMembers(ctx context.Context, dir orgdirectory.Directory, id string) error {
+	members, err := dir.ListMembers(ctx, id)
+	if err != nil {
+		return fmt.Errorf("list members: %w", err)
+	}
+	for _, m := range members {
+		if _, err := dir.EnableUser(ctx, m.UserID, id); err != nil {
+			return fmt.Errorf("enable member %s: %w", m.UserID, err)
+		}
+	}
+	return nil
+}
+
+// suspendOrgAgents revokes every agent in org id (signup-lifecycle Phase 4) — the
+// agent-suspension half of an org disable. It runs the shared revoke cascade
+// (subtree + revokeNode) over every org ROOT agent (an in-org record whose parent
+// is not ALSO in the org; a child of an in-org parent is covered by that parent's
+// cascade, and revokeNode is idempotent regardless). Owner tuples are deliberately
+// left intact — a disable is reversible (org enable restores login; agents resume
+// manually). A backend read/write error is returned so the caller fails loud
+// rather than leaving some org agents un-revoked.
+func suspendOrgAgents(ctx context.Context, s registry.Store, sdb spicedb.Client, orgID string) error {
+	agents, err := s.ListAgents(ctx)
+	if err != nil {
+		return err
+	}
+	inOrg := map[string]bool{}
+	for _, a := range agents {
+		if a.OrgID == orgID {
+			inOrg[a.AgentID] = true
+		}
+	}
+	for _, a := range agents {
+		if a.OrgID != orgID {
+			continue
+		}
+		if a.ParentID != "" && inOrg[a.ParentID] {
+			continue // covered by the in-org parent's cascade
+		}
+		nodes, err := subtree(ctx, s, a.AgentID)
+		if err != nil {
+			return err
+		}
+		for _, nid := range nodes {
+			if _, err := revokeNode(ctx, s, sdb, nid); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // writeJSON writes v as a JSON response with a 200 status.

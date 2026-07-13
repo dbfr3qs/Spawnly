@@ -287,6 +287,17 @@
       padding: 32px 24px;
     }
 
+    /* Master-admin Global landing — center it in the same content column as the
+       agents <main> (a sibling section), which otherwise leaves it flush-left. */
+    .global-directory { max-width: 1100px; margin: 0 auto; padding: 32px 24px; }
+    .section-header-actions { display: flex; align-items: center; gap: 12px; }
+    /* Text-input field inside a dialog (e.g. the admin New-organization form). */
+    .dialog-field { display: flex; flex-direction: column; gap: 5px; font-size: 12px;
+      color: var(--text-dim, #9aa3b2); text-align: left; margin: 0 0 12px; }
+    .dialog-field input {
+      padding: 9px 11px; border-radius: 8px; border: 1px solid rgba(255,255,255,.14);
+      background: var(--bg, #12141d); color: var(--text, #e8eaf0); font-family: var(--font); font-size: 13px;
+    }
     .section-header {
       display: flex;
       align-items: center;
@@ -327,22 +338,41 @@
     .org-card {
       display: flex;
       flex-direction: column;
-      align-items: flex-start;
-      gap: 4px;
-      text-align: left;
+      gap: 10px;
       background: var(--card);
       border: 1px solid var(--border);
       border-radius: 12px;
       padding: 16px;
-      cursor: pointer;
-      font: inherit;
-      color: inherit;
       transition: border-color .2s, box-shadow .2s;
       box-shadow: 0 1px 3px rgba(0,0,0,.08);
     }
     .org-card:hover {
       border-color: var(--accent);
       box-shadow: 0 2px 8px rgba(0,0,0,.14);
+    }
+    /* The org NAME/ID is the clickable "enter this tenant" affordance; the
+       lifecycle buttons live in the foot so they aren't nested in a button. */
+    .org-card-enter {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 4px;
+      text-align: left;
+      background: none;
+      border: 0;
+      padding: 0;
+      margin: 0;
+      width: 100%;
+      font: inherit;
+      color: inherit;
+      cursor: pointer;
+    }
+    .org-card-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
     }
     .org-card-name { font-weight: 600; font-size: 15px; }
     .org-card-id { font-size: 12px; color: var(--text-dim); font-family: ui-monospace, monospace; }
@@ -1111,6 +1141,30 @@
     .badge-role-admin { background: rgba(52,152,219,.15); color: #3498db; border-color: rgba(52,152,219,.35); }
     .badge-role-member { background: rgba(93,109,126,.15); color: #95a5a6; border-color: rgba(93,109,126,.35); }
 
+    /* ── Master-admin Users directory + lifecycle dialogs (Phase 5) ── */
+    .users-directory { margin-top: 8px; overflow-x: auto; }
+    .users-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .users-table th, .users-table td {
+      text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: middle;
+    }
+    .users-table th {
+      font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+      color: var(--text-dim); font-weight: 700; white-space: nowrap;
+    }
+    .users-table td.user-cell { font-family: var(--mono, ui-monospace, monospace); font-weight: 600; word-break: break-all; }
+    .users-table .disabled-by-org { display: block; font-size: 10px; color: var(--text-dim); margin-top: 3px; }
+    /* Dialog text uses the theme text tokens so it reads in BOTH themes (the base
+       `.modal h2` is hard-coded #fff, so `.dialog-title` overrides it for light). */
+    .modal h2.dialog-title { color: var(--text); }
+    .dialog-body { font-size: 13px; color: var(--text); line-height: 1.55; margin: 0 0 14px; }
+    .dialog-body strong { color: var(--text); }
+    .dialog-note { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin: 12px 0 0; }
+    .dialog-check {
+      display: flex; gap: 8px; align-items: flex-start;
+      font-size: 13px; color: var(--text); line-height: 1.45; margin: 4px 0 2px; cursor: pointer;
+    }
+    .dialog-check input { margin-top: 2px; flex: none; }
+
     /* Members view (Phase 6) */
     .add-member-bar { display: flex; gap: 8px; margin: 4px 0 12px; flex-wrap: wrap; }
     .add-member-bar input { flex: 1 1 220px; padding: 7px 10px; }
@@ -1220,9 +1274,24 @@
 <section id="global-directory" class="global-directory" hidden data-testid="global-directory">
   <div class="section-header">
     <span class="section-title">Organizations</span>
-    <span class="agent-count" id="global-stats" data-testid="global-stats"></span>
+    <div class="section-header-actions">
+      <span class="agent-count" id="global-stats" data-testid="global-stats"></span>
+      <!-- Master admin can provision an org for any user (admin path — bypasses the
+           MAX_ORGS cap). Root itself works org-less, so it never sees the self-serve
+           no-org create form; this is its create affordance. -->
+      <button class="btn btn-primary" id="admin-new-org-btn" data-testid="admin-new-org-btn">+ New organization</button>
+    </div>
   </div>
   <div id="org-directory" class="org-directory" data-testid="org-directory"></div>
+
+  <!-- Master-admin Users directory (signup-lifecycle Phase 5): every realm user
+       with disable/enable/delete lifecycle actions. Backed by the requireAdmin
+       GET /api/admin/users; the server gates every action (root lockout guard +
+       requireAdmin) — this UI is convenience. -->
+  <div class="section-header" style="margin-top:30px">
+    <span class="section-title">Users</span>
+  </div>
+  <div id="users-directory" class="users-directory" data-testid="users-directory">Loading…</div>
 </section>
 
 <!-- Org gate overlay (multi-tenancy). Covers the page for the two states an
@@ -1493,6 +1562,62 @@
   </div>
 </div>
 
+<!-- Master-admin: disable-user dialog (Phase 5). Carries the "also suspend this
+     user's agents" choice the plain confirm below can't. -->
+<div class="modal-overlay" id="disable-user-modal">
+  <div class="modal">
+    <h2 class="dialog-title">Disable user</h2>
+    <p class="dialog-body">Disable <strong id="disable-user-name"></strong>? They are signed out
+      immediately and blocked from logging in until you re-enable the account.</p>
+    <label class="dialog-check">
+      <input type="checkbox" id="disable-user-suspend" data-testid="disable-suspend-agents" />
+      <span>Also suspend this user&rsquo;s agents (revoke them). Leave unchecked to let their
+        agents keep running.</span>
+    </label>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="disable-user-cancel" data-testid="disable-user-cancel">Cancel</button>
+      <button class="btn btn-warn" id="disable-user-confirm" data-testid="disable-user-confirm">Disable</button>
+    </div>
+  </div>
+</div>
+
+<!-- Master-admin: generic destructive-confirm dialog (Phase 5), promise-based.
+     Reused for delete-user and org disable/enable so those actions get a
+     testable, theme-safe confirm (not a native window.confirm). -->
+<div class="modal-overlay" id="confirm-modal">
+  <div class="modal">
+    <h2 class="dialog-title" id="confirm-title">Confirm</h2>
+    <p class="dialog-body" id="confirm-body"></p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="confirm-cancel" data-testid="confirm-cancel">Cancel</button>
+      <button class="btn btn-danger" id="confirm-ok" data-testid="confirm-ok">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- Master-admin: create an organization (Phase 5 follow-up). Posts to the
+     requireAdmin POST /api/admin/orgs with {name, adminUser}; the admin path
+     bypasses the MAX_ORGS cap and makes adminUser the org's first admin (the user
+     is created if they don't exist yet). -->
+<div class="modal-overlay" id="admin-create-org-modal">
+  <div class="modal">
+    <h2 class="dialog-title">New organization</h2>
+    <p class="dialog-body">Create an organization and assign its first admin. If the
+      admin user doesn&rsquo;t exist yet they&rsquo;ll be created.</p>
+    <label class="dialog-field">Organization name
+      <input type="text" id="admin-create-org-name" maxlength="120" placeholder="Acme Inc." data-testid="admin-create-org-name" />
+    </label>
+    <label class="dialog-field">Admin username
+      <input type="text" id="admin-create-org-admin" maxlength="120" placeholder="alice" autocomplete="off" data-testid="admin-create-org-admin" />
+    </label>
+    <p class="form-error" id="admin-create-org-error" data-testid="admin-create-org-error" hidden></p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="admin-create-org-cancel" data-testid="admin-create-org-cancel">Cancel</button>
+      <button class="btn btn-primary" id="admin-create-org-confirm" data-testid="admin-create-org-confirm">Create organization</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast -->
 <div id="toast"></div>
 
@@ -1717,7 +1842,7 @@
   // on a satellite (<slug>.<apex>) hostOrg names that org and isApex is false; on the
   // apex or in single-origin mode (apexDomain === '') isApex is true. The org switcher
   // reads these to navigate to another org's subdomain instead of /switch-org.
-  const ME = { isAdmin: false, isOrgAdmin: false, activeOrg: '', hostOrg: '', isApex: true, apexDomain: '' };
+  const ME = { user: '', masterAdmin: 'root', isAdmin: false, isOrgAdmin: false, activeOrg: '', hostOrg: '', isApex: true, apexDomain: '' };
 
   // GLOBAL_DIRECTORY is set when the master-admin Global landing renders (org-less
   // realm admin): the page shows the org directory + counts, NOT the agent list, so
@@ -3213,6 +3338,26 @@
     if (e.target === e.currentTarget) e.currentTarget.classList.remove('open');
   });
 
+  // ── Master-admin lifecycle wiring (Phase 5) ────────────────────────────────
+  // Delegated handlers on the persistent containers (their children are repainted
+  // on every reload, but the containers themselves are stable). Bound once here.
+  document.getElementById('users-directory').addEventListener('click', handleUsersAction);
+  document.getElementById('org-directory').addEventListener('click', handleOrgDirectoryAction);
+
+  document.getElementById('disable-user-confirm').addEventListener('click', () => {
+    closeDisableUser({ confirmed: true, suspendAgents: document.getElementById('disable-user-suspend').checked });
+  });
+  document.getElementById('disable-user-cancel').addEventListener('click', () => closeDisableUser({ confirmed: false }));
+  document.getElementById('disable-user-modal').addEventListener('click', e => {
+    if (e.target === e.currentTarget && backdropSettled(e.currentTarget)) closeDisableUser({ confirmed: false });
+  });
+
+  document.getElementById('confirm-ok').addEventListener('click', () => closeConfirm(true));
+  document.getElementById('confirm-cancel').addEventListener('click', () => closeConfirm(false));
+  document.getElementById('confirm-modal').addEventListener('click', e => {
+    if (e.target === e.currentTarget && backdropSettled(e.currentTarget)) closeConfirm(false);
+  });
+
   // ── Toast ────────────────────────────────────────────────────────────────
 
   let toastTimer = null;
@@ -3317,17 +3462,14 @@
     const sec = document.getElementById('global-directory');
     const dir = document.getElementById('org-directory');
     if (!sec || !dir) return;
-    if (orgs.length === 0) {
-      dir.innerHTML = '<p class="org-directory-empty">No organizations yet.</p>';
+    dir.textContent = '';
+    if (!orgs.length) {
+      const empty = document.createElement('p');
+      empty.className = 'org-directory-empty';
+      empty.textContent = 'No organizations yet.';
+      dir.appendChild(empty);
     } else {
-      dir.innerHTML = orgs.map(o =>
-        `<button class="org-card" data-testid="org-card" data-org="${escHtml(o.orgId)}">
-           <span class="org-card-name">${escHtml(o.name || o.orgId)}</span>
-           <span class="org-card-id">${escHtml(o.orgId)}</span>
-         </button>`
-      ).join('');
-      dir.querySelectorAll('button[data-org]').forEach(b =>
-        b.addEventListener('click', () => enterOrg(b.dataset.org)));
+      for (const o of orgs) dir.appendChild(orgCard(o));
     }
     sec.hidden = false;
     // Minimal platform counts (best-effort — the directory renders regardless).
@@ -3339,6 +3481,312 @@
         if (el) el.textContent = `${s.orgCount} orgs · ${s.agentCount} agents`;
       })
       .catch(() => {});
+    // Users directory shares the master-admin Global landing.
+    reloadUsersDirectory();
+  }
+
+  // orgCard builds one directory card via DOM APIs (never innerHTML): the org
+  // NAME is user-supplied, so it goes in via textContent (XSS-safe). The card
+  // carries a Disabled badge + a Disable/Enable lifecycle button (Phase 5).
+  function orgCard(o) {
+    const orgId = String(o.orgId || '');
+    const disabled = !!o.disabled;
+    const card = document.createElement('div');
+    card.className = 'org-card';
+    card.setAttribute('data-testid', 'org-card');
+    card.setAttribute('data-org', orgId);
+
+    const enter = document.createElement('button');
+    enter.className = 'org-card-enter';
+    enter.setAttribute('data-org', orgId);
+    const name = document.createElement('span');
+    name.className = 'org-card-name';
+    name.textContent = o.name || orgId;
+    const id = document.createElement('span');
+    id.className = 'org-card-id';
+    id.textContent = orgId;
+    enter.appendChild(name);
+    enter.appendChild(id);
+    enter.addEventListener('click', () => enterOrg(orgId));
+    card.appendChild(enter);
+
+    const foot = document.createElement('div');
+    foot.className = 'org-card-foot';
+    if (disabled) {
+      const badge = document.createElement('span');
+      badge.className = 'badge badge-disabled';
+      badge.setAttribute('data-testid', 'org-disabled-badge');
+      badge.textContent = 'disabled';
+      foot.appendChild(badge);
+    } else {
+      // Keep the buttons right-aligned even without a badge.
+      foot.appendChild(document.createElement('span'));
+    }
+    const actions = document.createElement('div');
+    actions.className = 'row-actions';
+    actions.appendChild(disabled
+      ? lifecycleBtn('Enable org', 'btn-ghost', 'enable-org', orgId)
+      : lifecycleBtn('Disable org', 'btn-warn', 'disable-org', orgId));
+    foot.appendChild(actions);
+    card.appendChild(foot);
+    return card;
+  }
+
+  function lifecycleBtn(label, cls, act, org) {
+    const b = document.createElement('button');
+    b.className = `btn ${cls}`;
+    b.textContent = label;
+    b.setAttribute('data-act', act);
+    b.setAttribute('data-org', org);
+    b.setAttribute('data-testid', `${act}-btn`);
+    return b;
+  }
+
+  // Re-fetch the authoritative org records (incl. the `disabled` flag) and repaint
+  // the directory + users. Used after a lifecycle action so badges/buttons update.
+  // A transient fetch failure must NOT blank the directory — keep the current cards
+  // and surface a toast so the operator can retry rather than seeing an empty page.
+  async function reloadGlobalDirectory() {
+    try {
+      const r = await fetch('/api/admin/orgs');
+      if (!r.ok) throw new Error(`orgs: ${r.status}`);
+      const orgs = await r.json();
+      renderGlobalDirectory(Array.isArray(orgs) ? orgs : []);
+    } catch (e) {
+      showToast(`Couldn't refresh the org directory (${e.message || e}).`, true);
+    }
+  }
+
+  async function handleOrgDirectoryAction(e) {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const orgId = btn.getAttribute('data-org');
+    const act = btn.getAttribute('data-act');
+    const enc = encodeURIComponent;
+    try {
+      if (act === 'disable-org') {
+        const ok = await openConfirm({
+          title: 'Disable organization',
+          body: 'Disable this organization? Every member is signed out and blocked from '
+              + 'logging in, and all of the org’s agents are suspended (revoked). '
+              + 'Re-enabling restores login for the members it locked out, but suspended '
+              + 'agents must be resumed manually.',
+          confirmLabel: 'Disable org',
+          variant: 'btn-warn',
+        });
+        if (!ok) return;
+        const r = await fetch(`/api/admin/orgs/${enc(orgId)}/disable`, { method: 'POST' });
+        if (!r.ok) throw new Error(`disable org: ${r.status}`);
+        showToast('Organization disabled.');
+      } else if (act === 'enable-org') {
+        const r = await fetch(`/api/admin/orgs/${enc(orgId)}/enable`, { method: 'POST' });
+        if (!r.ok) throw new Error(`enable org: ${r.status}`);
+        showToast('Organization enabled. Members it disabled can log in again; agents stay suspended.');
+      } else {
+        return;
+      }
+      await reloadGlobalDirectory();
+    } catch (err) {
+      showToast(`${act} failed: ${err.message || err}`, true);
+    }
+  }
+
+  // ── Master-admin: Users directory (Phase 5) ────────────────────────────────
+  // Backed by GET /api/admin/users; every action rides a requireAdmin twin. The
+  // server is the boundary (root lockout guard + requireAdmin 403s) — this UI is
+  // convenience. User-supplied username/email are rendered via textContent only.
+
+  async function reloadUsersDirectory() {
+    const wrap = document.getElementById('users-directory');
+    if (!wrap) return;
+    wrap.textContent = 'Loading…';
+    try {
+      const r = await fetch('/api/admin/users');
+      if (!r.ok) throw new Error(`users: ${r.status}`);
+      renderUsersDirectory(await r.json());
+    } catch (e) {
+      wrap.textContent = '';
+      const err = document.createElement('div');
+      err.className = 'inline-error';
+      err.textContent = `Couldn't load users (${String(e.message || e)}).`;
+      wrap.appendChild(err);
+    }
+  }
+
+  function renderUsersDirectory(users) {
+    const wrap = document.getElementById('users-directory');
+    if (!wrap) return;
+    const list = Array.isArray(users) ? users : [];
+    wrap.textContent = '';
+    if (!list.length) {
+      const empty = document.createElement('p');
+      empty.className = 'org-directory-empty';
+      empty.textContent = 'No users.';
+      wrap.appendChild(empty);
+      return;
+    }
+    list.sort((a, b) => String(a.username || '')
+      .localeCompare(String(b.username || ''), undefined, { sensitivity: 'base' }));
+    const table = document.createElement('table');
+    table.className = 'users-table';
+    const thead = document.createElement('thead');
+    thead.innerHTML = '<tr><th>Username</th><th>Email</th><th>Status</th>'
+      + '<th style="text-align:right">Actions</th></tr>';
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    for (const u of list) tbody.appendChild(userRow(u));
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+  }
+
+  function userRow(u) {
+    const username = String(u.username || '');
+    const enabled = u.enabled !== false;
+    const tr = document.createElement('tr');
+    tr.setAttribute('data-testid', 'user-row');
+    tr.setAttribute('data-user', username);
+
+    const nameTd = document.createElement('td');
+    nameTd.className = 'user-cell';
+    nameTd.textContent = username;            // user-supplied → textContent
+    tr.appendChild(nameTd);
+
+    const emailTd = document.createElement('td');
+    emailTd.textContent = u.email || '—';     // user-supplied → textContent
+    tr.appendChild(emailTd);
+
+    const statusTd = document.createElement('td');
+    const badge = document.createElement('span');
+    badge.className = `badge ${enabled ? 'badge-active' : 'badge-disabled'}`;
+    badge.setAttribute('data-testid', 'user-status');
+    badge.textContent = enabled ? 'enabled' : 'disabled';
+    statusTd.appendChild(badge);
+    if (u.disabledByOrg) {
+      const tag = document.createElement('span');
+      tag.className = 'disabled-by-org';
+      tag.setAttribute('data-testid', 'user-disabled-by-org');
+      tag.textContent = `by org ${u.disabledByOrg}`;  // org id → textContent
+      statusTd.appendChild(tag);
+    }
+    tr.appendChild(statusTd);
+
+    const actionsTd = document.createElement('td');
+    // Hide the destructive actions for the platform master-admin row (the registry
+    // 403s any disable/delete of that account — a hard server guard) and for the
+    // logged-in admin's own row (a client-side self-lockout convenience; the server
+    // does NOT block a non-master admin from disabling themselves, so this is UX only).
+    const locked = username === (ME.masterAdmin || 'root') || username === (ME.user || '');
+    if (locked) {
+      actionsTd.textContent = '—';
+    } else {
+      const actions = document.createElement('div');
+      actions.className = 'row-actions';
+      actions.appendChild(enabled
+        ? userActionBtn('Disable', 'btn-warn', 'disable-user', username)
+        : userActionBtn('Enable', 'btn-ghost', 'enable-user', username));
+      actions.appendChild(userActionBtn('Delete', 'btn-danger', 'delete-user', username));
+      actionsTd.appendChild(actions);
+    }
+    tr.appendChild(actionsTd);
+    return tr;
+  }
+
+  function userActionBtn(label, cls, act, username) {
+    const b = document.createElement('button');
+    b.className = `btn ${cls}`;
+    b.textContent = label;
+    b.setAttribute('data-act', act);
+    b.setAttribute('data-user', username);
+    b.setAttribute('data-testid', `${act}-btn`);
+    return b;
+  }
+
+  async function handleUsersAction(e) {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const username = btn.getAttribute('data-user');
+    const act = btn.getAttribute('data-act');
+    const enc = encodeURIComponent;
+    try {
+      if (act === 'disable-user') {
+        const res = await openDisableUserDialog(username);
+        if (!res.confirmed) return;
+        const r = await fetch(`/api/admin/users/${enc(username)}/disable`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ suspendAgents: !!res.suspendAgents }),
+        });
+        if (!r.ok) throw new Error(`disable: ${r.status}`);
+        showToast(`Disabled ${username}${res.suspendAgents ? ' and suspended their agents' : ''}.`);
+      } else if (act === 'enable-user') {
+        const r = await fetch(`/api/admin/users/${enc(username)}/enable`, { method: 'POST' });
+        if (!r.ok) throw new Error(`enable: ${r.status}`);
+        showToast(`Enabled ${username}. Any agents suspended at disable time stay suspended — resume them manually.`);
+      } else if (act === 'delete-user') {
+        const ok = await openConfirm({
+          title: 'Delete user',
+          body: `Permanently delete ${username}? Their agents are disposed per each of their `
+              + 'org’s removal policy — kept running and handed to that org’s admins, '
+              + 'or revoked — and then the Keycloak account is removed. This cannot be undone.',
+          confirmLabel: 'Delete user',
+          variant: 'btn-danger',
+        });
+        if (!ok) return;
+        const r = await fetch(`/api/admin/users/${enc(username)}`, { method: 'DELETE' });
+        if (!r.ok) throw new Error(`delete: ${r.status}`);
+        showToast(`Deleted ${username}.`);
+      } else {
+        return;
+      }
+      await reloadUsersDirectory();
+    } catch (err) {
+      showToast(`${act} failed: ${err.message || err}`, true);
+    }
+  }
+
+  // ── Master-admin dialogs: disable-user (with the suspend-agents choice) and a
+  // generic promise-based confirm. Both are custom modals so e2e can drive them
+  // deterministically (native window.confirm is auto-dismissed under Playwright)
+  // and they render correctly in both themes.
+  // A backdrop click within this window of opening is ignored, so the second
+  // click of a double-click on a destructive button (which lands on the freshly
+  // opened backdrop) can't be misread as Cancel and silently drop the action.
+  const MODAL_BACKDROP_GRACE_MS = 400;
+  function stampOpen(modal) { modal.dataset.openedAt = String(Date.now()); }
+  function backdropSettled(modal) {
+    return Date.now() - Number(modal.dataset.openedAt || 0) >= MODAL_BACKDROP_GRACE_MS;
+  }
+
+  let disableUserResolve = null;
+  function openDisableUserDialog(username) {
+    document.getElementById('disable-user-name').textContent = username;
+    document.getElementById('disable-user-suspend').checked = false;
+    const modal = document.getElementById('disable-user-modal');
+    stampOpen(modal);
+    modal.classList.add('open');
+    return new Promise((resolve) => { disableUserResolve = resolve; });
+  }
+  function closeDisableUser(result) {
+    document.getElementById('disable-user-modal').classList.remove('open');
+    const r = disableUserResolve; disableUserResolve = null;
+    if (r) r(result);
+  }
+
+  let confirmResolve = null;
+  function openConfirm({ title, body, confirmLabel = 'Confirm', variant = 'btn-danger' }) {
+    document.getElementById('confirm-title').textContent = title;
+    document.getElementById('confirm-body').textContent = body;
+    const ok = document.getElementById('confirm-ok');
+    ok.textContent = confirmLabel;
+    ok.className = `btn ${variant}`;
+    const modal = document.getElementById('confirm-modal');
+    stampOpen(modal);
+    modal.classList.add('open');
+    return new Promise((resolve) => { confirmResolve = resolve; });
+  }
+  function closeConfirm(result) {
+    document.getElementById('confirm-modal').classList.remove('open');
+    const r = confirmResolve; confirmResolve = null;
+    if (r) r(result);
   }
 
   function renderOrgSwitcher(orgs, activeOrg, isAdmin) {
@@ -3392,7 +3840,16 @@
             : '/';
           return;
         }
-        const msg = (await r.text()).trim();
+        // The registry surfaces the global-cap rejection (signup-lifecycle
+        // Phase 2) as a JSON {"error":"...at capacity"} 403, while the older
+        // self-serve guards (slug taken, one-org-per-user) are plain text. Prefer
+        // the JSON .error when present, else fall back to the raw text.
+        const raw = (await r.text()).trim();
+        let msg = raw;
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed.error === 'string') msg = parsed.error;
+        } catch (_) { /* not JSON — use the plain-text body */ }
         errEl.textContent = msg || 'Could not create the organization. Try again.';
         errEl.hidden = false;
       } catch (_) {
@@ -3400,6 +3857,66 @@
         errEl.hidden = false;
       } finally {
         btn.disabled = false;
+      }
+    });
+  })();
+
+  // Master-admin "New organization" (Phase 5 follow-up). Root works org-less and
+  // never hits the self-serve no-org form, so this is its create path: POST
+  // /api/admin/orgs {name, adminUser} (requireAdmin, bypasses MAX_ORGS). On success
+  // the Global directory reloads; we do NOT switch root into the new org.
+  (function () {
+    const btn = document.getElementById('admin-new-org-btn');
+    const modal = document.getElementById('admin-create-org-modal');
+    if (!btn || !modal) return;
+    const nameEl = document.getElementById('admin-create-org-name');
+    const adminEl = document.getElementById('admin-create-org-admin');
+    const errEl = document.getElementById('admin-create-org-error');
+    const okBtn = document.getElementById('admin-create-org-confirm');
+    const close = () => modal.classList.remove('open');
+    btn.addEventListener('click', () => {
+      nameEl.value = ''; adminEl.value = ''; errEl.hidden = true;
+      stampOpen(modal); modal.classList.add('open');
+      nameEl.focus();
+    });
+    document.getElementById('admin-create-org-cancel').addEventListener('click', close);
+    // Backdrop click closes (ignoring the just-opened click, per backdropSettled).
+    modal.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget && backdropSettled(e.currentTarget)) close();
+    });
+    okBtn.addEventListener('click', async () => {
+      const name = nameEl.value.trim();
+      const adminUser = adminEl.value.trim();
+      errEl.hidden = true;
+      if (!name || !adminUser) {
+        errEl.textContent = 'An organization name and an admin username are both required.';
+        errEl.hidden = false;
+        return;
+      }
+      okBtn.disabled = true;
+      try {
+        const r = await fetch('/api/admin/orgs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, adminUser }),
+        });
+        if (r.ok) {
+          close();
+          await reloadGlobalDirectory();
+          showToast(`Organization "${name}" created.`);
+          return;
+        }
+        // Surface a JSON {"error":...} (e.g. a cap message) or the plain-text body.
+        const raw = (await r.text()).trim();
+        let msg = raw;
+        try { const p = JSON.parse(raw); if (p && typeof p.error === 'string') msg = p.error; } catch (_) { /* plain text */ }
+        errEl.textContent = msg || 'Could not create the organization. Try again.';
+        errEl.hidden = false;
+      } catch (_) {
+        errEl.textContent = 'Something went wrong. Try again.';
+        errEl.hidden = false;
+      } finally {
+        okBtn.disabled = false;
       }
     });
   })();
@@ -3414,6 +3931,9 @@
     } catch (_) { showGate('error'); return; }
 
     if (me.user) document.getElementById('current-user').textContent = me.user;
+    ME.user = me.user || '';
+    // The effective master-admin username (server-provided; falls back to "root").
+    ME.masterAdmin = me.masterAdmin || 'root';
     // Scope the admin surfaces by role (Phase 6). A realm admin manages the global
     // catalog; an org admin manages their org's templates + membership. Server
     // gates are authoritative — these flags only decide button visibility + which

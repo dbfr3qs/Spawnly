@@ -140,3 +140,54 @@ func TestAdminOrgs_AdminForwards(t *testing.T) {
 		}
 	}
 }
+
+// TestAdminUsers_NonAdminForbidden proves the master-admin user lifecycle routes
+// (signup-lifecycle Phase 3) are requireAdmin-gated at the orchestrator: a
+// non-admin token is 403'd and the registry is never touched.
+func TestAdminUsers_NonAdminForbidden(t *testing.T) {
+	cases := []struct{ method, path string }{
+		{"GET", "/v1/admin/users"},
+		{"POST", "/v1/admin/users/bob/disable"},
+		{"POST", "/v1/admin/users/bob/enable"},
+		{"DELETE", "/v1/admin/users/bob"},
+	}
+	for _, tc := range cases {
+		mux, seen := orgForwardMux(t, humanClaims("viewer", "orchestrator:write", "orchestrator:read")) // no admin role
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer t")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s %s: non-admin status = %d, want 403", tc.method, tc.path, rec.Code)
+		}
+		if len(*seen) != 0 {
+			t.Errorf("%s %s: registry must not be called for a forbidden request; saw %v", tc.method, tc.path, *seen)
+		}
+	}
+}
+
+// TestAdminUsers_AdminForwards proves each user-lifecycle admin route forwards to
+// the correct registry /v1/users path with the control-plane bearer.
+func TestAdminUsers_AdminForwards(t *testing.T) {
+	mux, seen := orgForwardMux(t, adminClaims("alice", "orchestrator:write", "orchestrator:read"))
+	cases := []struct{ method, path, want string }{
+		{"GET", "/v1/admin/users", "GET /v1/users"},
+		{"POST", "/v1/admin/users/bob/disable", "POST /v1/users/bob/disable"},
+		{"POST", "/v1/admin/users/bob/enable", "POST /v1/users/bob/enable"},
+		{"DELETE", "/v1/admin/users/bob", "DELETE /v1/users/bob"},
+	}
+	for _, tc := range cases {
+		*seen = nil
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer t")
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Errorf("%s %s: status=%d, want 201", tc.method, tc.path, rec.Code)
+		}
+		if len(*seen) != 1 || (*seen)[0] != tc.want {
+			t.Errorf("%s %s: forwarded %v, want %q", tc.method, tc.path, *seen, tc.want)
+		}
+	}
+}
