@@ -258,6 +258,11 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 			"hostOrg":    hostOrg,
 			"isApex":     isApex,
 			"apexDomain": auth.hosts.apexDomain,
+			// The platform master-admin username (registry root lockout guard,
+			// env MASTER_ADMIN_USERNAME, default "root"). The admin Users directory
+			// reads it to hide destructive actions on that account's row, matching
+			// the server guard when a non-default name is configured.
+			"masterAdmin": getenv("MASTER_ADMIN_USERNAME", "root"),
 		}
 		token, err := auth.orchestratorToken(r.Context(), r)
 		if err != nil {

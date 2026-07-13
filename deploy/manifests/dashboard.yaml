@@ -49,6 +49,12 @@ spec:
               value: ""
             - name: TRUST_FORWARDED_HOST
               value: ""
+            # Platform master-admin username — surfaced on /api/me so the admin
+            # Users directory hides destructive actions on that account's row,
+            # matching the registry root lockout guard (same env, default "root").
+            # Keep in sync with the registry's MASTER_ADMIN_USERNAME.
+            - name: MASTER_ADMIN_USERNAME
+              value: "root"
           ports:
             - containerPort: 8080
 ---
