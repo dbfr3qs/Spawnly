@@ -291,4 +291,38 @@ test.describe('master-admin lifecycle UI', () => {
       await rootCtx.close().catch(() => {});
     }
   });
+
+  test('the master admin creates an org via the Global New-organization dialog', async ({ browser }) => {
+    // Phase-5 follow-up: root works org-less and never sees the self-serve no-org
+    // create form, so the Global directory gives it a "New organization" dialog that
+    // posts to the admin path (POST /api/admin/orgs, bypasses MAX_ORGS).
+    const suffix = uniqueSuffix();
+    const orgName = `Admin Org ${suffix}`;
+    const ctx = await contextFor(browser, 'root');
+    let createdId = '';
+    try {
+      const root = await ctx.newPage();
+      await root.goto('/');
+      await expect(root.locator('[data-testid="global-directory"]')).toBeVisible({ timeout: 30_000 });
+      await root.locator('[data-testid="admin-new-org-btn"]').click();
+      await expect(root.locator('#admin-create-org-modal')).toBeVisible();
+      await root.locator('[data-testid="admin-create-org-name"]').fill(orgName);
+      await root.locator('[data-testid="admin-create-org-admin"]').fill('alice');
+      await root.locator('[data-testid="admin-create-org-confirm"]').click();
+      // The new org card appears in the directory, tagged with its minted id.
+      const card = root.locator('[data-testid="org-card"]').filter({ hasText: orgName });
+      await expect(card).toBeVisible({ timeout: 30_000 });
+      createdId = (await card.getAttribute('data-org')) || '';
+      expect(createdId, 'the created org card carries its minted id').not.toBe('');
+    } finally {
+      if (createdId) {
+        const p = await ctx.newPage().catch(() => undefined);
+        if (p) {
+          await p.goto('/').catch(() => {});
+          await p.request.delete(`/api/admin/orgs/${encodeURIComponent(createdId)}`).catch(() => {});
+        }
+      }
+      await ctx.close();
+    }
+  });
 });

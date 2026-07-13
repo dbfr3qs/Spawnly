@@ -287,6 +287,17 @@
       padding: 32px 24px;
     }
 
+    /* Master-admin Global landing — center it in the same content column as the
+       agents <main> (a sibling section), which otherwise leaves it flush-left. */
+    .global-directory { max-width: 1100px; margin: 0 auto; padding: 32px 24px; }
+    .section-header-actions { display: flex; align-items: center; gap: 12px; }
+    /* Text-input field inside a dialog (e.g. the admin New-organization form). */
+    .dialog-field { display: flex; flex-direction: column; gap: 5px; font-size: 12px;
+      color: var(--text-dim, #9aa3b2); text-align: left; margin: 0 0 12px; }
+    .dialog-field input {
+      padding: 9px 11px; border-radius: 8px; border: 1px solid rgba(255,255,255,.14);
+      background: var(--bg, #12141d); color: var(--text, #e8eaf0); font-family: var(--font); font-size: 13px;
+    }
     .section-header {
       display: flex;
       align-items: center;
@@ -1263,7 +1274,13 @@
 <section id="global-directory" class="global-directory" hidden data-testid="global-directory">
   <div class="section-header">
     <span class="section-title">Organizations</span>
-    <span class="agent-count" id="global-stats" data-testid="global-stats"></span>
+    <div class="section-header-actions">
+      <span class="agent-count" id="global-stats" data-testid="global-stats"></span>
+      <!-- Master admin can provision an org for any user (admin path — bypasses the
+           MAX_ORGS cap). Root itself works org-less, so it never sees the self-serve
+           no-org create form; this is its create affordance. -->
+      <button class="btn btn-primary" id="admin-new-org-btn" data-testid="admin-new-org-btn">+ New organization</button>
+    </div>
   </div>
   <div id="org-directory" class="org-directory" data-testid="org-directory"></div>
 
@@ -1574,6 +1591,29 @@
     <div class="modal-actions">
       <button class="btn btn-ghost" id="confirm-cancel" data-testid="confirm-cancel">Cancel</button>
       <button class="btn btn-danger" id="confirm-ok" data-testid="confirm-ok">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- Master-admin: create an organization (Phase 5 follow-up). Posts to the
+     requireAdmin POST /api/admin/orgs with {name, adminUser}; the admin path
+     bypasses the MAX_ORGS cap and makes adminUser the org's first admin (the user
+     is created if they don't exist yet). -->
+<div class="modal-overlay" id="admin-create-org-modal">
+  <div class="modal">
+    <h2 class="dialog-title">New organization</h2>
+    <p class="dialog-body">Create an organization and assign its first admin. If the
+      admin user doesn&rsquo;t exist yet they&rsquo;ll be created.</p>
+    <label class="dialog-field">Organization name
+      <input type="text" id="admin-create-org-name" maxlength="120" placeholder="Acme Inc." data-testid="admin-create-org-name" />
+    </label>
+    <label class="dialog-field">Admin username
+      <input type="text" id="admin-create-org-admin" maxlength="120" placeholder="alice" autocomplete="off" data-testid="admin-create-org-admin" />
+    </label>
+    <p class="form-error" id="admin-create-org-error" data-testid="admin-create-org-error" hidden></p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="admin-create-org-cancel" data-testid="admin-create-org-cancel">Cancel</button>
+      <button class="btn btn-primary" id="admin-create-org-confirm" data-testid="admin-create-org-confirm">Create organization</button>
     </div>
   </div>
 </div>
@@ -3817,6 +3857,66 @@
         errEl.hidden = false;
       } finally {
         btn.disabled = false;
+      }
+    });
+  })();
+
+  // Master-admin "New organization" (Phase 5 follow-up). Root works org-less and
+  // never hits the self-serve no-org form, so this is its create path: POST
+  // /api/admin/orgs {name, adminUser} (requireAdmin, bypasses MAX_ORGS). On success
+  // the Global directory reloads; we do NOT switch root into the new org.
+  (function () {
+    const btn = document.getElementById('admin-new-org-btn');
+    const modal = document.getElementById('admin-create-org-modal');
+    if (!btn || !modal) return;
+    const nameEl = document.getElementById('admin-create-org-name');
+    const adminEl = document.getElementById('admin-create-org-admin');
+    const errEl = document.getElementById('admin-create-org-error');
+    const okBtn = document.getElementById('admin-create-org-confirm');
+    const close = () => modal.classList.remove('open');
+    btn.addEventListener('click', () => {
+      nameEl.value = ''; adminEl.value = ''; errEl.hidden = true;
+      stampOpen(modal); modal.classList.add('open');
+      nameEl.focus();
+    });
+    document.getElementById('admin-create-org-cancel').addEventListener('click', close);
+    // Backdrop click closes (ignoring the just-opened click, per backdropSettled).
+    modal.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget && backdropSettled(e.currentTarget)) close();
+    });
+    okBtn.addEventListener('click', async () => {
+      const name = nameEl.value.trim();
+      const adminUser = adminEl.value.trim();
+      errEl.hidden = true;
+      if (!name || !adminUser) {
+        errEl.textContent = 'An organization name and an admin username are both required.';
+        errEl.hidden = false;
+        return;
+      }
+      okBtn.disabled = true;
+      try {
+        const r = await fetch('/api/admin/orgs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, adminUser }),
+        });
+        if (r.ok) {
+          close();
+          await reloadGlobalDirectory();
+          showToast(`Organization "${name}" created.`);
+          return;
+        }
+        // Surface a JSON {"error":...} (e.g. a cap message) or the plain-text body.
+        const raw = (await r.text()).trim();
+        let msg = raw;
+        try { const p = JSON.parse(raw); if (p && typeof p.error === 'string') msg = p.error; } catch (_) { /* plain text */ }
+        errEl.textContent = msg || 'Could not create the organization. Try again.';
+        errEl.hidden = false;
+      } catch (_) {
+        errEl.textContent = 'Something went wrong. Try again.';
+        errEl.hidden = false;
+      } finally {
+        okBtn.disabled = false;
       }
     });
   })();
