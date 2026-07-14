@@ -1581,6 +1581,31 @@
   </div>
 </div>
 
+<!-- Master-admin: edit-user dialog (account-lifecycle follow-up). Pre-filled with
+     the row's current email/first/last name; on save PATCHes /api/admin/users/{u}
+     with only those profile fields (it cannot touch enabled/roles/lifecycle). -->
+<div class="modal-overlay" id="edit-user-modal">
+  <div class="modal">
+    <h2 class="dialog-title">Edit user</h2>
+    <p class="dialog-body">Edit <strong id="edit-user-name"></strong>. Setting an email lets
+      this account receive verification and password-reset mail.</p>
+    <label class="dialog-field">Email
+      <input type="email" id="edit-user-email" maxlength="255" placeholder="bob@example.com" autocomplete="off" data-testid="edit-user-email" />
+    </label>
+    <label class="dialog-field">First name
+      <input type="text" id="edit-user-first" maxlength="120" autocomplete="off" data-testid="edit-user-first" />
+    </label>
+    <label class="dialog-field">Last name
+      <input type="text" id="edit-user-last" maxlength="120" autocomplete="off" data-testid="edit-user-last" />
+    </label>
+    <p class="form-error" id="edit-user-error" data-testid="edit-user-error" hidden></p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="edit-user-cancel" data-testid="edit-user-cancel">Cancel</button>
+      <button class="btn btn-primary" id="edit-user-confirm" data-testid="edit-user-confirm">Save changes</button>
+    </div>
+  </div>
+</div>
+
 <!-- Master-admin: generic destructive-confirm dialog (Phase 5), promise-based.
      Reused for delete-user and org disable/enable so those actions get a
      testable, theme-safe confirm (not a native window.confirm). -->
@@ -3358,6 +3383,12 @@
     if (e.target === e.currentTarget && backdropSettled(e.currentTarget)) closeConfirm(false);
   });
 
+  document.getElementById('edit-user-confirm').addEventListener('click', submitEditUser);
+  document.getElementById('edit-user-cancel').addEventListener('click', () => closeEditUser({ confirmed: false }));
+  document.getElementById('edit-user-modal').addEventListener('click', e => {
+    if (e.target === e.currentTarget && backdropSettled(e.currentTarget)) closeEditUser({ confirmed: false });
+  });
+
   // ── Toast ────────────────────────────────────────────────────────────────
 
   let toastTimer = null;
@@ -3613,10 +3644,18 @@
     }
   }
 
+  // Last-rendered users, keyed by username — so the edit dialog can pre-fill the
+  // current email/first/last name without an extra fetch. Rebuilt on every render.
+  // A null-prototype object so a username like "__proto__" is a plain own key, not
+  // a prototype-pollution footgun.
+  let usersByName = Object.create(null);
+
   function renderUsersDirectory(users) {
     const wrap = document.getElementById('users-directory');
     if (!wrap) return;
     const list = Array.isArray(users) ? users : [];
+    usersByName = Object.create(null);
+    for (const u of list) usersByName[String(u.username || '')] = u;
     wrap.textContent = '';
     if (!list.length) {
       const empty = document.createElement('p');
@@ -3676,17 +3715,20 @@
     // (the orchestrator's caller≠target guard 403s a self disable/delete). Both are
     // hard server guards; hiding the buttons is just so the UI doesn't offer a 403.
     const locked = username === (ME.masterAdmin || 'root') || username === (ME.user || '');
-    if (locked) {
-      actionsTd.textContent = '—';
-    } else {
-      const actions = document.createElement('div');
-      actions.className = 'row-actions';
+    const actions = document.createElement('div');
+    actions.className = 'row-actions';
+    // Edit (email/name) is offered on EVERY row — including the master-admin and the
+    // logged-in admin's own row — because a profile edit is non-destructive (it can't
+    // disable, delete, or re-enable an account). Only the destructive disable/delete
+    // are hidden on the locked rows (the server 403s those anyway).
+    actions.appendChild(userActionBtn('Edit', 'btn-ghost', 'edit-user', username));
+    if (!locked) {
       actions.appendChild(enabled
         ? userActionBtn('Disable', 'btn-warn', 'disable-user', username)
         : userActionBtn('Enable', 'btn-ghost', 'enable-user', username));
       actions.appendChild(userActionBtn('Delete', 'btn-danger', 'delete-user', username));
-      actionsTd.appendChild(actions);
     }
+    actionsTd.appendChild(actions);
     tr.appendChild(actionsTd);
     return tr;
   }
@@ -3717,6 +3759,15 @@
         });
         if (!r.ok) throw new Error(`disable: ${r.status}`);
         showToast(`Disabled ${username}${res.suspendAgents ? ' and suspended their agents' : ''}.`);
+      } else if (act === 'edit-user') {
+        const res = await openEditUserDialog(username, usersByName[username] || {});
+        if (!res.confirmed) return;
+        const r = await fetch(`/api/admin/users/${enc(username)}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(res.patch),
+        });
+        if (!r.ok) throw new Error(`edit: ${r.status}`);
+        showToast(`Updated ${username}.`);
       } else if (act === 'enable-user') {
         const r = await fetch(`/api/admin/users/${enc(username)}/enable`, { method: 'POST' });
         if (!r.ok) throw new Error(`enable: ${r.status}`);
@@ -3769,6 +3820,55 @@
     document.getElementById('disable-user-modal').classList.remove('open');
     const r = disableUserResolve; disableUserResolve = null;
     if (r) r(result);
+  }
+
+  // ── Edit-user dialog (account-lifecycle follow-up) ─────────────────────────
+  // Pre-fills the row's current profile and resolves with a PATCH body carrying
+  // ONLY the fields the admin actually changed (omit-vs-set: an unchanged field is
+  // left out so the server never re-writes it). Values go in via input .value, never
+  // innerHTML. A basic client-side email check gives a friendly error; the registry
+  // is the authoritative validator.
+  let editUserResolve = null;
+  let editUserOriginal = null;
+  function openEditUserDialog(username, user) {
+    document.getElementById('edit-user-name').textContent = username;
+    const email = document.getElementById('edit-user-email');
+    const first = document.getElementById('edit-user-first');
+    const last = document.getElementById('edit-user-last');
+    email.value = user.email || '';
+    first.value = user.firstName || '';
+    last.value = user.lastName || '';
+    editUserOriginal = { email: email.value, firstName: first.value, lastName: last.value };
+    const err = document.getElementById('edit-user-error');
+    err.hidden = true; err.textContent = '';
+    const modal = document.getElementById('edit-user-modal');
+    stampOpen(modal);
+    modal.classList.add('open');
+    return new Promise((resolve) => { editUserResolve = resolve; });
+  }
+  function closeEditUser(result) {
+    document.getElementById('edit-user-modal').classList.remove('open');
+    const r = editUserResolve; editUserResolve = null;
+    if (r) r(result);
+  }
+  function submitEditUser() {
+    const email = document.getElementById('edit-user-email').value.trim();
+    const first = document.getElementById('edit-user-first').value.trim();
+    const last = document.getElementById('edit-user-last').value.trim();
+    const err = document.getElementById('edit-user-error');
+    // A light client-side check only — a friendly nudge, not the real gate.
+    if (email !== '' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      err.textContent = 'Enter a valid email address, or leave it blank.';
+      err.hidden = false;
+      return;
+    }
+    // Build the PATCH with only changed fields (omit-vs-set).
+    const patch = {};
+    if (email !== editUserOriginal.email) patch.email = email;
+    if (first !== editUserOriginal.firstName) patch.firstName = first;
+    if (last !== editUserOriginal.lastName) patch.lastName = last;
+    if (Object.keys(patch).length === 0) { closeEditUser({ confirmed: false }); return; }
+    closeEditUser({ confirmed: true, patch });
   }
 
   let confirmResolve = null;

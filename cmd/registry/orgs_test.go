@@ -47,6 +47,7 @@ type fakeDirectory struct {
 	failDisableUser  error
 	failEnableUser   error
 	failDeleteUser   error
+	failUpdateUser   error
 }
 
 // fakeUserState mirrors the real Keycloak adapter's disable-state model: a
@@ -54,6 +55,9 @@ type fakeDirectory struct {
 // is enabled iff NOT admin-banned AND the org set is empty (see keycloak.go).
 type fakeUserState struct {
 	email           string
+	emailVerified   bool
+	firstName       string
+	lastName        string
 	enabled         bool
 	disabledByOrg   []string // set of orgs currently suspending the user
 	disabledByAdmin bool     // direct platform-admin ban
@@ -233,6 +237,8 @@ func (f *fakeDirectory) ListUsers(_ context.Context) ([]orgdirectory.User, error
 		out = append(out, orgdirectory.User{
 			Username:      name,
 			Email:         u.email,
+			FirstName:     u.firstName,
+			LastName:      u.lastName,
 			Enabled:       u.enabled,
 			DisabledByOrg: firstOrg,
 		})
@@ -316,6 +322,32 @@ func (f *fakeDirectory) DeleteUser(_ context.Context, username string) error {
 		return f.failDeleteUser
 	}
 	delete(f.users, username)
+	return nil
+}
+
+func (f *fakeDirectory) UpdateUser(_ context.Context, username string, attrs orgdirectory.UserUpdate) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record("UpdateUser:" + username)
+	if f.failUpdateUser != nil {
+		return f.failUpdateUser
+	}
+	u := f.users[username]
+	if u == nil {
+		return nil // unknown user => no-op (mirrors the adapter)
+	}
+	// Partial edit: only non-nil fields are written; the lifecycle state
+	// (enabled/disabledByOrg/disabledByAdmin) is deliberately never touched here.
+	if attrs.Email != nil {
+		u.email = *attrs.Email
+		u.emailVerified = *attrs.Email != "" // admin-set address ⇒ pre-verified
+	}
+	if attrs.FirstName != nil {
+		u.firstName = *attrs.FirstName
+	}
+	if attrs.LastName != nil {
+		u.lastName = *attrs.LastName
+	}
 	return nil
 }
 

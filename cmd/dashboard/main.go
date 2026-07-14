@@ -485,6 +485,9 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	mux.Handle("DELETE /api/admin/users/{username}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxy("DELETE", orchestratorURL+"/v1/admin/users/"+url.PathEscape(r.PathValue("username")))(w, r)
 	})))
+	mux.Handle("PATCH /api/admin/users/{username}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("PATCH", orchestratorURL+"/v1/admin/users/"+url.PathEscape(r.PathValue("username")))(w, r)
+	})))
 
 	// Org SELF-SERVICE twins (multi-tenancy Phase 6). These are the ORG ADMIN's
 	// membership + settings surface for their OWN org — the org is taken from the

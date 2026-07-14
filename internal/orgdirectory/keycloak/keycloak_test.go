@@ -3,6 +3,7 @@ package keycloak
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -42,8 +43,9 @@ type fakeKC struct {
 	dashRep      map[string]any
 	dashPuts     int // count of PUT /clients/<uuid> (asserts idempotent skip)
 
-	logouts  map[string]int // user uuid -> count of POST /users/<id>/logout
-	userPuts int            // count of PUT /users/<id> (asserts idempotent skip)
+	logouts            map[string]int // user uuid -> count of POST /users/<id>/logout
+	userPuts           int            // count of PUT /users/<id> (asserts idempotent skip)
+	forceUserPutStatus int            // if non-zero, PUT /users/<id> returns this (e.g. 409 unique-email)
 }
 
 type fakeOrg struct {
@@ -53,6 +55,7 @@ type fakeOrg struct {
 
 type fakeUser struct {
 	id, username, email string
+	firstName, lastName string
 	required            []string
 	emailVerified       bool
 	enabled             bool
@@ -105,11 +108,14 @@ func (f *fakeKC) userRep(u *fakeUser) map[string]any {
 		attrs[k] = arr
 	}
 	return map[string]any{
-		"id":         u.id,
-		"username":   u.username,
-		"email":      u.email,
-		"enabled":    u.enabled,
-		"attributes": attrs,
+		"id":            u.id,
+		"username":      u.username,
+		"email":         u.email,
+		"emailVerified": u.emailVerified,
+		"firstName":     u.firstName,
+		"lastName":      u.lastName,
+		"enabled":       u.enabled,
+		"attributes":    attrs,
 	}
 }
 
@@ -235,6 +241,10 @@ func (f *fakeKC) handler() http.Handler {
 		case http.MethodGet:
 			json.NewEncoder(w).Encode(f.userRep(u))
 		case http.MethodPut:
+			if f.forceUserPutStatus != 0 {
+				w.WriteHeader(f.forceUserPutStatus)
+				return
+			}
 			f.userPuts++
 			var rep map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&rep); err != nil {
@@ -243,6 +253,20 @@ func (f *fakeKC) handler() http.Handler {
 			}
 			if e, ok := rep["enabled"].(bool); ok {
 				u.enabled = e
+			}
+			// PUT REPLACES the whole representation (read-modify-write): mirror the
+			// top-level profile fields the adapter round-trips so an edit is observable.
+			if v, ok := rep["email"].(string); ok {
+				u.email = v
+			}
+			if v, ok := rep["emailVerified"].(bool); ok {
+				u.emailVerified = v
+			}
+			if v, ok := rep["firstName"].(string); ok {
+				u.firstName = v
+			}
+			if v, ok := rep["lastName"].(string); ok {
+				u.lastName = v
 			}
 			// PUT REPLACES attributes with exactly what was sent (read-modify-write).
 			u.attrs = map[string][]string{}
@@ -1064,6 +1088,129 @@ func TestEnableUser_UnknownUser(t *testing.T) {
 	}
 	if applied {
 		t.Error("unknown user enable should report applied=false")
+	}
+}
+
+func strptr(s string) *string { return &s }
+
+// TestUpdateUser_SetsOnlyProvidedFields proves a partial edit writes only the
+// non-nil fields, pins emailVerified when an email is set, and preserves every
+// unrelated field — the enabled state and the disabledByOrg/disabledByAdmin
+// lifecycle attributes must survive the read-modify-write untouched.
+func TestUpdateUser_SetsOnlyProvidedFields(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	u := f.addUser("bob", "") // created with no email (the admin-add path)
+	u.firstName = "Bobby"
+	u.enabled = true
+	u.attrs["disabledByOrg"] = []string{"acme"} // a live lifecycle attribute
+	u.attrs["unrelated"] = []string{"keepme"}
+
+	// Edit ONLY the email — first/last name are nil → left unchanged.
+	if err := c.UpdateUser(ctx, "bob", orgdirectory.UserUpdate{Email: strptr("bob@example.com")}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if u.email != "bob@example.com" {
+		t.Errorf("email = %q, want bob@example.com", u.email)
+	}
+	if !u.emailVerified {
+		t.Error("setting a non-empty email must pin emailVerified=true (admin trust stance)")
+	}
+	if u.firstName != "Bobby" {
+		t.Errorf("firstName clobbered by an email-only edit: %q", u.firstName)
+	}
+	// Lifecycle state + unrelated attrs preserved.
+	if !u.enabled {
+		t.Error("UpdateUser must NOT touch enabled")
+	}
+	if got := u.attrs["disabledByOrg"]; len(got) != 1 || got[0] != "acme" {
+		t.Errorf("disabledByOrg clobbered: %v", got)
+	}
+	if got := u.attrs["unrelated"]; len(got) != 1 || got[0] != "keepme" {
+		t.Errorf("unrelated attribute clobbered: %v", got)
+	}
+}
+
+// TestUpdateUser_NamesOnlyDoesNotTouchEmailVerified proves a names-only edit
+// leaves the email + emailVerified flag exactly as they were.
+func TestUpdateUser_NamesOnlyDoesNotTouchEmailVerified(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	u := f.addUser("carol", "carol@example.com")
+	u.emailVerified = true
+
+	if err := c.UpdateUser(ctx, "carol", orgdirectory.UserUpdate{
+		FirstName: strptr("Carol"), LastName: strptr("Smith"),
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if u.firstName != "Carol" || u.lastName != "Smith" {
+		t.Errorf("names not set: first=%q last=%q", u.firstName, u.lastName)
+	}
+	if u.email != "carol@example.com" {
+		t.Errorf("email must be untouched by a names-only edit, got %q", u.email)
+	}
+	if !u.emailVerified {
+		t.Error("emailVerified must be untouched by a names-only edit")
+	}
+}
+
+// TestUpdateUser_ClearEmailClearsVerified proves clearing the email (empty string)
+// also clears the verified flag so a blank address never reads as verified.
+func TestUpdateUser_ClearEmailClearsVerified(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	u := f.addUser("dave", "dave@example.com")
+	u.emailVerified = true
+
+	if err := c.UpdateUser(ctx, "dave", orgdirectory.UserUpdate{Email: strptr("")}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if u.email != "" {
+		t.Errorf("email should be cleared, got %q", u.email)
+	}
+	if u.emailVerified {
+		t.Error("clearing the email must clear emailVerified")
+	}
+}
+
+// TestUpdateUser_NoChangeSkipsPut proves an edit that changes nothing (all fields
+// already at the requested values) is an idempotent no-op — no PUT is issued.
+func TestUpdateUser_NoChangeSkipsPut(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	u := f.addUser("erin", "erin@example.com")
+	u.emailVerified = true
+	u.firstName = "Erin"
+	puts := f.userPuts
+	if err := c.UpdateUser(ctx, "erin", orgdirectory.UserUpdate{
+		Email: strptr("erin@example.com"), FirstName: strptr("Erin"),
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if f.userPuts != puts {
+		t.Errorf("no-op edit should skip the PUT (was %d, now %d)", puts, f.userPuts)
+	}
+}
+
+// TestUpdateUser_EmailConflictMapsToErrConflict proves a 409 from Keycloak (the
+// realm's unique-email constraint) is surfaced as the neutral orgdirectory.ErrConflict
+// so the registry can answer 409 rather than 500.
+func TestUpdateUser_EmailConflictMapsToErrConflict(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	f.addUser("bob", "")
+	f.forceUserPutStatus = http.StatusConflict
+	err := c.UpdateUser(ctx, "bob", orgdirectory.UserUpdate{Email: strptr("taken@example.com")})
+	if !errors.Is(err, orgdirectory.ErrConflict) {
+		t.Fatalf("want ErrConflict, got %v", err)
+	}
+}
+
+func TestUpdateUser_UnknownUserNoOp(t *testing.T) {
+	c, _ := newTestClient(t)
+	if err := c.UpdateUser(context.Background(), "ghost", orgdirectory.UserUpdate{Email: strptr("g@x.io")}); err != nil {
+		t.Fatalf("updating an unknown user should be a no-op success: %v", err)
 	}
 }
 

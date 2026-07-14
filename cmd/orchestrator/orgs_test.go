@@ -186,6 +186,24 @@ func TestAdminUsers_SelfEnableAllowed(t *testing.T) {
 	}
 }
 
+// TestAdminUsers_SelfEditAllowed proves PATCH is intentionally NOT self-target
+// guarded: an admin editing their own profile (e.g. fixing their email) is harmless
+// — it cannot disable/delete them or touch enabled/roles — and still forwards.
+func TestAdminUsers_SelfEditAllowed(t *testing.T) {
+	mux, seen := orgForwardMux(t, adminClaims("alice", "orchestrator:write", "orchestrator:read"))
+	req := httptest.NewRequest("PATCH", "/v1/admin/users/alice", strings.NewReader(`{"email":"alice@x.io"}`))
+	req.Header.Set("Authorization", "Bearer t")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("self-edit status = %d, want 201 (forwarded)", rec.Code)
+	}
+	if len(*seen) != 1 || (*seen)[0] != "PATCH /v1/users/alice" {
+		t.Errorf("self-edit forwarded %v, want PATCH /v1/users/alice", *seen)
+	}
+}
+
 // TestAdminUsers_NonAdminForbidden proves the master-admin user lifecycle routes
 // (signup-lifecycle Phase 3) are requireAdmin-gated at the orchestrator: a
 // non-admin token is 403'd and the registry is never touched.
@@ -194,6 +212,7 @@ func TestAdminUsers_NonAdminForbidden(t *testing.T) {
 		{"GET", "/v1/admin/users"},
 		{"POST", "/v1/admin/users/bob/disable"},
 		{"POST", "/v1/admin/users/bob/enable"},
+		{"PATCH", "/v1/admin/users/bob"},
 		{"DELETE", "/v1/admin/users/bob"},
 	}
 	for _, tc := range cases {
@@ -219,6 +238,7 @@ func TestAdminUsers_AdminForwards(t *testing.T) {
 		{"GET", "/v1/admin/users", "GET /v1/users"},
 		{"POST", "/v1/admin/users/bob/disable", "POST /v1/users/bob/disable"},
 		{"POST", "/v1/admin/users/bob/enable", "POST /v1/users/bob/enable"},
+		{"PATCH", "/v1/admin/users/bob", "PATCH /v1/users/bob"},
 		{"DELETE", "/v1/admin/users/bob", "DELETE /v1/users/bob"},
 	}
 	for _, tc := range cases {

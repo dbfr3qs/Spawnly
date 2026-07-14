@@ -21,7 +21,19 @@
 // directly in the Keycloak admin console.
 package orgdirectory
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrConflict is a neutral, backend-agnostic "the requested change collides with
+// an existing record" signal an adapter may return so a control-plane handler can
+// map it to a 409 instead of a blanket 500. The Keycloak adapter returns it (via
+// errors.Is) when a UpdateUser email edit hits the realm's unique-email constraint
+// — a routine, admin-resolvable outcome, not a server fault. Kept here (the port),
+// not in the adapter, so the dependency direction holds: the registry depends on
+// this package, never on Keycloak.
+var ErrConflict = errors.New("orgdirectory: conflict")
 
 // Role values for org membership. member = ordinary member; admin = org admin.
 // These name the SpiceDB relations the registry writes (organization:<id>#member
@@ -61,8 +73,26 @@ type Member struct {
 type User struct {
 	Username      string `json:"username"`
 	Email         string `json:"email,omitempty"`
+	FirstName     string `json:"firstName,omitempty"`
+	LastName      string `json:"lastName,omitempty"`
 	Enabled       bool   `json:"enabled"`
 	DisabledByOrg string `json:"disabledByOrg,omitempty"`
+}
+
+// UserUpdate is a partial edit of a user's profile fields (master-admin edit-user,
+// account-lifecycle follow-up). Each field is a POINTER so the adapter can tell
+// "set this field to the given value" (non-nil) from "leave this field unchanged"
+// (nil) — a nil field is never written, so an edit that only changes the email
+// does not blank the names, and vice-versa. This is deliberately a neutral,
+// platform-shaped struct: NO identity-backend types leak through this port
+// (dependency-direction rule). The editable set is intentionally narrow — profile
+// fields only. It does NOT carry enabled/roles/attributes, so edit-user can never
+// be used to lift a suspension, grant a role, or touch the disabledByOrg /
+// disabledByAdmin lifecycle attributes (those flow only through Disable/EnableUser).
+type UserUpdate struct {
+	Email     *string
+	FirstName *string
+	LastName  *string
 }
 
 // Directory is the neutral organization-membership port. All methods are
@@ -134,4 +164,14 @@ type Directory interface {
 	// success). Callers settle the user's org agents + memberships FIRST (the
 	// registry choke point) — this only removes the identity.
 	DeleteUser(ctx context.Context, username string) error
+	// UpdateUser applies a PARTIAL edit of the user's profile (email/first/last
+	// name). Only the non-nil fields of attrs are written; every other field of the
+	// user — including the enabled state and the disabledByOrg/disabledByAdmin
+	// lifecycle attributes — is left exactly as-is (read-modify-write). Setting a
+	// non-empty email pins the account email-verified (this is an admin giving a
+	// user a known address — the same trust stance createUser takes); clearing the
+	// email (empty string) clears the verified flag. Idempotent; an unknown user is
+	// a no-op success. Serialized against Disable/EnableUser on the same user so a
+	// concurrent lifecycle mutation can't race the edit.
+	UpdateUser(ctx context.Context, username string, attrs UserUpdate) error
 }

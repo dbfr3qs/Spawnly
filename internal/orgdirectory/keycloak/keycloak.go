@@ -218,11 +218,13 @@ func (c *Client) resolveOrgID(ctx context.Context, alias string) (string, error)
 }
 
 type userRep struct {
-	ID       string              `json:"id"`
-	Username string              `json:"username"`
-	Email    string              `json:"email"`
-	Enabled  bool                `json:"enabled"`
-	Attrs    map[string][]string `json:"attributes,omitempty"`
+	ID        string              `json:"id"`
+	Username  string              `json:"username"`
+	Email     string              `json:"email"`
+	FirstName string              `json:"firstName"`
+	LastName  string              `json:"lastName"`
+	Enabled   bool                `json:"enabled"`
+	Attrs     map[string][]string `json:"attributes,omitempty"`
 }
 
 // resolveUserID maps a username to its Keycloak UUID. Returns ("", false, nil)
@@ -536,6 +538,8 @@ func (c *Client) ListUsers(ctx context.Context) ([]orgdirectory.User, error) {
 			out = append(out, orgdirectory.User{
 				Username:      u.Username,
 				Email:         u.Email,
+				FirstName:     u.FirstName,
+				LastName:      u.LastName,
 				Enabled:       u.Enabled,
 				DisabledByOrg: firstAttr(u.Attrs, disabledByOrgAttr),
 			})
@@ -665,6 +669,79 @@ func (c *Client) DeleteUser(ctx context.Context, username string) error {
 		return err
 	}
 	return nil
+}
+
+// UpdateUser applies a partial profile edit (master-admin edit-user). It resolves
+// the user id and read-modify-writes the FULL representation, setting ONLY the
+// non-nil fields of attrs and preserving everything else — enabled, requiredActions
+// and the disabledByOrg/disabledByAdmin lifecycle attributes are never touched, so
+// an edit can't lift a suspension or launder a ban. Runs under the same per-user
+// RMW lock as Disable/EnableUser (via editUser), so a concurrent lifecycle mutation
+// can't race and lose a suspension reason.
+//
+// email/emailVerified stance: when a non-empty email is set, emailVerified is pinned
+// true — the same trust stance createUser takes (an ADMIN provisioning a known
+// address, not a prospective user proving control of an inbox). This is what lets a
+// user created without an email — e.g. an admin-added member `bob` — receive
+// verification/reset mail once the admin gives them one. Clearing the email (empty
+// string) clears emailVerified in step, so a blank address never reads as verified.
+func (c *Client) UpdateUser(ctx context.Context, username string, attrs orgdirectory.UserUpdate) error {
+	id, found, err := c.resolveUserID(ctx, username)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return nil // unknown user => nothing to update
+	}
+	err = c.editUser(ctx, id, func(rep map[string]any) bool {
+		changed := false
+		if attrs.Email != nil {
+			if setStringField(rep, "email", *attrs.Email) {
+				changed = true
+			}
+			// Admin-set address ⇒ pre-verified (mirrors createUser); clearing it
+			// (empty) clears the flag so a blank email never reads as verified.
+			if setBoolField(rep, "emailVerified", *attrs.Email != "") {
+				changed = true
+			}
+		}
+		if attrs.FirstName != nil && setStringField(rep, "firstName", *attrs.FirstName) {
+			changed = true
+		}
+		if attrs.LastName != nil && setStringField(rep, "lastName", *attrs.LastName) {
+			changed = true
+		}
+		return changed
+	})
+	// A 409 here is the realm's unique-email constraint (another user already holds
+	// the address) — a routine, admin-resolvable outcome, not a server fault. Map it
+	// to the neutral ErrConflict so the registry can answer 409, not 500.
+	if statusIs(err, http.StatusConflict) {
+		return orgdirectory.ErrConflict
+	}
+	return err
+}
+
+// setStringField sets a top-level string field on the user rep, reporting whether
+// it changed (so an unchanged edit skips the PUT — idempotent).
+func setStringField(rep map[string]any, key, val string) bool {
+	if cur, _ := rep[key].(string); cur == val {
+		return false
+	}
+	rep[key] = val
+	return true
+}
+
+// setBoolField sets a top-level bool field on the user rep, reporting whether it
+// changed. An absent (or non-bool) field reads as false, so a no-op edit that
+// leaves the field at false skips the PUT — symmetric with setStringField.
+func setBoolField(rep map[string]any, key string, val bool) bool {
+	cur, _ := rep[key].(bool)
+	if cur == val {
+		return false
+	}
+	rep[key] = val
+	return true
 }
 
 // editUser reads the FULL user representation, applies mut (which mutates the rep

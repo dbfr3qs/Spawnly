@@ -1157,6 +1157,7 @@ func TestAdminUserRoutesGatedAtBFF(t *testing.T) {
 		{http.MethodGet, "/api/admin/users"},
 		{http.MethodPost, "/api/admin/users/bob/disable"},
 		{http.MethodPost, "/api/admin/users/bob/enable"},
+		{http.MethodPatch, "/api/admin/users/bob"},
 		{http.MethodDelete, "/api/admin/users/bob"},
 	}
 	for _, tc := range cases {
