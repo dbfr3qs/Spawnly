@@ -1532,6 +1532,14 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	mux.HandleFunc("DELETE /v1/admin/users/{username}", requireAdmin(validator, audience, writeScope, refuseSelfTarget(forwardToRegistry("DELETE", func(r *http.Request) string {
 		return "/v1/users/" + url.PathEscape(r.PathValue("username"))
 	}))))
+	// PATCH edits a user's profile (email/first/last name). requireAdmin only — NOT
+	// refuseSelfTarget: editing your own email/name is harmless (it can't disable or
+	// delete you, and cannot touch enabled/roles/lifecycle attributes), so an admin
+	// fixing their own address is allowed. The registry re-validates and is the single
+	// dual-write choke point.
+	mux.HandleFunc("PATCH /v1/admin/users/{username}", requireAdmin(validator, audience, writeScope, forwardToRegistry("PATCH", func(r *http.Request) string {
+		return "/v1/users/" + url.PathEscape(r.PathValue("username"))
+	})))
 
 	// Org SELF-SERVICE membership + settings API (multi-tenancy Phase 6). Unlike
 	// the /v1/admin/orgs family above (realm-admin only), these let an ORG ADMIN

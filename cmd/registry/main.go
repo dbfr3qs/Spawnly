@@ -2703,3 +2703,6 @@ func (disabledDirectory) EnableUser(context.Context, string, string) (bool, erro
 func (disabledDirectory) DeleteUser(context.Context, string) error {
 	return errOrgDirectoryDisabled
 }
+func (disabledDirectory) UpdateUser(context.Context, string, orgdirectory.UserUpdate) error {
+	return errOrgDirectoryDisabled
+}

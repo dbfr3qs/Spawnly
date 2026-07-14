@@ -198,13 +198,27 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
+			if isSessionGone(err) {
+				// The upstream Keycloak session is PERMANENTLY gone: the refresh
+				// token was rejected (invalid_grant) because the SSO session expired
+				// past the realm idle/max window or was revoked. Self-heal — evict
+				// our now-useless local session and clear the cookie, then 401 (same
+				// as errNoSession) so the SPA re-drives a fresh login. Without this
+				// the user is stuck getting 502s forever until they MANUALLY delete
+				// the dash_session cookie.
+				log.Printf("proxy %s %s: 401 upstream session gone (invalid_grant on refresh) — evicting local session for a fresh login: %v", method, r.URL.Path, err)
+				auth.invalidateSession(w, r)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
 			if err != nil {
-				// The session is live but a fresh access token could NOT be obtained:
-				// the refresh failed (Keycloak token endpoint unreachable from the
-				// dashboard, the SSO session expired past the realm idle/max window,
-				// or the refresh token revoked). A broken refresh looks like THIS
-				// (502), not a 401.
-				log.Printf("proxy %s %s: 502 could not obtain orchestrator token (refresh failed): %v", method, r.URL.Path, err)
+				// The session is live but a fresh access token could NOT be obtained
+				// for a TRANSIENT reason: the Keycloak token endpoint was unreachable
+				// from the dashboard (connection refused/timeout) or returned a 5xx.
+				// The upstream session may still be valid once Keycloak is back, so we
+				// KEEP the session and 502 (retryable) — a transient KC outage must
+				// NOT log the user out (only a definitive invalid_grant does, above).
+				log.Printf("proxy %s %s: 502 could not obtain orchestrator token (transient refresh failure, session preserved): %v", method, r.URL.Path, err)
 				http.Error(w, "auth unavailable", http.StatusBadGateway)
 				return
 			}
@@ -271,8 +285,22 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 			out["masterAdmin"] = getenv("MASTER_ADMIN_USERNAME", "root")
 		}
 		token, err := auth.orchestratorToken(r.Context(), r)
+		if isSessionGone(err) {
+			// The upstream Keycloak session is PERMANENTLY gone (invalid_grant on
+			// refresh). Don't render "Couldn't load your organizations" on a
+			// permanently-dead session — evict the local session + cookie and 401 so
+			// the SPA re-drives a fresh login, exactly as the proxy self-heals.
+			log.Printf("api/me: 401 upstream session gone (invalid_grant on refresh) — evicting local session for a fresh login: %v", err)
+			auth.invalidateSession(w, r)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		if err != nil {
-			log.Printf("api/me: no orchestrator token for orgs fetch: %v", err)
+			// TRANSIENT token failure (KC token endpoint unreachable / 5xx): degrade
+			// the org fields to a soft retry (orgsUnavailable) rather than bounce a
+			// still-valid session to login. Only a definitive invalid_grant (above)
+			// logs the user out.
+			log.Printf("api/me: orgs unavailable, transient orchestrator-token failure (session preserved): %v", err)
 			out["orgsUnavailable"] = true
 		} else if isAdmin {
 			// Master admin (tenant-visibility Phase 3): the switcher/directory lists
@@ -456,6 +484,9 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	})))
 	mux.Handle("DELETE /api/admin/users/{username}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		proxy("DELETE", orchestratorURL+"/v1/admin/users/"+url.PathEscape(r.PathValue("username")))(w, r)
+	})))
+	mux.Handle("PATCH /api/admin/users/{username}", auth.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxy("PATCH", orchestratorURL+"/v1/admin/users/"+url.PathEscape(r.PathValue("username")))(w, r)
 	})))
 
 	// Org SELF-SERVICE twins (multi-tenancy Phase 6). These are the ORG ADMIN's

@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/spawnly/platform/internal/orgdirectory"
 	"github.com/spawnly/platform/internal/registry"
 	"github.com/spawnly/platform/internal/spicedb"
 )
@@ -271,6 +274,127 @@ func TestUserLifecycle_RootGuardHonoursEnvOverride(t *testing.T) {
 	// The configured master admin is protected.
 	if rec := doReq(t, mux, "DELETE", "/v1/users/superadmin", nil); rec.Code != http.StatusForbidden {
 		t.Fatalf("delete superadmin = %d, want 403", rec.Code)
+	}
+}
+
+func TestUpdateUser_PartialEditPersists(t *testing.T) {
+	s := newStore()
+	dir := newFakeDirectory()
+	mux := orgMux(s, spicedb.NewMock(), dir)
+	u := dir.ensureUser("bob")
+	u.firstName = "Bobby" // must survive an email-only edit
+
+	rec := doReq(t, mux, "PATCH", "/v1/users/bob", map[string]any{"email": "bob@example.com"})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if !dir.hasCall("UpdateUser:bob") {
+		t.Fatalf("UpdateUser not called; calls=%v", dir.calls)
+	}
+	if u.email != "bob@example.com" {
+		t.Errorf("email = %q, want bob@example.com", u.email)
+	}
+	if !u.emailVerified {
+		t.Error("setting an email must pin emailVerified")
+	}
+	if u.firstName != "Bobby" {
+		t.Errorf("firstName clobbered by an email-only edit: %q", u.firstName)
+	}
+	// The edit must NOT touch the lifecycle/enabled state.
+	if !u.enabled {
+		t.Error("UpdateUser must not change enabled")
+	}
+}
+
+// TestUpdateUser_LeavesLifecycleUntouched proves an edit cannot lift a suspension:
+// a disabled, org-suspended user stays disabled + suspended across a profile edit.
+func TestUpdateUser_LeavesLifecycleUntouched(t *testing.T) {
+	s := newStore()
+	dir := newFakeDirectory()
+	mux := orgMux(s, spicedb.NewMock(), dir)
+	u := dir.ensureUser("bob")
+	u.enabled = false
+	u.disabledByOrg = []string{"acme"}
+	u.disabledByAdmin = true
+
+	if rec := doReq(t, mux, "PATCH", "/v1/users/bob", map[string]any{"firstName": "Bob"}); rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	if u.enabled {
+		t.Error("edit must not re-enable a disabled user")
+	}
+	if len(u.disabledByOrg) != 1 || u.disabledByOrg[0] != "acme" {
+		t.Errorf("disabledByOrg changed: %v", u.disabledByOrg)
+	}
+	if !u.disabledByAdmin {
+		t.Error("disabledByAdmin ban must survive an edit")
+	}
+}
+
+func TestUpdateUser_RootIsEditable(t *testing.T) {
+	s := newStore()
+	dir := newFakeDirectory()
+	mux := orgMux(s, spicedb.NewMock(), dir)
+	dir.ensureUser("root")
+	// Unlike disable/delete, editing the master-admin's email is harmless → allowed.
+	if rec := doReq(t, mux, "PATCH", "/v1/users/root", map[string]any{"email": "root@example.com"}); rec.Code != http.StatusNoContent {
+		t.Fatalf("edit root = %d, want 204; body=%s", rec.Code, rec.Body.String())
+	}
+	if dir.users["root"].email != "root@example.com" {
+		t.Errorf("root email not updated: %q", dir.users["root"].email)
+	}
+}
+
+func TestUpdateUser_Validation(t *testing.T) {
+	s := newStore()
+	dir := newFakeDirectory()
+	mux := orgMux(s, spicedb.NewMock(), dir)
+	dir.ensureUser("bob")
+
+	cases := []struct {
+		name string
+		path string
+		body any
+		want int
+	}{
+		{"invalid username", "/v1/users/bad%20user", map[string]any{"email": "a@b.io"}, http.StatusBadRequest},
+		{"malformed email", "/v1/users/bob", map[string]any{"email": "not-an-email"}, http.StatusBadRequest},
+		{"display-name email rejected", "/v1/users/bob", map[string]any{"email": "Bob <bob@x.io>"}, http.StatusBadRequest},
+		{"empty email clears (allowed)", "/v1/users/bob", map[string]any{"email": ""}, http.StatusNoContent},
+		{"names only ok", "/v1/users/bob", map[string]any{"firstName": "Bob", "lastName": "Jones"}, http.StatusNoContent},
+		// An unknown field (e.g. a smuggled lifecycle field) is rejected, not ignored —
+		// DisallowUnknownFields defends the "edit can't touch enabled/attributes" contract.
+		{"unknown field rejected", "/v1/users/bob", map[string]any{"enabled": true}, http.StatusBadRequest},
+		{"no fields to update", "/v1/users/bob", map[string]any{}, http.StatusBadRequest},
+		{"over-long name", "/v1/users/bob", map[string]any{"firstName": strings.Repeat("x", 256)}, http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if rec := doReq(t, mux, "PATCH", tc.path, tc.body); rec.Code != tc.want {
+				t.Errorf("status = %d, want %d; body=%s", rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+	// A missing/empty body is a 400 (a PATCH with nothing is a client error).
+	req := httptest.NewRequest("PATCH", "/v1/users/bob", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("empty body = %d, want 400", rec.Code)
+	}
+}
+
+// TestUpdateUser_EmailConflictIs409 proves a unique-email collision surfaced by
+// the directory (ErrConflict) is mapped to 409, not an opaque 500.
+func TestUpdateUser_EmailConflictIs409(t *testing.T) {
+	s := newStore()
+	dir := newFakeDirectory()
+	dir.failUpdateUser = orgdirectory.ErrConflict
+	mux := orgMux(s, spicedb.NewMock(), dir)
+	dir.ensureUser("bob")
+	rec := doReq(t, mux, "PATCH", "/v1/users/bob", map[string]any{"email": "taken@example.com"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
 	}
 }
 

@@ -818,6 +818,50 @@ func (a *Authenticator) orchestratorToken(ctx context.Context, r *http.Request) 
 	return tok.AccessToken, nil
 }
 
+// isSessionGone reports whether an orchestratorToken (refresh) error means the
+// upstream Keycloak session is PERMANENTLY gone — as opposed to a TRANSIENT
+// failure where the session may still be valid once Keycloak is reachable
+// again. Only a definitive oauth2 invalid_grant counts: Keycloak returns
+// `{"error":"invalid_grant"}` (descriptions like "Session not active" / "Token
+// is not active") when the SSO session expired past the realm idle/max window
+// or the refresh token was revoked/expired. It is surfaced as an
+// *oauth2.RetrieveError with ErrorCode=="invalid_grant" (see retrieveToken),
+// which errors.As finds through orchestratorToken's %w wrap.
+//
+// A transient failure is deliberately NOT session-gone: a connection
+// refused/timeout is not a *oauth2.RetrieveError at all, and a 5xx from the
+// token endpoint is a RetrieveError whose ErrorCode is "" (no RFC-6749 error
+// body) — so both fall through to false and the caller PRESERVES the session
+// (retryable 502) rather than logging the user out on a blip. Being this
+// precise is the whole safety property: only invalid_grant evicts a session.
+func isSessionGone(err error) bool {
+	if err == nil {
+		return false
+	}
+	var re *oauth2.RetrieveError
+	if errors.As(err, &re) {
+		return re.ErrorCode == "invalid_grant"
+	}
+	return false
+}
+
+// invalidateSession tears down the request's dashboard session locally: it
+// evicts the in-memory session entry and clears the dash_session cookie — the
+// same local teardown handleLogout does (minus the IdP end_session round-trip,
+// which is moot here because the upstream Keycloak session is already gone).
+// Used to self-heal a dead upstream session (invalidateSession is called only
+// after isSessionGone): removing the now-unrefreshable local session makes the
+// SPA's next request re-drive a fresh login (via the 401 path) instead of the
+// user being stuck on 502s until they manually delete the cookie.
+func (a *Authenticator) invalidateSession(w http.ResponseWriter, r *http.Request) {
+	if sid, err := r.Cookie(sessionCookie); err == nil && sid.Value != "" {
+		a.mu.Lock()
+		delete(a.sessions, sid.Value)
+		a.mu.Unlock()
+	}
+	clearCookie(w, sessionCookie, forwardedHTTPS(r))
+}
+
 // user returns the logged-in username for the request, if any. It slides the
 // session's idle window (page navigations count as activity).
 func (a *Authenticator) user(r *http.Request) (string, bool) {

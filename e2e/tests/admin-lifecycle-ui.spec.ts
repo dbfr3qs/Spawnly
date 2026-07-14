@@ -194,6 +194,30 @@ test.describe('master-admin lifecycle UI', () => {
       await expect(rootRow.locator('[data-testid="disable-user-btn"]')).toHaveCount(0);
       await expect(rootRow.locator('[data-testid="delete-user-btn"]')).toHaveCount(0);
 
+      // ── (edit-user) Edit the user's email via the UI → it persists ──────────
+      // The Edit dialog pre-fills the current profile; change the email + first name
+      // and confirm the change round-trips (re-read via the admin directory).
+      const newEmail = `edited-${suffix}@example.test`;
+      await userRow.locator('[data-testid="edit-user-btn"]').click();
+      const editModal = root.locator('#edit-user-modal');
+      await expect(editModal).toBeVisible();
+      await expect(root.locator('[data-testid="edit-user-email"]')).toHaveValue(email);
+      await root.locator('[data-testid="edit-user-email"]').fill(newEmail);
+      await root.locator('[data-testid="edit-user-first"]').fill('Edited');
+      await root.locator('[data-testid="edit-user-confirm"]').click();
+      await expect(editModal).toBeHidden({ timeout: 30_000 });
+      // Persisted: the admin directory now reports the new email for this user.
+      await expect
+        .poll(async () => {
+          const resp = await root.request.get('/api/admin/users');
+          if (!resp.ok()) return '';
+          const users: Array<{ username?: string; email?: string }> = await resp.json();
+          return users.find((u) => u.username === username)?.email ?? '';
+        }, { timeout: 30_000 })
+        .toBe(newEmail);
+      // The row's email cell repaints to the new value too.
+      await expect(userRow.locator('td').nth(1)).toHaveText(newEmail, { timeout: 30_000 });
+
       // ── (B) Self-disable is refused server-side (account-lifecycle item B) ───
       // The UI hides the button; prove the curl path is closed too. root's own
       // disable/delete must 403 at the orchestrator (caller≠target guard), so a

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/mail"
 	"strings"
 
 	"github.com/spawnly/platform/internal/orgdirectory"
@@ -34,6 +35,80 @@ func registerUserRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client
 			return
 		}
 		writeJSON(w, users)
+	}))
+
+	// PATCH /v1/users/{username} — partial profile edit (master-admin edit-user,
+	// account-lifecycle follow-up). Decodes {email?, firstName?, lastName?} where an
+	// ABSENT field (JSON key omitted) leaves that field unchanged and a present field
+	// (even "") is set — the *string pointers carry the omit-vs-set distinction all
+	// the way to the adapter's read-modify-write, so an email-only edit never blanks
+	// the names. Only profile fields are editable: this route cannot touch enabled,
+	// roles, or the disabledByOrg/disabledByAdmin lifecycle attributes, so it can
+	// never lift a suspension or grant privilege (those flow only through the
+	// disable/enable/member routes). The master-admin `root` account IS editable
+	// (fixing its email is harmless — no root guard here, unlike disable/delete).
+	mux.HandleFunc("PATCH /v1/users/{username}", cp(func(w http.ResponseWriter, r *http.Request) {
+		username := r.PathValue("username")
+		if !registry.ValidUserID(username) {
+			http.Error(w, "invalid user", http.StatusBadRequest)
+			return
+		}
+		var body struct {
+			Email     *string `json:"email"`
+			FirstName *string `json:"firstName"`
+			LastName  *string `json:"lastName"`
+		}
+		// Body is REQUIRED and must be well-formed JSON (unlike the optional-body
+		// disable). DisallowUnknownFields fails loud on any field outside the editable
+		// profile set — so a caller that tries to smuggle {"enabled":true} or
+		// {"attributes":...} through this route is REJECTED (a 400), not silently
+		// 204'd having changed nothing. This actively defends the "edit can't touch the
+		// lifecycle state" contract rather than relying on the decoder ignoring extras.
+		dec := json.NewDecoder(r.Body)
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&body); err != nil {
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+		// A PATCH that sets NO field is a client error, not a silent no-op — reject it
+		// before touching Keycloak (matches the handler's stated intent).
+		if body.Email == nil && body.FirstName == nil && body.LastName == nil {
+			http.Error(w, "no fields to update", http.StatusBadRequest)
+			return
+		}
+		// Bound each field so an over-long value fails fast with a 400 rather than
+		// tripping Keycloak's column limits and surfacing as an opaque 500. 255 mirrors
+		// Keycloak's user-attribute column width; names get the same generous cap.
+		if tooLong(body.Email, 255) || tooLong(body.FirstName, 255) || tooLong(body.LastName, 255) {
+			http.Error(w, "field too long", http.StatusBadRequest)
+			return
+		}
+		// Validate the email format when a NON-EMPTY email is supplied; an empty string
+		// is the explicit "clear the email" edit and is allowed. mail.ParseAddress also
+		// rejects a display-name form ("Bob <b@x>") so only a bare address is accepted.
+		if body.Email != nil && *body.Email != "" {
+			addr, err := mail.ParseAddress(*body.Email)
+			if err != nil || addr.Name != "" || addr.Address != *body.Email {
+				http.Error(w, "invalid email", http.StatusBadRequest)
+				return
+			}
+		}
+		if err := dir.UpdateUser(r.Context(), username, orgdirectory.UserUpdate{
+			Email:     body.Email,
+			FirstName: body.FirstName,
+			LastName:  body.LastName,
+		}); err != nil {
+			// A unique-email collision is a routine, admin-resolvable outcome → 409, not
+			// a 500. Everything else is a genuine failure.
+			if errors.Is(err, orgdirectory.ErrConflict) {
+				http.Error(w, "email already in use", http.StatusConflict)
+				return
+			}
+			log.Printf("update user %s: %v", username, err)
+			http.Error(w, "update failed", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	}))
 
 	// POST /v1/users/{username}/disable — block login + revoke sessions, and
@@ -159,6 +234,12 @@ func registerUserRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
+}
+
+// tooLong reports whether a supplied (non-nil) string field exceeds max runes. A
+// nil field (absent from the PATCH) is never too long.
+func tooLong(s *string, max int) bool {
+	return s != nil && len([]rune(*s)) > max
 }
 
 // isMasterAdmin reports whether username is the protected platform master-admin
