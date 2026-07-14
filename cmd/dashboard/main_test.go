@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -179,6 +180,215 @@ func TestProxyAttachesBearerNoUserID(t *testing.T) {
 	}
 	if gotCookie != "" {
 		t.Errorf("browser cookie leaked upstream: %q", gotCookie)
+	}
+}
+
+// invalidGrantServer is a token endpoint that always rejects the refresh with
+// RFC-6749 invalid_grant (400) — Keycloak's response when the SSO session is
+// gone / the refresh token was revoked. oauth2 surfaces it as an
+// *oauth2.RetrieveError{ErrorCode:"invalid_grant"} (the session-gone signal).
+func invalidGrantServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":"invalid_grant","error_description":"Session not active"}`))
+	}))
+}
+
+// transientTokenServer is a token endpoint that fails the refresh with a 5xx —
+// a TRANSIENT failure (Keycloak momentarily unhappy). oauth2 surfaces it as an
+// *oauth2.RetrieveError with an EMPTY ErrorCode (no RFC-6749 error body), which
+// is NOT session-gone, so the session must be preserved.
+func transientTokenServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "keycloak having a moment", http.StatusServiceUnavailable)
+	}))
+}
+
+// refreshingSession builds a session whose token source is EXPIRED, so the next
+// orchestratorToken forces a refresh against tokenURL (the test's token server).
+func refreshingSession(tokenURL string, isAdmin bool) session {
+	oauth := &oauth2.Config{ClientID: "dashboard", ClientSecret: "secret", Endpoint: oauth2.Endpoint{TokenURL: tokenURL}}
+	return session{
+		username: "alice", isAdmin: isAdmin,
+		tokenSrc:  oauth.TokenSource(context.Background(), &oauth2.Token{AccessToken: "at-old", RefreshToken: "rt-1", Expiry: time.Now().Add(-time.Minute)}),
+		expiresAt: time.Now().Add(time.Hour),
+	}
+}
+
+// cookieCleared reports whether the response cleared the dash_session cookie
+// (MaxAge<0 — the eviction signal).
+func cookieCleared(rec *httptest.ResponseRecorder) bool {
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookie && c.MaxAge < 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// TestIsSessionGoneClassifies pins the transient-vs-session-gone classification
+// — the safety property of the whole fix. ONLY a definitive oauth2 invalid_grant
+// (however wrapped) is session-gone; a 5xx, a connection error, errNoSession, a
+// non-invalid_grant oauth error, and nil are all NOT — so a transient outage can
+// never evict a session.
+func TestIsSessionGoneClassifies(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"invalid_grant", &oauth2.RetrieveError{ErrorCode: "invalid_grant"}, true},
+		{"invalid_grant wrapped", fmt.Errorf("refresh orchestrator token: %w", &oauth2.RetrieveError{ErrorCode: "invalid_grant"}), true},
+		{"5xx (empty ErrorCode)", &oauth2.RetrieveError{ErrorCode: ""}, false},
+		{"other oauth error", &oauth2.RetrieveError{ErrorCode: "invalid_client"}, false},
+		{"connection error", fmt.Errorf("dial tcp: connection refused"), false},
+		{"errNoSession", errNoSession, false},
+		{"nil", nil, false},
+	}
+	for _, tc := range cases {
+		if got := isSessionGone(tc.err); got != tc.want {
+			t.Errorf("%s: isSessionGone = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestProxySessionGoneSelfHeals: when the refresh fails with invalid_grant (the
+// upstream Keycloak session is gone), the proxy evicts the local session, clears
+// the dash_session cookie, and returns 401 — so the SPA re-drives a fresh login
+// instead of the user being stuck on 502s. The orchestrator is never called.
+func TestProxySessionGoneSelfHeals(t *testing.T) {
+	kc := invalidGrantServer(t)
+	defer kc.Close()
+
+	var orchHits int
+	orch := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { orchHits++ }))
+	defer orch.Close()
+
+	a := stubAuth(&oauth2.Config{})
+	a.sessions["sid"] = refreshingSession(kc.URL+"/token", false)
+	mux := buildMux(a, orch.URL, "http://keycloak:8080", "http://docs", fstest.MapFS{})
+
+	req := httptest.NewRequest("GET", "/api/agents", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "sid"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (session-gone self-heal)", rec.Code)
+	}
+	if !cookieCleared(rec) {
+		t.Error("dash_session cookie was not cleared on a session-gone refresh")
+	}
+	a.mu.Lock()
+	_, present := a.sessions["sid"]
+	a.mu.Unlock()
+	if present {
+		t.Error("session must be evicted from the in-memory store on a session-gone refresh")
+	}
+	if orchHits != 0 {
+		t.Errorf("orchestrator hit %d times, want 0 (no token to forward)", orchHits)
+	}
+}
+
+// TestProxyTransientRefreshPreservesSession: when the refresh fails TRANSIENTLY
+// (5xx / unreachable token endpoint), the proxy returns 502 (retryable) and MUST
+// keep the session + cookie — a transient Keycloak outage must never log the user
+// out.
+func TestProxyTransientRefreshPreservesSession(t *testing.T) {
+	kc := transientTokenServer(t)
+	defer kc.Close()
+
+	a := stubAuth(&oauth2.Config{})
+	a.sessions["sid"] = refreshingSession(kc.URL+"/token", false)
+	mux := buildMux(a, "http://orch.invalid", "http://keycloak:8080", "http://docs", fstest.MapFS{})
+
+	req := httptest.NewRequest("GET", "/api/agents", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "sid"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (transient, retryable)", rec.Code)
+	}
+	if cookieCleared(rec) {
+		t.Error("transient refresh failure must NOT clear the dash_session cookie")
+	}
+	a.mu.Lock()
+	_, present := a.sessions["sid"]
+	a.mu.Unlock()
+	if !present {
+		t.Error("transient refresh failure must PRESERVE the session (no logout on a KC blip)")
+	}
+}
+
+// TestApiMeSessionGoneSelfHeals: /api/me applies the same self-heal — a
+// session-gone (invalid_grant) refresh evicts the session, clears the cookie,
+// and 401s (so the SPA re-drives login) rather than rendering the org fields on a
+// permanently-dead session.
+func TestApiMeSessionGoneSelfHeals(t *testing.T) {
+	kc := invalidGrantServer(t)
+	defer kc.Close()
+
+	a := stubAuth(&oauth2.Config{})
+	a.sessions["sid"] = refreshingSession(kc.URL+"/token", false)
+	mux := buildMux(a, "http://orch.invalid", "http://keycloak:8080", "http://docs", fstest.MapFS{})
+
+	req := httptest.NewRequest("GET", "/api/me", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "sid"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (session-gone self-heal)", rec.Code)
+	}
+	if !cookieCleared(rec) {
+		t.Error("/api/me session-gone must clear the dash_session cookie")
+	}
+	a.mu.Lock()
+	_, present := a.sessions["sid"]
+	a.mu.Unlock()
+	if present {
+		t.Error("/api/me session-gone must evict the in-memory session")
+	}
+}
+
+// TestApiMeTransientTokenFailureDegrades: a TRANSIENT token-refresh failure on
+// /api/me degrades to orgsUnavailable=true (soft retry) with the session intact —
+// it must NOT log the user out. Distinct from TestApiMeDegradesWhenOrchestratorDown
+// (where the token is valid but the orgs fetch fails); here the token REFRESH itself
+// fails transiently.
+func TestApiMeTransientTokenFailureDegrades(t *testing.T) {
+	kc := transientTokenServer(t)
+	defer kc.Close()
+
+	a := stubAuth(&oauth2.Config{})
+	a.sessions["sid"] = refreshingSession(kc.URL+"/token", false)
+	mux := buildMux(a, "http://orch.invalid", "http://keycloak:8080", "http://docs", fstest.MapFS{})
+
+	req := httptest.NewRequest("GET", "/api/me", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: "sid"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (degrade, not logout)", rec.Code)
+	}
+	var got map[string]any
+	json.NewDecoder(rec.Body).Decode(&got)
+	if got["orgsUnavailable"] != true {
+		t.Errorf("orgsUnavailable = %v, want true (transient token failure)", got["orgsUnavailable"])
+	}
+	if cookieCleared(rec) {
+		t.Error("transient /api/me token failure must NOT clear the cookie")
+	}
+	a.mu.Lock()
+	_, present := a.sessions["sid"]
+	a.mu.Unlock()
+	if !present {
+		t.Error("transient /api/me token failure must preserve the session")
 	}
 }
 
