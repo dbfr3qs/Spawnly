@@ -7,10 +7,11 @@
   "containerEnv": {
     "CLAUDE_CONFIG_DIR": "/home/vscode/.claude"
   },
-  "forwardPorts": [8090, 8080, 4321],
+  "forwardPorts": [8090, 8080, 8025, 4321],
   "portsAttributes": {
     "8090": { "label": "dashboard", "onAutoForward": "silent" },
     "8080": { "label": "orchestrator", "onAutoForward": "silent" },
+    "8025": { "label": "mailpit (email)", "onAutoForward": "silent" },
     "4321": { "label": "docs (astro)", "onAutoForward": "silent" }
   },
   "features": {
