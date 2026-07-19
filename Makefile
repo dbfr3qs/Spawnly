@@ -18,7 +18,7 @@ EXTRA_AGENTS  := keycloak weather-monitor
 MCP_SERVERS   := travel-tools
 SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS) $(EXTRA_AGENTS) $(MCP_SERVERS)
 
-.PHONY: build test test-provider test-dynamodb docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed reseed-orgs print-% e2e-setup e2e-anchor-setup e2e e2e-subdomains mobile-dev tls-mimic tls-mimic-down
+.PHONY: build test test-provider test-dynamodb docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward mailpit kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed reseed-orgs print-% e2e-setup e2e-anchor-setup e2e e2e-subdomains mobile-dev tls-mimic tls-mimic-down
 
 # print-<VAR> — echo a make variable so shell scripts can read the authoritative
 # lists instead of re-declaring them. e.g. `make -s print-SERVICES`.
@@ -158,6 +158,14 @@ reseed-orgs:
 port-forward:
 	@echo "Dashboard → http://localhost:8090  (Ctrl+C to stop)"
 	@while true; do kubectl port-forward svc/dashboard 8090:8080; sleep 1; done
+
+# mailpit — port-forward the dev mail sink's web inbox so local signup
+# email-verification mail is viewable at http://localhost:8025. Dev sends through
+# the in-cluster Mailpit sink (not SES); 8025 is forwarded to the host in
+# .devcontainer/devcontainer.json. Reconnecting loop survives brief drops.
+mailpit:
+	@echo "Mailpit inbox → http://localhost:8025  (Ctrl+C to stop)"
+	@while true; do kubectl port-forward svc/mailpit 8025:8025; sleep 1; done
 
 # kubeconfig — repair the kubeconfig after a Docker/Kind restart. Restores the
 # cluster CA and, inside a devcontainer (where 127.0.0.1 can't reach Kind),

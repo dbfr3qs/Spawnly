@@ -4,20 +4,27 @@ set -euo pipefail
 
 DASHBOARD_PORT=8090
 ORCH_PORT=8080
+MAILPIT_PORT=8025
 
 echo "==> Cleaning up any stale port-forwards..."
 pkill -f "kubectl port-forward" 2>/dev/null || true
 sleep 1
 
-echo "==> Port-forwarding orchestrator (localhost:${ORCH_PORT}) and dashboard (localhost:${DASHBOARD_PORT})..."
+echo "==> Port-forwarding orchestrator (localhost:${ORCH_PORT}), dashboard (localhost:${DASHBOARD_PORT}), mailpit (localhost:${MAILPIT_PORT})..."
 kubectl port-forward svc/orchestrator ${ORCH_PORT}:8080 &
 PF_ORCH=$!
 kubectl port-forward svc/dashboard ${DASHBOARD_PORT}:8080 &
 PF_DASH=$!
+# Mailpit's web inbox: local signup email-verification mail lands here (dev sends
+# through the in-cluster Mailpit sink, not SES). 8025 is forwarded to the host in
+# .devcontainer/devcontainer.json so it's reachable from the host browser.
+kubectl port-forward svc/mailpit ${MAILPIT_PORT}:8025 &
+PF_MAIL=$!
 sleep 2
 
 echo ""
-echo "  Dashboard: http://localhost:${DASHBOARD_PORT}"
+echo "  Dashboard:     http://localhost:${DASHBOARD_PORT}"
+echo "  Mailpit inbox: http://localhost:${MAILPIT_PORT}"
 echo ""
 
 echo "==> Spawning demo agent (chain-worker) with task 'hello from the demo'..."
@@ -67,8 +74,10 @@ echo "  Click on '${AGENT_ID}' to see the full event timeline,"
 echo "  including decoded JWT tokens, SpiceDB relations, and API calls."
 echo "================================================================"
 echo ""
+echo "  Mailpit inbox: http://localhost:${MAILPIT_PORT}"
+echo ""
 echo "Port-forwards are still running. Press Ctrl+C or run:"
 echo "  pkill -f 'kubectl port-forward'"
 
 # Keep port-forwards alive until user exits
-wait $PF_ORCH $PF_DASH
+wait $PF_ORCH $PF_DASH $PF_MAIL
