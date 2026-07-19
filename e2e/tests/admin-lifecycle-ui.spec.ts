@@ -300,6 +300,19 @@ test.describe('master-admin lifecycle UI', () => {
       await expect(userRow).toHaveCount(0, { timeout: 30_000 });
       expect(await attemptLogin(browser, username, password)).toBe('blocked');
 
+      // ── (10) Delete the ORG via the UI → gated on disabled, then card removed ─
+      // Delete is offered only once the org is disabled (mirrors the type-delete
+      // "disable before delete" gate): no delete-org-btn while enabled.
+      await expect(orgCard.locator('[data-testid="delete-org-btn"]')).toHaveCount(0);
+      await orgCard.locator('[data-testid="disable-org-btn"]').click();
+      await expect(confirmModal).toBeVisible();
+      await root.locator('[data-testid="confirm-ok"]').click();
+      await expect(orgCard.locator('[data-testid="org-disabled-badge"]')).toBeVisible({ timeout: 30_000 });
+      await orgCard.locator('[data-testid="delete-org-btn"]').click();
+      await expect(confirmModal).toBeVisible();
+      await root.locator('[data-testid="confirm-ok"]').click();
+      await expect(orgCard).toHaveCount(0, { timeout: 30_000 });
+
       // ── (11) A non-admin session sees no admin area + is 403'd directly ─────
       const viewerCtx = await contextFor(browser, 'viewer', 'acme');
       try {
