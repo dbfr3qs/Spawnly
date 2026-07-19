@@ -410,6 +410,34 @@ func TestCreateOrg_HappyPath(t *testing.T) {
 	}
 }
 
+// TestCreateOrg_NameConflictReturns409 proves a duplicate display name (surfaced by
+// the directory as orgdirectory.ErrConflict) becomes a 409 with a clear, JSON
+// message the create dialogs can render — not the generic 500 a blanket directory
+// error would produce.
+func TestCreateOrg_NameConflictReturns409(t *testing.T) {
+	s := newStore()
+	sdb := spicedb.NewMock()
+	dir := newFakeDirectory()
+	dir.failCreateOrg = orgdirectory.ErrConflict
+	mux := orgMux(s, sdb, dir)
+
+	rec := doReq(t, mux, "POST", "/v1/orgs", map[string]string{"name": "Acme", "adminUser": "alice"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct{ Error string }
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("body not JSON: %v (%s)", err, rec.Body.String())
+	}
+	if !strings.Contains(got.Error, "Acme") || !strings.Contains(got.Error, "already exists") {
+		t.Fatalf("error message = %q, want it to name the org and say it exists", got.Error)
+	}
+	// No half-written org: CreateOrg fails before the store write, so nothing lands.
+	if orgs, _ := s.ListOrgs(context.Background()); len(orgs) != 0 {
+		t.Fatalf("no org should be written on name conflict, got %d", len(orgs))
+	}
+}
+
 func TestCreateOrg_Idempotent(t *testing.T) {
 	s := newStore()
 	sdb := spicedb.NewMock()

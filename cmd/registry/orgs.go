@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -191,6 +192,18 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 
 		// Step 1: Keycloak organization (idempotent).
 		if err := dir.CreateOrg(ctx, body.OrgID, body.Name); err != nil {
+			// A different org already holds this display name (Keycloak enforces unique
+			// org names). Surface a clear 409 the create dialogs can show, not the
+			// generic 500 below. JSON so both create UIs (self-serve + admin) render it
+			// via their {"error":...} path.
+			if errors.Is(err, orgdirectory.ErrConflict) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"error": fmt.Sprintf("An organization named %q already exists.", body.Name),
+				})
+				return
+			}
 			log.Printf("org create: keycloak CreateOrg %s failed: %v", body.OrgID, err)
 			http.Error(w, "org create failed", http.StatusInternalServerError)
 			return

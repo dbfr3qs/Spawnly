@@ -3555,9 +3555,15 @@
     }
     const actions = document.createElement('div');
     actions.className = 'row-actions';
-    actions.appendChild(disabled
-      ? lifecycleBtn('Enable org', 'btn-ghost', 'enable-org', orgId)
-      : lifecycleBtn('Disable org', 'btn-warn', 'disable-org', orgId));
+    if (disabled) {
+      // Delete is offered only once an org is disabled (mirrors the "disable before
+      // delete" gate on agent types) so an active org — with members and running
+      // agents — can't be destroyed in one click.
+      actions.appendChild(lifecycleBtn('Enable org', 'btn-ghost', 'enable-org', orgId));
+      actions.appendChild(lifecycleBtn('Delete org', 'btn-danger', 'delete-org', orgId));
+    } else {
+      actions.appendChild(lifecycleBtn('Disable org', 'btn-warn', 'disable-org', orgId));
+    }
     foot.appendChild(actions);
     card.appendChild(foot);
     return card;
@@ -3613,6 +3619,19 @@
         const r = await fetch(`/api/admin/orgs/${enc(orgId)}/enable`, { method: 'POST' });
         if (!r.ok) throw new Error(`enable org: ${r.status}`);
         showToast('Organization enabled. Members it disabled can log in again; agents stay suspended.');
+      } else if (act === 'delete-org') {
+        const ok = await openConfirm({
+          title: 'Delete organization',
+          body: 'Permanently delete this organization? This removes the org and all of '
+              + 'its memberships. Members disabled solely by this org are re-enabled; '
+              + 'agents already suspended are not restored. This cannot be undone.',
+          confirmLabel: 'Delete org',
+          variant: 'btn-danger',
+        });
+        if (!ok) return;
+        const r = await fetch(`/api/admin/orgs/${enc(orgId)}`, { method: 'DELETE' });
+        if (!r.ok) throw new Error(`delete org: ${r.status}`);
+        showToast('Organization deleted.');
       } else {
         return;
       }

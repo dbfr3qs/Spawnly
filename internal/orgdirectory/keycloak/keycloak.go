@@ -331,9 +331,26 @@ func (c *Client) CreateOrg(ctx context.Context, orgID, name string) error {
 	}
 	body := map[string]any{"name": name, "alias": orgID}
 	if err := c.do(ctx, http.MethodPost, c.adminURL("/organizations"), body, nil); err != nil {
-		// A racing create (409) means the org now exists — converge to success.
 		if statusIs(err, http.StatusConflict) {
-			return nil
+			// We confirmed above this alias didn't exist, so a 409 is one of two
+			// things (Keycloak enforces BOTH name and alias unique): (a) a racing
+			// create of THIS alias, or (b) a DIFFERENT org already holds this display
+			// name. Re-resolve to tell them apart.
+			id, rerr := c.resolveOrgID(ctx, orgID)
+			if rerr != nil {
+				// Ambiguous — a failed readback can't confirm a name collision, so
+				// surface the error (a retryable 500) rather than a misleading
+				// "name already exists".
+				return rerr
+			}
+			if id != "" {
+				// Our alias now exists — the racing create was ours; converge.
+				return nil
+			}
+			// Alias absent → the collision is on the name: an admin-resolvable
+			// conflict (not a server fault). Surface the neutral ErrConflict so the
+			// registry answers 409 with a clear message.
+			return orgdirectory.ErrConflict
 		}
 		return err
 	}

@@ -156,9 +156,16 @@ func (f *fakeKC) handler() http.Handler {
 		case http.MethodPost:
 			var body struct{ Name, Alias string }
 			json.NewDecoder(r.Body).Decode(&body)
+			// Keycloak enforces BOTH alias and name unique within a realm.
 			if f.orgByAlias(body.Alias) != nil {
 				w.WriteHeader(http.StatusConflict)
 				return
+			}
+			for _, o := range f.orgs {
+				if o.name == body.Name {
+					w.WriteHeader(http.StatusConflict)
+					return
+				}
 			}
 			o := &fakeOrg{id: f.newID("org"), alias: body.Alias, name: body.Name, members: map[string]bool{}}
 			f.orgs[o.id] = o
@@ -427,6 +434,28 @@ func TestCreateOrg_Idempotent(t *testing.T) {
 	// Token was minted once and reused across all calls.
 	if f.tokens != 1 {
 		t.Fatalf("expected 1 token mint (cached), got %d", f.tokens)
+	}
+}
+
+// TestCreateOrg_NameCollisionMapsToErrConflict proves that creating an org whose
+// display NAME is already taken by a DIFFERENT org (a fresh, unused alias) surfaces
+// the neutral orgdirectory.ErrConflict — so the registry answers a clear 409 rather
+// than the generic 500 a blanket 409-swallow used to cause. This is distinct from
+// the alias idempotency above (same alias → converge to success).
+func TestCreateOrg_NameCollisionMapsToErrConflict(t *testing.T) {
+	c, f := newTestClient(t)
+	ctx := context.Background()
+	if err := c.CreateOrg(ctx, "acme", "Acme"); err != nil {
+		t.Fatalf("seed create: %v", err)
+	}
+	// Same NAME, brand-new alias → Keycloak 409 on the name; the alias readback finds
+	// nothing, so it must be reported as a conflict, not swallowed as success.
+	err := c.CreateOrg(ctx, "acme-two", "Acme")
+	if !errors.Is(err, orgdirectory.ErrConflict) {
+		t.Fatalf("want ErrConflict, got %v", err)
+	}
+	if o := f.orgByAlias("acme-two"); o != nil {
+		t.Fatalf("collided org should not have been created: %+v", o)
 	}
 }
 
