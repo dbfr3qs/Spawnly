@@ -56,7 +56,15 @@ import (
 //
 // scripts/substrate-spire-x509pop.sh injects this verbatim into the server
 // config, and NodeSpiffePath computes the resulting id for entry parenting.
-const NodeAttestorPathTemplate = "/spire/agent/x509pop/org/{{ .Subject.CommonName }}/{{ .Fingerprint }}"
+//
+// IMPORTANT: the template must NOT itself begin with "/spire/agent" — SPIRE
+// already roots every attested NODE id at spiffe://<td>/spire/agent and appends
+// the rendered template to it. Including the prefix here produced a DOUBLED id
+// (spiffe://<td>/spire/agent/spire/agent/x509pop/org/...) that matched nothing
+// NodeSpiffePathPrefix built, so no node was ever found for entry parenting and
+// the whole live dispatch path silently failed. See TestNodeAttestorPathTemplate_
+// NoSpireAgentPrefix — the regression guard.
+const NodeAttestorPathTemplate = "/x509pop/org/{{ .Subject.CommonName }}/{{ .Fingerprint }}"
 
 // NodeSpiffePathPrefix returns the org-scoped prefix of the node SPIFFE ID the
 // x509pop server assigns via NodeAttestorPathTemplate, up to (but excluding) the

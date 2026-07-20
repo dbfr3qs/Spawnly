@@ -90,20 +90,33 @@ spec:
 YAML
 kubectl -n "$SUBSTRATE_NS" wait --for=condition=Ready "pod/${POD}" --timeout=90s
 
-# X509-SVID identity: assert the SPIFFE ID equals the org-scoped path.
-GOT_ID="$(kubectl -n "$SUBSTRATE_NS" exec "$POD" -c probe -- \
-  /opt/spire/bin/spire-agent api fetch x509 -socketPath /spiffe-workload-api/spire-agent.sock 2>/dev/null \
-  | grep -oE "spiffe://${TD}/org/${ORG}/agent/\S+" | head -1 || true)"
+# X509-SVID identity: assert the SPIFFE ID equals the org-scoped path. POLL — the
+# registration entry was created moments ago and SPIRE must propagate it to the
+# agent before the workload API issues on it; a single-shot fetch races that and
+# reports a misleading "<none>".
+GOT_ID=""
+for _ in $(seq 1 30); do
+  GOT_ID="$(kubectl -n "$SUBSTRATE_NS" exec "$POD" -c probe -- \
+    /opt/spire/bin/spire-agent api fetch x509 -socketPath /spiffe-workload-api/spire-agent.sock 2>/dev/null \
+    | grep -oE "spiffe://${TD}/org/${ORG}/agent/\S+" | head -1 || true)"
+  [ -n "$GOT_ID" ] && break
+  sleep 2
+done
 [ "$GOT_ID" = "$AGENT_PATH" ] || fail "pod SVID id ${GOT_ID:-<none>} != expected ${AGENT_PATH}"
 echo "    pod SVID id: ${GOT_ID}"
 
 # JWT-SVID → Phase-1 Go verifier (real registry path). Port-forward the OIDC JWKS.
 echo "==> verifying the SVID through the Phase-1 Go verifier (cmd/substrate-verify)..."
-TOKEN="$(kubectl -n "$SUBSTRATE_NS" exec "$POD" -c probe -- \
-  /opt/spire/bin/spire-agent api fetch jwt -audience registry \
-  -socketPath /spiffe-workload-api/spire-agent.sock 2>/dev/null \
-  | sed -n '2p' | tr -d '[:space:]')"
-[ -n "$TOKEN" ] || fail "could not fetch a JWT-SVID from the proof pod"
+TOKEN=""
+for _ in $(seq 1 30); do
+  TOKEN="$(kubectl -n "$SUBSTRATE_NS" exec "$POD" -c probe -- \
+    /opt/spire/bin/spire-agent api fetch jwt -audience registry \
+    -socketPath /spiffe-workload-api/spire-agent.sock 2>/dev/null \
+    | sed -n '2p' | tr -d '[:space:]' || true)"
+  [ -n "$TOKEN" ] && break
+  sleep 2
+done
+[ -n "$TOKEN" ] || fail "could not fetch a JWT-SVID from the proof pod (entry may not have propagated)"
 
 JWKS_PORT="${SUBSTRATE_JWKS_PORT:-18443}"
 kubectl -n "$SPIRE_NS" port-forward svc/spire-spiffe-oidc-discovery-provider "${JWKS_PORT}:443" >/dev/null 2>&1 &

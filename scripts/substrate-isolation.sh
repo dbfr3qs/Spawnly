@@ -111,10 +111,26 @@ cleanup() {
 trap cleanup EXIT
 kubectl -n "$SUBSTRATE_NS" wait --for=condition=Ready "pod/${POD}" --timeout=90s >/dev/null
 
-TOKEN="$(kubectl -n "$SUBSTRATE_NS" exec "$POD" -c probe -- \
-  /opt/spire/bin/spire-agent api fetch jwt -audience registry \
-  -socketPath /spiffe-workload-api/spire-agent.sock 2>/dev/null | sed -n '2p' | tr -d '[:space:]')"
-[ -n "$TOKEN" ] || fail "could not fetch a JWT-SVID from the org-A proof pod"
+# POLL for the SVID: the registration entry was created moments ago and SPIRE has
+# to propagate it to the agent before the workload API will issue on it. A
+# single-shot fetch here is a race — it fails instantly on a cold entry (and, with
+# stderr suppressed under `set -euo pipefail`, aborted the whole script SILENTLY).
+# Retry until the token appears, then fail loudly with real diagnostics.
+TOKEN=""
+for _ in $(seq 1 30); do
+  TOKEN="$(kubectl -n "$SUBSTRATE_NS" exec "$POD" -c probe -- \
+    /opt/spire/bin/spire-agent api fetch jwt -audience registry \
+    -socketPath /spiffe-workload-api/spire-agent.sock 2>/dev/null | sed -n '2p' | tr -d '[:space:]' || true)"
+  [ -n "$TOKEN" ] && break
+  sleep 2
+done
+if [ -z "$TOKEN" ]; then
+  echo "--- last fetch attempt (stderr) ---" >&2
+  kubectl -n "$SUBSTRATE_NS" exec "$POD" -c probe -- \
+    /opt/spire/bin/spire-agent api fetch jwt -audience registry \
+    -socketPath /spiffe-workload-api/spire-agent.sock >&2 2>&1 || true
+  fail "could not fetch a JWT-SVID from the org-A proof pod (entry ${AGENT_PATH} may not have propagated)"
+fi
 
 kubectl -n "$SPIRE_NS" port-forward svc/spire-spiffe-oidc-discovery-provider "${JWKS_PORT}:443" >/dev/null 2>&1 &
 PF_PID=$!

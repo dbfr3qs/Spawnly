@@ -128,10 +128,44 @@ func TestNodeSpiffePathPrefix(t *testing.T) {
 	}
 	// The template constant embeds the CommonName exactly where the prefix expects
 	// the org — a guard that the two stay consistent.
-	if !strings.Contains(NodeAttestorPathTemplate, "/spire/agent/x509pop/org/{{ .Subject.CommonName }}/") {
+	if !strings.Contains(NodeAttestorPathTemplate, "/x509pop/org/{{ .Subject.CommonName }}/") {
 		t.Fatalf("NodeAttestorPathTemplate %q does not embed CommonName under the org path", NodeAttestorPathTemplate)
 	}
 	if _, err := NodeSpiffePathPrefix("cluster.local", "bad/org"); err == nil {
 		t.Fatal("NodeSpiffePathPrefix accepted a bad org id, want rejection")
+	}
+}
+
+// TestNodeAttestorPathTemplate_NoSpireAgentPrefix pins SPIRE's ACTUAL node-id
+// semantics, not merely our own self-consistency. SPIRE roots every attested node
+// at spiffe://<td>/spire/agent and APPENDS the rendered agent_path_template. An
+// earlier revision baked "/spire/agent" into the template too, producing
+//
+//	spiffe://cluster.local/spire/agent/spire/agent/x509pop/org/acme/<fp>
+//
+// which no NodeSpiffePathPrefix lookup could ever match — so entry parenting found
+// no node and the live dispatch path silently failed, while the old unit tests
+// still passed because they only checked the template against itself. This test
+// reconstructs the id the way SPIRE does and asserts it equals what the rest of
+// the code expects.
+func TestNodeAttestorPathTemplate_NoSpireAgentPrefix(t *testing.T) {
+	if strings.HasPrefix(NodeAttestorPathTemplate, "/spire/agent") {
+		t.Fatalf("NodeAttestorPathTemplate %q must NOT begin with /spire/agent — SPIRE prepends it, doubling the node id",
+			NodeAttestorPathTemplate)
+	}
+	// Reconstruct exactly as SPIRE does: <td root>/spire/agent + rendered template.
+	const td, org, fp = "cluster.local", "acme", "deadbeef"
+	rendered := strings.NewReplacer(
+		"{{ .Subject.CommonName }}", org,
+		"{{ .Fingerprint }}", fp,
+	).Replace(NodeAttestorPathTemplate)
+	spireBuilt := "spiffe://" + td + "/spire/agent" + rendered
+
+	prefix, err := NodeSpiffePathPrefix(td, org)
+	if err != nil {
+		t.Fatalf("NodeSpiffePathPrefix: %v", err)
+	}
+	if want := prefix + fp; spireBuilt != want {
+		t.Fatalf("SPIRE would attest node %q, but the code looks for %q", spireBuilt, want)
 	}
 }

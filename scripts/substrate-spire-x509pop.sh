@@ -23,7 +23,11 @@ CA_SECRET="${SUBSTRATE_CA_SECRET:-substrate-dev-ca}"
 CA_MOUNT_DIR="/run/spire/x509pop"
 CA_BUNDLE_PATH="${CA_MOUNT_DIR}/ca.pem"
 # Must match internal/substrate/devca.NodeAttestorPathTemplate.
-AGENT_PATH_TEMPLATE='/spire/agent/x509pop/org/{{ .Subject.CommonName }}/{{ .Fingerprint }}'
+# MUST match devca.NodeAttestorPathTemplate, and must NOT begin with
+# "/spire/agent": SPIRE already roots attested node ids at
+# spiffe://<td>/spire/agent and appends the rendered template, so a prefix here
+# yields a DOUBLED id that never matches devca.NodeSpiffePathPrefix.
+AGENT_PATH_TEMPLATE='/x509pop/org/{{ .Subject.CommonName }}/{{ .Fingerprint }}'
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
