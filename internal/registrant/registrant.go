@@ -35,6 +35,17 @@ type Identity struct {
 	// ("spiffe-svid", "oidc", "mtls") — useful for audit logs and for
 	// deployments that may one day mix verifier types.
 	Issuer string
+
+	// platformSVID is set true ONLY by the trust-domain-ENFORCING SpiffeVerifier
+	// when it has authoritatively parsed a genuinely platform (org-less) SPIFFE
+	// path — i.e. OrgID is empty because the path is `/agent/…`, not because org
+	// parsing was off. It gates the reverse org-binding (remote-substrate Phase 3):
+	// a platform SVID must not authenticate an org-scoped record. It is NEVER set
+	// in legacy passthrough mode (trust-domain enforcement off) or by non-SPIFFE
+	// verifiers, so their behaviour is bit-identical to before. Unexported: it is
+	// an internal signal between the SpiffeVerifier and the OrgAwareVerifier, never
+	// a caller-visible field.
+	platformSVID bool
 }
 
 // Verifier authenticates an inbound registration request and derives the

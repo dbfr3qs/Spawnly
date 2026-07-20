@@ -8,10 +8,11 @@ package run.spawnly.keycloak.attestor;
  * identity won't line up with the registry record.
  *
  * <h2>The contract</h2>
- * A SPIFFE ID has one of exactly two canonical shapes:
+ * A SPIFFE ID has one of exactly three canonical shapes:
  * <pre>
- *   org-scoped : spiffe://&lt;td&gt;/org/{orgId}/agent/{tenant}/{user}/{type}/{id}
- *   platform   : spiffe://&lt;td&gt;/agent/...                       (org empty)
+ *   org-scoped      : spiffe://&lt;td&gt;/org/{orgId}/agent/{tenant}/{user}/{type}/{id}
+ *   substrate-agent : spiffe://&lt;td&gt;/org/{orgId}/substrate-agent  (Phase 3, org set)
+ *   platform        : spiffe://&lt;td&gt;/agent/...                     (org empty)
  * </pre>
  * <ul>
  *   <li>{@code trustDomain} is the URI authority (between {@code spiffe://} and
@@ -33,8 +34,20 @@ final class SpiffePath {
 
     private static final String SCHEME = "spiffe://";
 
-    /** Parsed decomposition; {@code orgId} is empty (not null) for platform paths. */
-    record Parsed(String trustDomain, String orgId, String agentId) {
+    /**
+     * The well-known LAST path segment of an org's substrate-agent SVID
+     * (remote-substrate Phase 3): {@code spiffe://<td>/org/{orgId}/substrate-agent}
+     * — a THIRD recognised org-scoped shape, kept in lockstep with the Go
+     * {@code spiffe.SubstrateAgentLeaf}.
+     */
+    static final String SUBSTRATE_AGENT_LEAF = "substrate-agent";
+
+    /**
+     * Parsed decomposition; {@code orgId} is empty (not null) for platform paths.
+     * {@code substrateAgent} is true ONLY for the well-known
+     * {@code /org/{orgId}/substrate-agent} identity, never for a workload SVID.
+     */
+    record Parsed(String trustDomain, String orgId, String agentId, boolean substrateAgent) {
     }
 
     private SpiffePath() {
@@ -80,19 +93,26 @@ final class SpiffePath {
         //   "/agent/t/u/ty/id"       -> ["", "agent", "t", ...]
         //   "/org/acme/agent/.../id" -> ["", "org", "acme", "agent", ...]
         String orgId = "";
+        boolean substrateAgent = false;
         String[] segs = p.split("/", -1);
         if (segs.length >= 2 && "org".equals(segs[1])) {
-            // The path CLAIMS an org — hold it to the exact template or reject.
-            // Minimum legitimate org shape is /org/{org}/agent/{id} — five
-            // elements once the leading "" is counted — so a truncated
-            // "/org/{org}/agent" with no agent sub-path is malformed.
-            if (segs.length < 5 || segs[2].isEmpty() || !"agent".equals(segs[3])) {
+            // The path CLAIMS an org — hold it to one of the exact templates or
+            // reject. The well-known substrate-agent identity
+            // /org/{org}/substrate-agent (four elements once the leading "" is
+            // counted) is recognised FIRST so it isn't swept up by the workload
+            // check. Minimum legitimate workload shape is /org/{org}/agent/{id} —
+            // five elements — so a truncated "/org/{org}/agent" is malformed.
+            if (segs.length == 4 && !segs[2].isEmpty() && SUBSTRATE_AGENT_LEAF.equals(segs[3])) {
+                orgId = segs[2];
+                substrateAgent = true;
+            } else if (segs.length >= 5 && !segs[2].isEmpty() && "agent".equals(segs[3])) {
+                orgId = segs[2];
+            } else {
                 throw new IllegalArgumentException("malformed org-scoped SPIFFE path");
             }
-            orgId = segs[2];
         }
 
-        return new Parsed(td, orgId, agentId);
+        return new Parsed(td, orgId, agentId, substrateAgent);
     }
 
     /**

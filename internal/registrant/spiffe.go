@@ -87,5 +87,9 @@ func (s *SpiffeVerifier) Verify(ctx context.Context, r *http.Request) (Identity,
 		OrgID:   parsed.OrgID,
 		Subject: spiffeID,
 		Issuer:  "spiffe-svid",
+		// A genuinely platform (org-less) path in ENFORCING mode: mark it so the
+		// OrgAwareVerifier applies the reverse org-binding (a platform SVID must not
+		// authenticate an org-scoped record). Never set in legacy passthrough.
+		platformSVID: parsed.OrgID == "",
 	}, nil
 }

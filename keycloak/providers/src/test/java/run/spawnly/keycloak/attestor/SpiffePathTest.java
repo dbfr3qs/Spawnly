@@ -19,6 +19,14 @@ class SpiffePathTest {
         assertEquals(id, p.agentId(), in);
     }
 
+    private static void okSubstrateAgent(String in, String td, String org) {
+        SpiffePath.Parsed p = SpiffePath.parse(in);
+        assertEquals(td, p.trustDomain(), in);
+        assertEquals(org, p.orgId(), in);
+        assertEquals(SpiffePath.SUBSTRATE_AGENT_LEAF, p.agentId(), in);
+        assertEquals(true, p.substrateAgent(), in);
+    }
+
     private static void bad(String in) {
         assertThrows(IllegalArgumentException.class, () -> SpiffePath.parse(in), in);
     }
@@ -45,6 +53,17 @@ class SpiffePathTest {
         bad("spiffe://cluster.local/org/acme/foo/x");  // third segment not "agent"
         bad("spiffe://cluster.local/org");             // truncated
         bad("spiffe://cluster.local/org/acme/agent");  // no agent sub-path / id segment
+    }
+
+    @Test
+    void substrateAgentWellKnownIdentity() {
+        okSubstrateAgent("spiffe://cluster.local/org/acme/substrate-agent", "cluster.local", "acme");
+        okSubstrateAgent("spiffe://spawnly.example/org/globex/substrate-agent", "spawnly.example", "globex");
+        bad("spiffe://cluster.local/org//substrate-agent");        // empty-org spoof
+        bad("spiffe://cluster.local/org/acme/substrate-agent/x");  // extra segment ⇒ malformed
+        // A workload path ending in "substrate-agent" is NOT the well-known identity.
+        SpiffePath.Parsed wl = SpiffePath.parse("spiffe://cluster.local/org/acme/agent/t/u/ty/substrate-agent");
+        assertEquals(false, wl.substrateAgent());
     }
 
     @Test

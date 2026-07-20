@@ -1873,6 +1873,12 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		w.WriteHeader(http.StatusOK)
 	})
 
+	// Remote-substrate connect surface + CP-mediated Entry API (Phase 3). Built
+	// from env; unconfigured components (no dev CA / no entry broker) leave the
+	// routes returning 503 rather than behaving insecurely.
+	substrateAPI := newSubstrateAPI(regClient, registryURL, controlPlaneBearer)
+	registerSubstrateRoutes(mux, substrateAPI, validator, audience, readScope, writeScope, sdb)
+
 	return mux
 }
 

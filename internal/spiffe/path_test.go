@@ -31,6 +31,14 @@ func TestParsePath(t *testing.T) {
 		{"org prefix truncated", "spiffe://cluster.local/org", "", "", "", true},
 		{"org agent no id segment", "spiffe://cluster.local/org/acme/agent", "", "", "", true},
 
+		// ── substrate-agent well-known identity (remote-substrate Phase 3) ──
+		{"substrate-agent", "spiffe://cluster.local/org/acme/substrate-agent", "cluster.local", "acme", "substrate-agent", false},
+		{"substrate-agent other td", "spiffe://spawnly.example/org/globex/substrate-agent", "spawnly.example", "globex", "substrate-agent", false},
+		{"substrate-agent empty org spoof", "spiffe://cluster.local/org//substrate-agent", "", "", "", true},
+		// A substrate-agent with an extra segment is NOT the well-known identity and
+		// is not a valid workload path either ⇒ malformed.
+		{"substrate-agent extra seg", "spiffe://cluster.local/org/acme/substrate-agent/x", "", "", "", true},
+
 		// ── "org" appearing deeper is NOT an org claim — platform, no smuggle ──
 		{"agent-then-org subpath", "spiffe://cluster.local/agent/org/x", "cluster.local", "", "x", false},
 
@@ -56,6 +64,49 @@ func TestParsePath(t *testing.T) {
 					c.in, got.TrustDomain, got.OrgID, got.AgentID, c.wantTD, c.wantOrg, c.wantID)
 			}
 		})
+	}
+}
+
+// The SubstrateAgent flag distinguishes the well-known substrate-agent identity
+// from a workload whose agentId merely happens to be "substrate-agent".
+func TestParsePath_SubstrateAgentFlag(t *testing.T) {
+	sa, err := ParsePath("spiffe://cluster.local/org/acme/substrate-agent")
+	if err != nil || !sa.SubstrateAgent || sa.OrgID != "acme" || sa.AgentID != SubstrateAgentLeaf {
+		t.Fatalf("substrate-agent parse = %+v, err=%v", sa, err)
+	}
+	// A workload path ending in "substrate-agent" is NOT the well-known identity.
+	wl, err := ParsePath("spiffe://cluster.local/org/acme/agent/t/u/ty/substrate-agent")
+	if err != nil {
+		t.Fatalf("workload parse err: %v", err)
+	}
+	if wl.SubstrateAgent {
+		t.Fatal("a /agent/.../substrate-agent workload must NOT set SubstrateAgent")
+	}
+	// A platform path never sets it.
+	pf, _ := ParsePath("spiffe://cluster.local/agent/substrate-agent")
+	if pf.SubstrateAgent {
+		t.Fatal("platform path must not set SubstrateAgent")
+	}
+}
+
+// BuildSubstrateAgentPath round-trips through ParsePath to the same identity.
+func TestBuildSubstrateAgentPath_RoundTrip(t *testing.T) {
+	id, err := BuildSubstrateAgentPath("cluster.local", "acme")
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if id != "spiffe://cluster.local/org/acme/substrate-agent" {
+		t.Fatalf("built id = %q", id)
+	}
+	p, err := ParsePath(id)
+	if err != nil || !p.SubstrateAgent || p.OrgID != "acme" {
+		t.Fatalf("round-trip parse = %+v, err=%v", p, err)
+	}
+	if _, err := BuildSubstrateAgentPath("cluster.local", "a/b"); err == nil {
+		t.Fatal("invalid org must be rejected")
+	}
+	if _, err := BuildSubstrateAgentPath("cluster.local", ""); err == nil {
+		t.Fatal("empty org must be rejected")
 	}
 }
 

@@ -1428,6 +1428,32 @@
         </div>
       </div>
     </div>
+
+    <!-- Connect substrate (remote-substrate Phase 3). An org admin connects one
+         bring-your-own-compute Kubernetes substrate: the control plane issues an
+         org-bound x509 identity ONCE (downloaded here), and the substrate reaches
+         active/online once its channel connects (Phase 4/5). Members see status
+         read-only; the server gates every mutation regardless. -->
+    <div class="setting-row" data-testid="substrate-setting">
+      <div class="setting-label">Substrate
+        <span class="hint">bring-your-own-compute Kubernetes cluster (optional)</span></div>
+      <div class="setting-control">
+        <div id="substrate-status" data-testid="substrate-status">Loading…</div>
+        <div id="substrate-editor" hidden>
+          <div class="row-actions">
+            <button class="btn btn-primary" id="substrate-connect-btn" data-testid="substrate-connect">Connect substrate</button>
+            <button class="btn btn-ghost" id="substrate-disconnect-btn" data-testid="substrate-disconnect" hidden>Disconnect</button>
+          </div>
+          <div class="caveat-note">
+            Connecting issues a one-time org-bound identity — it is shown for
+            download <strong>once</strong>, then Spawnly keeps only its fingerprint.
+            Install it with the <code>deploy/substrate</code> bundle (or
+            <code>ORCHESTRATOR_URL=… ACCESS_TOKEN=… ./scripts/connect-substrate.sh &lt;org&gt;</code>);
+            the substrate shows <strong>online</strong> once its channel connects.
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -2341,6 +2367,8 @@
     if (saveBtn) saveBtn.style.display = admin ? '' : 'none';
     const editor = document.getElementById('anchor-editor');
     if (editor) editor.hidden = !admin;
+    const subEditor = document.getElementById('substrate-editor');
+    if (subEditor) subEditor.hidden = !admin;
     try {
       const r = await fetch('/api/org');
       if (!r.ok) return;
@@ -2349,7 +2377,64 @@
       const el = document.querySelector(`input[name="removal-disposition"][value="${disp}"]`);
       if (el) el.checked = true;
       renderAnchor(org.anchor, admin);
+      renderSubstrate(org.substrate, admin);
     } catch (_) {}
+  }
+
+  // renderSubstrate paints the substrate status (none / pending / active). For an
+  // admin the Connect button is offered when none is connected, Disconnect when
+  // one is.
+  function renderSubstrate(substrate, admin) {
+    const status = document.getElementById('substrate-status');
+    if (!status) return;
+    if (!substrate) {
+      status.innerHTML = '<span class="badge">No substrate</span> agents run platform-hosted.';
+    } else {
+      const st = (substrate.status || 'pending').toLowerCase();
+      const cls = st === 'active' ? 'badge-role-admin' : 'badge-role-member';
+      status.innerHTML =
+        `<span class="badge ${cls}" data-testid="substrate-state">${escHtml(st)}</span> ` +
+        `fingerprint <code>${escHtml((substrate.certFingerprint || '').slice(0, 16))}…</code>`;
+    }
+    const connectBtn = document.getElementById('substrate-connect-btn');
+    const disconnectBtn = document.getElementById('substrate-disconnect-btn');
+    if (admin && connectBtn && disconnectBtn) {
+      connectBtn.hidden = !!substrate;
+      disconnectBtn.hidden = !substrate;
+    }
+  }
+
+  // connectSubstrate requests the one-time org-bound identity and immediately
+  // triggers a browser download of it (it is never retrievable again), then
+  // refreshes status to pending.
+  async function connectSubstrate() {
+    try {
+      const r = await fetch('/api/org/substrate', { method: 'POST' });
+      if (!r.ok) throw new Error(`connect substrate: ${r.status}`);
+      const resp = await r.json();
+      // One-time download of the issued identity bundle (cert + key + CA bundle).
+      const blob = new Blob([JSON.stringify(resp.identity || {}, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `substrate-identity-${resp.orgId || 'org'}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      showToast('Substrate connected. Identity downloaded — it is shown only once.');
+      loadOrgSettings();
+    } catch (e) { showToast(`Connect substrate failed: ${e.message || e}`, true); }
+  }
+
+  async function disconnectSubstrate() {
+    if (!window.confirm('Disconnect the org’s substrate? Its agents fall back to platform-hosted.')) return;
+    try {
+      const r = await fetch('/api/org/substrate', { method: 'DELETE' });
+      if (!r.ok) throw new Error(`disconnect substrate: ${r.status}`);
+      showToast('Substrate disconnected.');
+      loadOrgSettings();
+    } catch (e) { showToast(`Disconnect substrate failed: ${e.message || e}`, true); }
   }
 
   // renderAnchor paints the anchor status (none / pending / active) and, for an
@@ -3220,6 +3305,8 @@
   document.getElementById('save-disposition-btn').addEventListener('click', saveDisposition);
   document.getElementById('anchor-register-btn').addEventListener('click', registerAnchor);
   document.getElementById('anchor-clear-btn').addEventListener('click', clearAnchor);
+  document.getElementById('substrate-connect-btn').addEventListener('click', connectSubstrate);
+  document.getElementById('substrate-disconnect-btn').addEventListener('click', disconnectSubstrate);
   document.getElementById('agent-types-table-wrap').addEventListener('click', handleTableAction);
   document.getElementById('tmpl-form-cancel').addEventListener('click', closeTemplateForm);
   document.getElementById('tmpl-form-save').addEventListener('click', saveTemplateForm);

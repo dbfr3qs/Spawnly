@@ -130,7 +130,29 @@ public final class OrgAwareVerifier {
         }
         String org = identity.orgId();
         if (org == null || org.isEmpty()) {
-            // Platform-hosted / org-less ⇒ unchanged, no store lookup.
+            // Platform-hosted / org-less SVID. REVERSE org-binding (remote-substrate
+            // Phase 3 carry-forward): a genuinely platform SVID must NOT authenticate
+            // an org-SCOPED record that merely shares its agentId — a malicious
+            // platform pod could otherwise label itself with a victim org's agentId,
+            // obtain a platform SVID (path.Base == that agentId), and mint for the
+            // org-scoped record.
+            //
+            // This fires ONLY for identity.platformSvid() — a trust-domain-verified
+            // /agent/… path in enforcing mode. In legacy passthrough or for a
+            // non-SPIFFE default verifier the flag is false, so behaviour is
+            // bit-identical (no getAgent, no new refusal). A registry outage
+            // (getAgent==null, indistinguishable from unknown) PASSES THROUGH,
+            // preserving platform-agent availability: the breach can only complete if
+            // the mint then loads the org-scoped record, which needs the registry up.
+            if (identity.platformSvid()) {
+                AgentRecord record = registry.getAgent(identity.agentId());
+                if (record != null) {
+                    String recOrg = record.orgId();
+                    if (recOrg != null && !recOrg.isEmpty()) {
+                        return null; // org-scoped record + platform SVID ⇒ refuse
+                    }
+                }
+            }
             return identity;
         }
         // Org-scoped SVID: bind the signed-path org to the record's org. The

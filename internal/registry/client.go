@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -12,6 +13,12 @@ import (
 
 	"github.com/spawnly/platform/internal/events"
 )
+
+// ErrAgentNotFound is returned (wrapped) by GetAgent when no record exists for
+// the id — distinct from a backend outage so callers can tell "unknown agent"
+// (a normal, expected outcome) apart from "registry unavailable" (fail closed).
+// Match with errors.Is.
+var ErrAgentNotFound = errors.New("agent not found")
 
 type Client interface {
 	GetTemplate(ctx context.Context, agentType string) (AgentTemplate, error)
@@ -152,7 +159,7 @@ func (c *HTTPClient) GetAgent(ctx context.Context, id string) (AgentRecord, erro
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return AgentRecord{}, fmt.Errorf("agent %q not found", id)
+		return AgentRecord{}, fmt.Errorf("agent %q: %w", id, ErrAgentNotFound)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return AgentRecord{}, fmt.Errorf("get agent: status %d", resp.StatusCode)
@@ -332,7 +339,7 @@ func (m *Mock) GetAgent(_ context.Context, id string) (AgentRecord, error) {
 			return a, nil
 		}
 	}
-	return AgentRecord{}, fmt.Errorf("agent %q not found", id)
+	return AgentRecord{}, fmt.Errorf("agent %q: %w", id, ErrAgentNotFound)
 }
 
 func (m *Mock) ListEvents(_ context.Context, agentID string) ([]events.Event, error) {

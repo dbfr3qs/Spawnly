@@ -87,8 +87,13 @@ public class SpireCredentialVerifier implements AgentCredentialVerifier {
         if (agentId == null || agentId.isEmpty()) {
             return null;
         }
-        String orgId = parsed.orgId().isEmpty() ? null : parsed.orgId();
-        return new AgentIdentity(agentId, spiffeId, "spiffe-svid", orgId);
+        if (parsed.orgId().isEmpty()) {
+            // Genuinely platform (org-less) path in ENFORCING mode: flag it so the
+            // OrgAwareVerifier applies the reverse org-binding. Never flagged in
+            // legacy passthrough above.
+            return new AgentIdentity(agentId, spiffeId, "spiffe-svid", null, true);
+        }
+        return new AgentIdentity(agentId, spiffeId, "spiffe-svid", parsed.orgId());
     }
 
     /**

@@ -39,6 +39,23 @@ const (
 const (
 	PlacementK8s    = "k8s"
 	PlacementRemote = "remote"
+	// PlacementSubstrate marks an agent that runs on a CONSUMER-hosted Kubernetes
+	// substrate (remote-substrate Phase 3): the orchestrator dispatches the spawn
+	// over the substrate channel instead of creating a local AgentWorkload CR, so
+	// like PlacementRemote such a record has NO AgentWorkload in Spawnly's own
+	// cluster and MUST be excluded from the operator's stale sweep. Server-set at
+	// preregistration and immutable (a self-registering sidecar never sets it from
+	// its body), so it cannot be forged to dodge the sweep.
+	PlacementSubstrate = "substrate"
+)
+
+// Substrate registration status values (remote-substrate Phase 3). A substrate
+// registers `pending` the moment the org admin requests an identity; it flips to
+// `active` when its channel first connects (Phase 4). Phase 3 only persists the
+// record and issues the identity — nothing flips it to active yet.
+const (
+	SubstratePending = "pending"
+	SubstrateActive  = "active"
 )
 
 // Organization is the SaaS business account — the NEW multi-tenancy primitive,
@@ -68,8 +85,41 @@ type Organization struct {
 	// agents attest via the platform default (in-cluster SPIRE), exactly as
 	// today. The lifecycle (pending->active proof-of-control) lands in Phase 8;
 	// Phase 1 only persists the record shape.
-	Anchor    *AttestationAnchor `json:"anchor,omitempty"`
-	CreatedAt time.Time          `json:"createdAt,omitempty"`
+	Anchor *AttestationAnchor `json:"anchor,omitempty"`
+	// Substrate is the org's optional bring-your-own-compute substrate
+	// registration (remote-substrate Phase 3). Absent (nil) = the org has no
+	// connected substrate and its agents run platform-hosted, exactly as today.
+	// EXACTLY ONE substrate per org is a structural invariant: it is a single
+	// field on the org record, so a second connect overwrites/rotates the first
+	// rather than creating a parallel record (spec non-goal: one substrate per
+	// org). Modeled next to Anchor and persisted as part of the org record.
+	Substrate *Substrate `json:"substrate,omitempty"`
+	CreatedAt time.Time  `json:"createdAt,omitempty"`
+}
+
+// Substrate is an org's bring-your-own-compute registration (remote-substrate
+// Phase 3). The control plane ISSUES the org-bound x509 identity (the x509pop
+// leaf) the substrate's SPIRE agents present; the identity itself is returned to
+// the admin ONCE at connect and NEVER persisted server-side — only its
+// fingerprint + serial are kept here so a later connect/rotate can be correlated
+// and the old credential logically invalidated. Admin authentication + CP
+// issuance IS the org binding (no separate proof-of-control step), so unlike the
+// STS AttestationAnchor there is no activate handshake.
+type Substrate struct {
+	// Status is SubstratePending until the substrate's channel first connects
+	// (Phase 4), then SubstrateActive. Phase 3 only ever writes `pending`.
+	Status string `json:"status"`
+	// CertFingerprint is the SHA-256 (hex) fingerprint of the issued leaf cert —
+	// the ONLY cryptographic material retained (the private key never leaves the
+	// admin's download). A rotate reissues and replaces this, logically revoking
+	// the prior credential.
+	CertFingerprint string `json:"certFingerprint,omitempty"`
+	// CertSerial is the issued leaf's serial number (hex), for audit correlation.
+	CertSerial string `json:"certSerial,omitempty"`
+	// IssuedAt / ActivatedAt are timestamps for the connect and first-connection
+	// events; ActivatedAt is nil until the channel connects (Phase 4/5).
+	IssuedAt    time.Time  `json:"issuedAt,omitempty"`
+	ActivatedAt *time.Time `json:"activatedAt,omitempty"`
 }
 
 // AttestationAnchor is an org's per-org trust anchor (first mode: STS trust

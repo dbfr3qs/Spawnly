@@ -139,7 +139,31 @@ func (v *OrgAwareVerifier) Verify(ctx context.Context, r *http.Request) (Identit
 // the pre-substrate behavior — the org store is never touched.
 func (v *OrgAwareVerifier) bindSpireOrg(ctx context.Context, id Identity) (Identity, error) {
 	if id.OrgID == "" {
-		// Platform-hosted / org-less: unchanged, no store lookup.
+		// REVERSE org-binding (remote-substrate Phase 3 carry-forward): a genuinely
+		// platform (org-less) SVID must NOT authenticate an org-SCOPED record that
+		// merely shares its agentId — otherwise a malicious platform pod could label
+		// itself with a victim org's agentId, obtain a platform SVID (path.Base ==
+		// that agentId), and authenticate for the org-scoped record. So look the
+		// record up and refuse if it is org-scoped.
+		//
+		// This fires ONLY for id.platformSVID — a trust-domain-verified `/agent/…`
+		// path in enforcing mode. In legacy passthrough (enforcement off) or for a
+		// non-SPIFFE default verifier the flag is unset, so behaviour is
+		// bit-identical to before (no store lookup, no new refusal).
+		//
+		// A store OUTAGE (err != nil) PASSES THROUGH, preserving today's
+		// platform-agent availability (org-less SVIDs never depended on the store):
+		// the reverse-binding breach can only COMPLETE if the mint then loads the
+		// org-scoped record, which needs the store up — so an outage can never turn
+		// this passthrough into an authenticated org record. Unknown record (found,
+		// org-less) also passes through: an org-less SVID may legitimately name a
+		// record that self-registers later, exactly as before.
+		if id.platformSVID {
+			rec, err := v.store.GetAgent(ctx, id.AgentID)
+			if err == nil && rec.AgentID != "" && rec.OrgID != "" {
+				return Identity{}, errors.New("platform SVID cannot authenticate an org-scoped record")
+			}
+		}
 		return id, nil
 	}
 	// Org-scoped SVID: bind the signed-path org to the record's org. The

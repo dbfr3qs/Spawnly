@@ -248,10 +248,11 @@ class OrgAwareVerifierTest {
         assertNull(orgAware.verify(SPIRE_JWT));
     }
 
-    // REGRESSION: an org-less (platform) SVID passes through, org store untouched.
+    // REGRESSION: an org-less (platform) SVID from a LEGACY (non-enforcing)
+    // verifier — platformSvid=false — passes through, org store untouched.
     @Test
     void spirePlatformSvid_passesThrough_noStoreTouch() {
-        spireIdentity("agent-x", null); // org-less platform path
+        spireIdentity("agent-x", null); // org-less platform path, platformSvid=false
 
         AgentIdentity id = orgAware.verify(SPIRE_JWT);
 
@@ -260,6 +261,49 @@ class OrgAwareVerifierTest {
         assertNull(id.orgId());
         verify(registry, never()).getAgent(anyString());
         verify(stsVerifier, never()).verify(anyString());
+    }
+
+    // A genuinely-platform SVID (enforcing verifier ⇒ platformSvid=true).
+    private void spirePlatformEnforcedIdentity(String agentId) {
+        when(defaultVerifier.verify(SPIRE_JWT))
+                .thenReturn(new AgentIdentity(agentId, "spiffe://cluster.local/agent/weather/" + agentId,
+                        "spiffe-svid", null, true));
+    }
+
+    // REVERSE org-binding (Phase 3): a genuinely-platform SVID must NOT
+    // authenticate an org-SCOPED record that merely shares its agentId.
+    @Test
+    void spirePlatformSvidVsOrgScopedRecord_refused() {
+        spirePlatformEnforcedIdentity("agent-a");
+        when(registry.getAgent("agent-a"))
+                .thenReturn(new AgentRecord("agent-a", "active", "alice", "worker", null, "acme"));
+
+        assertNull(orgAware.verify(SPIRE_JWT));
+    }
+
+    // A genuinely-platform SVID naming an ORG-LESS record passes through.
+    @Test
+    void spirePlatformSvidVsOrgLessRecord_passesThrough() {
+        spirePlatformEnforcedIdentity("agent-x");
+        when(registry.getAgent("agent-x"))
+                .thenReturn(new AgentRecord("agent-x", "active", "alice", "worker", null, null));
+
+        AgentIdentity id = orgAware.verify(SPIRE_JWT);
+        assertNotNull(id);
+        assertNull(id.orgId());
+    }
+
+    // A genuinely-platform SVID naming an UNKNOWN record passes through (may
+    // self-register later) — and a registry outage is indistinguishable here, so
+    // it too passes through, preserving platform-agent availability.
+    @Test
+    void spirePlatformSvidUnknownRecord_passesThrough() {
+        spirePlatformEnforcedIdentity("ghost");
+        when(registry.getAgent("ghost")).thenReturn(null);
+
+        AgentIdentity id = orgAware.verify(SPIRE_JWT);
+        assertNotNull(id);
+        assertEquals("ghost", id.agentId());
     }
 
     @Test

@@ -9,27 +9,28 @@
 //
 // # The contract
 //
-// A SPIFFE ID has one of exactly two canonical shapes:
+// A SPIFFE ID has one of exactly three canonical shapes:
 //
-//	org-scoped : spiffe://<td>/org/{orgId}/agent/{tenant}/{user}/{type}/{id}
-//	platform   : spiffe://<td>/agent/...                       (org empty)
+//		org-scoped     : spiffe://<td>/org/{orgId}/agent/{tenant}/{user}/{type}/{id}
+//		substrate-agent: spiffe://<td>/org/{orgId}/substrate-agent   (Phase 3, org set)
+//		platform       : spiffe://<td>/agent/...                     (org empty)
 //
-//   - trustDomain is the URI authority (the host between "spiffe://" and the
-//     first '/').
-//   - orgID is present ONLY for the org-scoped shape: the literal first path
-//     segment is "org", its value is non-empty, and the segment that follows is
-//     literally "agent". Anything that begins with "/org/" but does not satisfy
-//     that exact template (empty org value — the "/org//agent/…" spoof — or a
-//     non-"agent" third segment, or a truncated path) is MALFORMED and rejected.
-//     A path that is NOT org-scoped (e.g. "/agent/org/…", where "org" merely
-//     appears deeper in the tree) carries no org claim: orgID is empty and it is
-//     treated as platform-hosted. An attacker therefore cannot smuggle an org
-//     claim through a sub-path.
-//   - agentID is the LAST path segment in BOTH shapes — Go path.Base(spiffeID)
-//     semantics preserved verbatim (trailing slashes stripped), matching the
-//     pre-existing internal/registrant/spiffe.go derivation and the Java
-//     SpireCredentialVerifier.lastPathSegment. This is load-bearing: the
-//     registry record's primary key is this agentID.
+//	  - trustDomain is the URI authority (the host between "spiffe://" and the
+//	    first '/').
+//	  - orgID is present ONLY for the org-scoped shape: the literal first path
+//	    segment is "org", its value is non-empty, and the segment that follows is
+//	    literally "agent". Anything that begins with "/org/" but does not satisfy
+//	    that exact template (empty org value — the "/org//agent/…" spoof — or a
+//	    non-"agent" third segment, or a truncated path) is MALFORMED and rejected.
+//	    A path that is NOT org-scoped (e.g. "/agent/org/…", where "org" merely
+//	    appears deeper in the tree) carries no org claim: orgID is empty and it is
+//	    treated as platform-hosted. An attacker therefore cannot smuggle an org
+//	    claim through a sub-path.
+//	  - agentID is the LAST path segment in BOTH shapes — Go path.Base(spiffeID)
+//	    semantics preserved verbatim (trailing slashes stripped), matching the
+//	    pre-existing internal/registrant/spiffe.go derivation and the Java
+//	    SpireCredentialVerifier.lastPathSegment. This is load-bearing: the
+//	    registry record's primary key is this agentID.
 //
 // The Java mirror lives in
 // keycloak/providers/.../attestor/SpiffePath.java — keep the two in lockstep.
@@ -41,6 +42,21 @@ import (
 	"strings"
 )
 
+// SubstrateAgentLeaf is the well-known LAST path segment of an org's
+// substrate-agent SVID (remote-substrate Phase 3). The substrate-agent — the
+// Spawnly component the customer runs in their own cluster — authenticates the
+// dispatch channel and the CP-mediated Entry API with this identity, which the
+// connect flow CP-provisions before any workload entry exists. Its canonical
+// shape is a THIRD recognised org-scoped form:
+//
+//	spiffe://<td>/org/{orgId}/substrate-agent
+//
+// It is deliberately distinct from a workload agent's `/agent/…/{id}` path so the
+// Entry API can require its caller to be the substrate-agent specifically (a
+// workload SVID whose agentId happens to be "substrate-agent" does NOT match: it
+// carries the /agent/ template, so ParsedSVID.SubstrateAgent stays false).
+const SubstrateAgentLeaf = "substrate-agent"
+
 // ParsedSVID is the canonical decomposition of a SPIFFE ID per the path
 // contract documented above.
 type ParsedSVID struct {
@@ -51,8 +67,14 @@ type ParsedSVID struct {
 	// the cryptographically-signed SVID path only.
 	OrgID string
 	// AgentID is the last path segment (path.Base semantics), the registry
-	// primary key. Non-empty for a well-formed workload SVID.
+	// primary key. Non-empty for a well-formed workload SVID. For the
+	// substrate-agent well-known identity it is SubstrateAgentLeaf.
 	AgentID string
+	// SubstrateAgent is true ONLY for the well-known
+	// spiffe://<td>/org/{orgId}/substrate-agent identity — never for a workload
+	// SVID. The Entry API uses it to admit the substrate-agent and reject an
+	// ordinary org workload trying to author registration entries.
+	SubstrateAgent bool
 }
 
 // BuildOrgAgentPath returns the org-scoped workload SPIFFE ID
@@ -90,6 +112,28 @@ func BuildOrgAgentPath(trustDomain, orgID string, segments ...string) (string, e
 		}
 	}
 	return scheme + trustDomain + "/org/" + orgID + "/agent/" + strings.Join(segments, "/"), nil
+}
+
+// BuildSubstrateAgentPath returns the org's well-known substrate-agent SPIFFE ID
+//
+//	spiffe://<td>/org/{orgID}/substrate-agent
+//
+// the identity the connect flow CP-provisions for the substrate-agent. It is the
+// inverse of ParsePath's substrate-agent shape (SubstrateAgent=true), so the id
+// it registers round-trips back to the same {trustDomain, orgID}. Fails closed
+// on an empty/'/'-bearing trust domain or an invalid org segment — the same
+// discipline as BuildOrgAgentPath.
+func BuildSubstrateAgentPath(trustDomain, orgID string) (string, error) {
+	if trustDomain == "" {
+		return "", errors.New("empty trust domain")
+	}
+	if strings.ContainsRune(trustDomain, '/') {
+		return "", errors.New("trust domain contains '/'")
+	}
+	if err := validSegment(orgID); err != nil {
+		return "", errors.New("invalid org id: " + err.Error())
+	}
+	return scheme + trustDomain + "/org/" + orgID + "/" + SubstrateAgentLeaf, nil
 }
 
 const scheme = "spiffe://"
@@ -141,16 +185,25 @@ func ParsePath(spiffeID string) (ParsedSVID, error) {
 	// We do NOT collapse empty segments: "/org//agent" -> ["","org","","agent"]
 	// so the empty-org spoof is caught, not smoothed over.
 	orgID := ""
+	substrateAgent := false
 	if segs := strings.Split(p, "/"); len(segs) >= 2 && segs[1] == "org" {
-		// The path CLAIMS an org — hold it to the exact template or reject.
-		// Minimum legitimate org shape is /org/{org}/agent/{id} — five elements
-		// once the leading "" is counted — so a truncated "/org/{org}/agent"
-		// with no agent sub-path is malformed, not a valid identity.
-		if len(segs) < 5 || segs[2] == "" || segs[3] != "agent" {
+		// The path CLAIMS an org — hold it to one of the exact templates or reject.
+		// The well-known substrate-agent identity /org/{org}/substrate-agent (four
+		// elements once the leading "" is counted) is recognised FIRST so it is not
+		// swept up by the workload-template check below.
+		switch {
+		case len(segs) == 4 && segs[2] != "" && segs[3] == SubstrateAgentLeaf:
+			orgID = segs[2]
+			substrateAgent = true
+		case len(segs) >= 5 && segs[2] != "" && segs[3] == "agent":
+			// Workload shape /org/{org}/agent/{…}/{id}. Minimum legitimate shape is
+			// /org/{org}/agent/{id} — five elements — so a truncated
+			// "/org/{org}/agent" with no agent sub-path is malformed, not valid.
+			orgID = segs[2]
+		default:
 			return ParsedSVID{}, errors.New("malformed org-scoped SPIFFE path")
 		}
-		orgID = segs[2]
 	}
 
-	return ParsedSVID{TrustDomain: td, OrgID: orgID, AgentID: agentID}, nil
+	return ParsedSVID{TrustDomain: td, OrgID: orgID, AgentID: agentID, SubstrateAgent: substrateAgent}, nil
 }

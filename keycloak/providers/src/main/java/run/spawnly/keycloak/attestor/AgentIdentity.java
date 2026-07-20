@@ -25,15 +25,32 @@ package run.spawnly.keycloak.attestor;
  *                binds a non-null orgId to the agent record's org, so an org-A
  *                SVID can never authenticate an agent recorded under org B.
  *                Mirrors Go {@code registrant.Identity.OrgID}.
+ * @param platformSvid set true ONLY by the trust-domain-ENFORCING
+ *                {@link SpireCredentialVerifier} for a genuinely platform
+ *                (org-less) SPIFFE path — i.e. orgId is null because the path is
+ *                {@code /agent/…}, not because org parsing was off. It gates the
+ *                reverse org-binding in {@link OrgAwareVerifier} (a platform SVID
+ *                must not authenticate an org-scoped record). NEVER set in legacy
+ *                passthrough or by non-SPIFFE verifiers, so their behaviour is
+ *                bit-identical. Mirrors Go {@code registrant.Identity.platformSVID}.
  */
-public record AgentIdentity(String agentId, String subject, String issuer, String orgId) {
+public record AgentIdentity(String agentId, String subject, String issuer, String orgId, boolean platformSvid) {
 
     /**
      * Backward-compatible constructor for the org-less case and the many call
      * sites (STS/stsweb verifiers, tests) that predate remote-substrate:
-     * delegates to the canonical constructor with {@code orgId=null}.
+     * delegates to the canonical constructor with {@code orgId=null} and
+     * {@code platformSvid=false}.
      */
     public AgentIdentity(String agentId, String subject, String issuer) {
-        this(agentId, subject, issuer, null);
+        this(agentId, subject, issuer, null, false);
+    }
+
+    /**
+     * Backward-compatible constructor carrying an org but not the platform flag
+     * (org-scoped identities never need it — the reverse binding is org-less only).
+     */
+    public AgentIdentity(String agentId, String subject, String issuer, String orgId) {
+        this(agentId, subject, issuer, orgId, false);
     }
 }

@@ -80,6 +80,11 @@ func registerOrgRoutes(mux *http.ServeMux, s registry.Store, sdb spicedb.Client,
 	// anchor is also visible read-only in GET /v1/orgs/{id} below.
 	registerAnchorRoutes(mux, s, cp, nil)
 
+	// Per-org substrate registration lifecycle (remote-substrate Phase 3):
+	// PUT/DELETE .../substrate. Same org-endpoints family, same cp gate; the
+	// substrate record is also visible read-only in GET /v1/orgs/{id} below.
+	registerSubstrateRoutes(mux, s, cp)
+
 	// POST /v1/orgs — create an org as ONE logical transaction, ordered
 	// Keycloak-org -> store PutOrg -> (SpiceDB admin tuple + Keycloak first-admin
 	// membership). On any later step failing, the earlier writes are unwound

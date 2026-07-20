@@ -92,7 +92,10 @@ func TestSpireOrg_UnknownRecord_Refused(t *testing.T) {
 }
 
 // REGRESSION: an org-less (platform) SVID authenticates against a platform
-// record exactly as today, and the org store is never touched.
+// (org-less) record exactly as today. Note: since the reverse org-binding fix
+// (Phase 3) the org-less path DOES consult the store once to confirm the named
+// record is not org-scoped — a platform SVID must never authenticate an
+// org-scoped record — but an org-less record still passes through.
 func TestSpireOrg_PlatformSvid_Regression(t *testing.T) {
 	store := twoOrgStore()
 	v := spireVerifier("spiffe://cluster.local/agent/weather/orgless-1", store)
@@ -104,8 +107,49 @@ func TestSpireOrg_PlatformSvid_Regression(t *testing.T) {
 	if id.AgentID != "orgless-1" || id.OrgID != "" {
 		t.Fatalf("identity = %+v", id)
 	}
-	if store.getAgents != 0 {
-		t.Fatal("platform SVID path must not touch the org store")
+}
+
+// REVERSE org-binding (Phase 3 carry-forward): an org-LESS (platform) SVID must
+// NOT authenticate an org-SCOPED record that merely shares its agentId —
+// otherwise a malicious platform pod could label itself with a victim org's
+// agentId and mint for that org's record.
+func TestSpireOrg_PlatformSvidVsOrgScopedRecord_Refused(t *testing.T) {
+	// Platform SVID whose path.Base is "agent-a", an ACME (org-scoped) record.
+	v := spireVerifier("spiffe://cluster.local/agent/weather/agent-a", twoOrgStore())
+
+	if _, err := v.Verify(context.Background(), svidRequest()); err == nil {
+		t.Fatal("a platform SVID must not authenticate an org-scoped record")
+	}
+}
+
+// An org-less SVID naming an UNKNOWN record passes through (it may name a record
+// that self-registers later — today's behaviour), so platform agents are
+// unaffected.
+func TestSpireOrg_PlatformSvidUnknownRecord_Passthrough(t *testing.T) {
+	v := spireVerifier("spiffe://cluster.local/agent/weather/ghost", twoOrgStore())
+
+	id, err := v.Verify(context.Background(), svidRequest())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if id.OrgID != "" || id.AgentID != "ghost" {
+		t.Fatalf("identity = %+v", id)
+	}
+}
+
+// A store OUTAGE on the org-less path PASSES THROUGH (preserving platform-agent
+// availability): the reverse-binding breach can only complete if the mint then
+// loads the org-scoped record, which needs the store up — so an outage can never
+// turn this passthrough into an authenticated org record.
+func TestSpireOrg_PlatformSvidStoreOutage_Passthrough(t *testing.T) {
+	v := spireVerifier("spiffe://cluster.local/agent/weather/agent-a", erroringStore{twoOrgStore()})
+
+	id, err := v.Verify(context.Background(), svidRequest())
+	if err != nil {
+		t.Fatalf("org-less store outage should pass through, got %v", err)
+	}
+	if id.OrgID != "" {
+		t.Fatalf("identity = %+v", id)
 	}
 }
 

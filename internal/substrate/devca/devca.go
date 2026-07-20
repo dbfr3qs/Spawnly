@@ -42,6 +42,7 @@ import (
 	"math/big"
 	"net/url"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -88,6 +89,24 @@ func ValidateOrgID(orgID string) error {
 		return fmt.Errorf("org id %q not a valid path token ([A-Za-z0-9._-], no leading/trailing punctuation)", orgID)
 	}
 	return nil
+}
+
+// NormalizeOrgID is the SINGLE org-id validation+normalisation source every org
+// id that will become a SPIFFE path segment (connect issuance AND the CP-mediated
+// Entry API) MUST funnel through. It lower-cases the id and then validates it, so
+// a case-variant like "Acme" and "acme" can never diverge into two distinct
+// SPIFFE segments (Keycloak org slugs are lowercase — validOrgID in
+// cmd/registry/orgs.go — so the lower-cased form is the canonical one). It fails
+// closed on anything ValidateOrgID rejects. Lower-casing is safe: the charset is
+// ASCII-only, so ToLower is a pure segment-preserving transform (no '/' can
+// appear), and the result still round-trips the leaf CommonName the SPIRE x509pop
+// template reads.
+func NormalizeOrgID(orgID string) (string, error) {
+	lowered := strings.ToLower(orgID)
+	if err := ValidateOrgID(lowered); err != nil {
+		return "", err
+	}
+	return lowered, nil
 }
 
 // CA is a parsed dev CA: the signing certificate and its private key. Keep the
