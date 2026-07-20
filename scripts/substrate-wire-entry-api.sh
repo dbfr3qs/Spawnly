@@ -117,8 +117,31 @@ else
   echo "    SPIRE_SERVER_SOCKET already set — skipping."
 fi
 
+# The orchestrator issues org-bound substrate identities off the dev CA, but
+# substrate-ca.sh creates that Secret in the SPIRE namespace while the orchestrator
+# runs in $ORCH_NS — and Secrets are namespace-scoped. Its mount is `optional:true`,
+# so a missing Secret is SILENT: the pod starts fine and merely logs "dev CA files
+# unreadable — connect disabled", leaving every substrate connect (and therefore the
+# whole dispatch path) dead with no obvious cause. Copy it across.
+CA_SECRET="${SUBSTRATE_CA_SECRET:-substrate-dev-ca}"
+if ! kubectl -n "$ORCH_NS" get secret "$CA_SECRET" >/dev/null 2>&1; then
+  echo "    copying dev CA Secret ${SPIRE_NS}/${CA_SECRET} into ${ORCH_NS} (connect needs it)..."
+  kubectl -n "$SPIRE_NS" get secret "$CA_SECRET" -o json \
+    | jq '{apiVersion,kind,type,metadata:{name:"'"$CA_SECRET"'",namespace:"'"$ORCH_NS"'"},data}' \
+    | kubectl apply -f - >/dev/null
+  changed_orch=1
+else
+  echo "    dev CA Secret already present in ${ORCH_NS} — skipping."
+fi
+
 if [ "$changed_orch" = "1" ]; then
-  echo "==> Rolling the orchestrator to pick up the Entry API broker..."
+  # RESTART, not just wait: the orchestrator resolves the dev CA and builds the
+  # SVID JWKS validator ONCE at startup and latches the result — if it booted
+  # before the CA/JWKS were reachable it stays "connect disabled / Entry API
+  # disabled" forever. Copying a Secret alone does not change the pod spec, so a
+  # rollout must be forced for the new state to be picked up.
+  echo "==> Rolling the orchestrator to pick up the Entry API broker + dev CA..."
+  kubectl -n "$ORCH_NS" rollout restart deployment/orchestrator >/dev/null
   kubectl -n "$ORCH_NS" rollout status deployment/orchestrator --timeout=180s
 fi
 
