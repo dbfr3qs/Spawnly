@@ -18,7 +18,7 @@ EXTRA_AGENTS  := keycloak weather-monitor
 MCP_SERVERS   := travel-tools
 SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS) $(EXTRA_AGENTS) $(MCP_SERVERS)
 
-.PHONY: build test test-provider test-dynamodb docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward mailpit kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed reseed-orgs print-% e2e-setup e2e-anchor-setup e2e e2e-subdomains mobile-dev tls-mimic tls-mimic-down substrate-ca substrate-setup substrate-verify substrate-down
+.PHONY: build test test-provider test-dynamodb docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward mailpit kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed reseed-orgs print-% e2e-setup e2e-anchor-setup e2e e2e-subdomains mobile-dev tls-mimic tls-mimic-down substrate-ca substrate-setup substrate-verify substrate-down substrate-e2e-setup substrate-wire-entry-api substrate-isolation
 
 # print-<VAR> — echo a make variable so shell scripts can read the authoritative
 # lists instead of re-declaring them. e.g. `make -s print-SERVICES`.
@@ -280,7 +280,35 @@ substrate-setup:
 substrate-verify:
 	./scripts/substrate-verify.sh $(ORG)
 
-# substrate-down — remove the substrate sim overlay (leaves the dev CA Secret and
-# the server's x509pop attestor in place; re-run substrate-setup to bring back).
+# substrate-e2e-setup — the FIRST-CLASS Phase-6 harness: stand up a LIVE two-org
+# substrate sim so the substrate Playwright specs run end-to-end instead of
+# skipping. org A (default acme) is a fully-live substrate (dev CA + x509pop +
+# overlay + the Entry API delegated-admin socket wired for dispatch/channel); org B
+# (default globex) gets credentials only, for the isolation-matrix negatives. e2e
+# only, idempotent, reversible with `make substrate-down`. Assumes a bootstrapped
+# cluster + demo orgs (make bootstrap + make e2e-anchor-setup).
+#   make substrate-e2e-setup                              # A=acme, B=globex
+#   make substrate-e2e-setup SUBSTRATE_ORG_A=acme SUBSTRATE_ORG_B=globex
+substrate-e2e-setup:
+	./scripts/substrate-e2e-setup.sh
+
+# substrate-wire-entry-api — wire ONLY the Entry API delegated-admin socket (shared
+# hostPath between spire-server + orchestrator) so connect activates the dispatch
+# channel. Folded into substrate-e2e-setup; here for standalone use / re-wiring.
+substrate-wire-entry-api:
+	./scripts/substrate-wire-entry-api.sh
+
+# substrate-isolation — run the LIVE two-org isolation matrix (AC 1/4/5/6) after
+# substrate-e2e-setup: real SVIDs through the real verifier, node→org binding,
+# forged-CA rejection. The shell half of substrate-isolation.spec.ts.
+#   make substrate-isolation                                   # A=acme, B=globex
+#   make substrate-isolation SUBSTRATE_ORG_A=acme SUBSTRATE_ORG_B=globex
+substrate-isolation:
+	./scripts/substrate-isolation.sh
+
+# substrate-down — remove the substrate sim overlay + per-run pods + org-B creds
+# (leaves the dev CA Secret, the server's x509pop attestor, and the Entry API
+# socket in place; re-run substrate-e2e-setup to bring back). SUBSTRATE_UNWIRE=1
+# also unwires the Entry API socket back to seed.
 substrate-down:
-	kubectl delete -k deploy/substrate --ignore-not-found
+	./scripts/substrate-down.sh

@@ -14,7 +14,7 @@ import { getEvents } from '../helpers/events';
 //     agent must self-register (record active) and mint a Keycloak token.
 //
 // This is the full LIVE positive path. It needs the local-sim harness wired:
-//   1. `make substrate-setup` (dev CA + x509pop + the substrate bundle incl. the
+//   1. `make substrate-e2e-setup` (dev CA + x509pop + the substrate bundle incl. the
 //      substrate-agent), and
 //   2. the orchestrator's CP-mediated Entry API reachable (SPIRE_SERVER_SOCKET
 //      delegated-admin path).
@@ -58,7 +58,7 @@ test.describe.serial('remote-substrate dispatch', () => {
   let viewer: Page;
 
   test.beforeAll(async ({ browser }) => {
-    test.skip(!simUp(), 'substrate sim not installed — run `make substrate-setup` first');
+    test.skip(!simUp(), 'substrate sim not installed — run `make substrate-e2e-setup` first');
     aliceCtx = await contextFor(browser, 'alice', 'acme');
     viewerCtx = await contextFor(browser, 'viewer', 'acme');
     alice = await aliceCtx.newPage();
@@ -119,5 +119,26 @@ test.describe.serial('remote-substrate dispatch', () => {
       if (!minted) await new Promise((r) => setTimeout(r, 2_000));
     }
     expect(minted, 'substrate agent should self-register (active) and mint a Keycloak token').toBeTruthy();
+
+    // 6. Child spawn lands on the SAME substrate (same org ⇒ same substrate; no
+    //    per-spawn selector). chain-worker self-spawns, so a child MUST appear with
+    //    parentId == workloadName; its AgentWorkload must also be in substrate-sim,
+    //    never in default — completing the full substrate path (spec §2.6). HARD
+    //    assert: a missing child is exactly the regression it guards (a child spawn
+    //    silently not routed to the substrate). Child records appear before consent
+    //    resolves (the CIBA grant runs in the child's own sidecar), so it is safe.
+    let child = '';
+    for (let i = 0; i < 60 && !child; i++) {
+      child = (await listAgents(viewer)).find((a) => a.parentId === workloadName)?.agentId ?? '';
+      if (!child) await new Promise((r) => setTimeout(r, 2_000));
+    }
+    expect(child, 'chain-worker child should appear (child spawns must reach the substrate)').toBeTruthy();
+    let childOnSubstrate = false;
+    for (let i = 0; i < 30 && !childOnSubstrate; i++) {
+      childOnSubstrate = agentWorkloadIn(NS, child);
+      if (!childOnSubstrate) await new Promise((r) => setTimeout(r, 2_000));
+    }
+    expect(childOnSubstrate, `child ${child} should run on the SAME substrate (${NS})`).toBeTruthy();
+    expect(agentWorkloadIn('default', child), `child ${child} must NOT run on the platform`).toBeFalsy();
   });
 });

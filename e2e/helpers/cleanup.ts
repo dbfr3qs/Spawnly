@@ -97,6 +97,52 @@ export function sweepRemotePods(): void {
   }
 }
 
+// sweepSubstrate best-effort undoes the residue the remote-substrate specs
+// (substrate / substrate-dispatch / substrate-lifecycle / substrate-isolation) can
+// leave when a mid-test failure skips their afterAll: a still-connected demo-org
+// substrate record, the substrate-agent scaled to 0 (a lifecycle-spec disconnect
+// step that never restored), and the per-run proof/forged pods in substrate-sim.
+// The org-B credential Secret is deliberately LEFT in place (deleting it would make
+// the next run's isolation spec skip). Each spec restores its own state on success;
+// this is the backstop so repeated `make e2e` runs on the same cluster stay
+// isolated. Both demo orgs are swept (acme = active substrate, globex = isolation
+// creds). Never throws.
+export async function sweepSubstrate(browser: Browser): Promise<void> {
+  // 1. Disconnect any lingering demo-org substrate record (org-admin session each).
+  for (const [user, org] of [
+    ['alice', 'acme'],
+    ['bob', 'globex'],
+  ] as const) {
+    let ctx: Awaited<ReturnType<typeof contextFor>> | undefined;
+    try {
+      ctx = await contextFor(browser, user, org);
+      await (await ctx.newPage()).request.delete('/api/org/substrate').catch(() => {});
+    } catch {
+      /* best-effort */
+    } finally {
+      await ctx?.close().catch(() => {});
+    }
+  }
+  // 2. Never leave the substrate-agent scaled down (lifecycle spec's disconnect step)
+  //    and drop the per-run proof/forged pods. kubectl is the tool — these are bare,
+  //    CR-less sim objects the dashboard has no API for. The org-B credential Secret
+  //    is intentionally kept (the next isolation run needs it).
+  try {
+    execFileSync('kubectl', ['scale', 'deployment', 'substrate-agent', '-n', 'substrate-sim', '--replicas=1'], { stdio: 'ignore' });
+  } catch {
+    /* sim not installed, or already at 1 */
+  }
+  try {
+    execFileSync(
+      'kubectl',
+      ['delete', 'pod', 'substrate-proof', 'substrate-isolation-proof', 'substrate-forged-agent', '-n', 'substrate-sim', '--ignore-not-found', '--grace-period=0', '--wait=false'],
+      { stdio: 'ignore' },
+    );
+  } catch {
+    /* best-effort */
+  }
+}
+
 // clearDemoAnchors best-effort resets the demo orgs' attestation anchors to their
 // seed state (none). anchor.spec + remote-agent.spec each restore this in their
 // own afterAll, but a beforeAll crash can skip that, and a lingering ACTIVE anchor

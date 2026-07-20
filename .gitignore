@@ -68,6 +68,14 @@ deploy/substrate/**/*.crt
 substrate-*.pem
 substrate-*.key
 substrate-*.crt
+# Stray compiled service binaries from a bare `go build -o <name>` at the repo root
+# (the real artifacts are built into images / kind). Never commit these.
+/substrate-agent
+/orchestrator
+/registry
+/operator
+/dashboard
+/mobile-gateway
 
 # Local secrets / env (keep .env.example tracked)
 .env

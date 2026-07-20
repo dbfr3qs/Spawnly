@@ -14,7 +14,7 @@ import { listAgents } from '../helpers/dashboard';
 //     operator never terminally sweeps a substrate record.
 //
 // Like the Phase-4 dispatch spec this needs the local-sim harness wired
-// (`make substrate-setup` + the CP Entry API/delegated-admin socket). When that
+// (`make substrate-e2e-setup`, which wires the CP Entry API/delegated-admin socket). When that
 // isn't present (the common CI case) the substrate never activates and the spec
 // SKIPS gracefully — the Go/unit proofs (reaper kill routing, offline→terminal,
 // liveness transitions, stale-sweep exclusion) cover the invariants headlessly.
@@ -38,6 +38,21 @@ function simUp(): boolean {
 
 function agentWorkloadIn(ns: string, name: string): boolean {
   return kubectl(['get', 'agentworkload', name, '-n', ns, '--ignore-not-found', '-o', 'name']).trim().length > 0;
+}
+
+// spireEntryExists reports whether the hosted SPIRE server still holds an org-scoped
+// registration entry whose SPIFFE ID carries `agentId` (its last path segment). The
+// substrate agent creates this entry via the CP Entry API on spawn and MUST delete
+// it on kill (Phase 5) — so this is the live proof of the entry-gone-on-kill
+// invariant that was previously only unit-proven. Best-effort: a kubectl/exec
+// failure returns false (treated as "gone") rather than throwing.
+function spireEntryExists(agentId: string): boolean {
+  const out = kubectl([
+    'exec', '-n', 'spire-system', 'spire-server-0', '-c', 'spire-server', '--',
+    '/opt/spire/bin/spire-server', 'entry', 'show',
+  ]);
+  // Entries print "SPIFFE ID : spiffe://<td>/org/<org>/agent/.../<agentId>".
+  return new RegExp(`SPIFFE ID\\s*:\\s*spiffe://[^\\n]*/org/[^\\n]*/${agentId}(\\s|$)`).test(out);
 }
 
 function scaleSubstrateAgent(replicas: number): void {
@@ -72,7 +87,7 @@ test.describe.serial('remote-substrate lifecycle + liveness', () => {
   let workloadName = '';
 
   test.beforeAll(async ({ browser }) => {
-    test.skip(!simUp(), 'substrate sim not installed — run `make substrate-setup` first');
+    test.skip(!simUp(), 'substrate sim not installed — run `make substrate-e2e-setup` first');
     aliceCtx = await contextFor(browser, 'alice', 'acme');
     viewerCtx = await contextFor(browser, 'viewer', 'acme');
     alice = await aliceCtx.newPage();
@@ -137,15 +152,29 @@ test.describe.serial('remote-substrate lifecycle + liveness', () => {
     expect(await waitUntil(() => substrateOnline(alice))).toBeTruthy();
   });
 
-  test('kill removes the local pod/CR on the substrate (AC 7)', async () => {
+  test('kill removes the local pod/CR AND the org-scoped SPIRE entry on the substrate (AC 7)', async () => {
     expect(agentWorkloadIn(NS, workloadName), 'workload should exist before kill').toBeTruthy();
+    // The org-scoped SPIRE registration entry exists while the workload is live
+    // (created via the CP Entry API on spawn). If the SPIRE server exec isn't
+    // reachable we can't prove the entry side live — note it and skip that half.
+    const entryProvable = spireEntryExists(workloadName);
+
     const del = await viewer.request.delete(`/api/agents/${workloadName}`);
     expect(del.ok(), `delete: ${del.status()} ${await del.text()}`).toBeTruthy();
 
-    // The substrate agent tears down the local CR (and its org-scoped SPIRE entry)
-    // over the channel; the CR must vanish from substrate-sim.
+    // The substrate agent tears down the local CR over the channel; it must vanish.
     expect(await waitUntil(() => Promise.resolve(!agentWorkloadIn(NS, workloadName)), 30)).toBeTruthy();
     // And it was never on the platform.
     expect(agentWorkloadIn('default', workloadName)).toBeFalsy();
+
+    // AC 7 (entry half): the org-scoped SPIRE entry must be deleted too — the live
+    // proof of what was previously only unit-covered. Only assert it if the entry
+    // was observably present pre-kill (so a non-reachable SPIRE exec never fails it).
+    if (entryProvable) {
+      expect(
+        await waitUntil(() => Promise.resolve(!spireEntryExists(workloadName)), 30),
+        `org-scoped SPIRE entry for ${workloadName} must be deleted on kill`,
+      ).toBeTruthy();
+    }
   });
 });
