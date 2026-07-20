@@ -101,8 +101,52 @@ public final class OrgAwareVerifier {
         if (looksLikeStsCredential(credential)) {
             return verifyStsOrgBound(credential);
         }
-        // Non-STS (JWT-SVID / SPIRE) → the platform default verifier, unchanged.
-        return defaultVerifier.verify(credential);
+        // Non-STS (JWT-SVID / SPIRE) → the platform default verifier, then the
+        // SPIRE org-bound binding (remote-substrate Phase 1) beside the STS one.
+        return verifySpireOrgBound(credential);
+    }
+
+    /**
+     * The SPIRE org-bound path (remote-substrate Phase 1), the mirror of
+     * {@link #verifyStsOrgBound} with the SAME fail-closed discipline. The
+     * default verifier (SpireCredentialVerifier, in trust-domain-enforcing mode)
+     * surfaces the signed-path org on {@link AgentIdentity#orgId()}:
+     * <ul>
+     *   <li>org-LESS identity (orgId null/empty) ⇒ platform-hosted (or a
+     *       non-SPIFFE default that never sets orgId) ⇒ passthrough,
+     *       bit-identical, the org store is never touched;</li>
+     *   <li>org-SCOPED identity ⇒ authenticates ONLY against a record whose org
+     *       equals the SVID's org. A mismatch, an org-less record, an unknown
+     *       record, or a registry outage is an oracle-free {@code null} — never a
+     *       fallback.</li>
+     * </ul>
+     * Enforced identically on BOTH callers (client-credentials mint and
+     * token-exchange), since both route through {@code verify()}.
+     */
+    private AgentIdentity verifySpireOrgBound(String credential) {
+        AgentIdentity identity = defaultVerifier.verify(credential);
+        if (identity == null) {
+            return null;
+        }
+        String org = identity.orgId();
+        if (org == null || org.isEmpty()) {
+            // Platform-hosted / org-less ⇒ unchanged, no store lookup.
+            return identity;
+        }
+        // Org-scoped SVID: bind the signed-path org to the record's org. The
+        // agentId is SVID-attested, so requiring the record it names to carry the
+        // SAME org is exactly the isolation check.
+        AgentRecord record = registry.getAgent(identity.agentId());
+        if (record == null) {
+            // Unknown record OR registry outage ⇒ fail closed.
+            return null;
+        }
+        String recordOrg = record.orgId();
+        if (recordOrg == null || recordOrg.isEmpty() || !recordOrg.equals(org)) {
+            // Org-less record (no org to match a scoped SVID) or cross-org ⇒ refuse.
+            return null;
+        }
+        return identity;
     }
 
     /**

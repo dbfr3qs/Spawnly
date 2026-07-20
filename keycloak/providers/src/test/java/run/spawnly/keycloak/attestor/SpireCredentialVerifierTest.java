@@ -47,9 +47,16 @@ class SpireCredentialVerifierTest {
 
     private SpireCredentialVerifier verifier() {
         // Plain-HTTP client so the WireMock (http) endpoint is reachable without
-        // TLS; the production path uses the TLS-relaxed client.
+        // TLS; the production path uses the TLS-relaxed client. Legacy mode (no
+        // trust-domain enforcement) — the pre-substrate behaviour these vectors pin.
         SpireSvidValidator v = new SpireSvidValidator(jwksUrl, HttpClient.newHttpClient());
         return new SpireCredentialVerifier(v);
+    }
+
+    // Enforcing verifier: trust-domain pinned to cluster.local + org parsing.
+    private SpireCredentialVerifier enforcing() {
+        SpireSvidValidator v = new SpireSvidValidator(jwksUrl, HttpClient.newHttpClient());
+        return new SpireCredentialVerifier(v, "cluster.local");
     }
 
     @Test
@@ -123,6 +130,60 @@ class SpireCredentialVerifierTest {
         wm.stop(); // JWKS endpoint now unreachable
         String svid = f.svid("spiffe://cluster.local/agent/agent-x", "keys");
         assertNull(verifier().verify(svid));
+    }
+
+    // ── trust-domain enforcement + org parsing (remote-substrate Phase 1) ──
+
+    @Test
+    void enforcing_platformSvid_verifiesWithNoOrg() throws Exception {
+        String spiffe = "spiffe://cluster.local/agent/acme/alice/weather-monitor/agent-abc";
+        AgentIdentity id = enforcing().verify(f.svid(spiffe, "keys"));
+        assertNotNull(id);
+        assertEquals("agent-abc", id.agentId());
+        assertNull(id.orgId()); // platform (org-less) path
+    }
+
+    @Test
+    void enforcing_orgScopedSvid_surfacesOrg() throws Exception {
+        String spiffe = "spiffe://cluster.local/org/acme/agent/t/alice/weather-monitor/agent-abc";
+        AgentIdentity id = enforcing().verify(f.svid(spiffe, "keys"));
+        assertNotNull(id);
+        assertEquals("agent-abc", id.agentId()); // path.Base preserved
+        assertEquals("acme", id.orgId());
+    }
+
+    @Test
+    void enforcing_wrongTrustDomain_isRejected() throws Exception {
+        String spiffe = "spiffe://evil.example/org/acme/agent/t/alice/weather-monitor/agent-abc";
+        assertNull(enforcing().verify(f.svid(spiffe, "keys")));
+    }
+
+    @Test
+    void enforcing_emptyOrgSpoof_isRejected() throws Exception {
+        // "/org//agent/…" — an empty org value must never be smoothed over.
+        String spiffe = "spiffe://cluster.local/org//agent/agent-abc";
+        assertNull(enforcing().verify(f.svid(spiffe, "keys")));
+    }
+
+    @Test
+    void enforcing_orgInSubpath_isPlatform_notAnOrgClaim() throws Exception {
+        // "org" appearing deeper is NOT an org claim ⇒ platform (org null).
+        String spiffe = "spiffe://cluster.local/agent/org/agent-abc";
+        AgentIdentity id = enforcing().verify(f.svid(spiffe, "keys"));
+        assertNotNull(id);
+        assertEquals("agent-abc", id.agentId());
+        assertNull(id.orgId());
+    }
+
+    @Test
+    void legacyMode_orgScopedPath_isNotParsed() throws Exception {
+        // No trust-domain configured ⇒ passthrough: agentId = path.Base, org null,
+        // even for an org-scoped path (bit-identical to pre-substrate).
+        String spiffe = "spiffe://example.org/org/acme/agent/t/u/worker/agent-abc";
+        AgentIdentity id = verifier().verify(f.svid(spiffe, "keys"));
+        assertNotNull(id);
+        assertEquals("agent-abc", id.agentId());
+        assertNull(id.orgId());
     }
 
     // ── agentId-derivation vectors — MUST match the registry (Go path.Base) ──

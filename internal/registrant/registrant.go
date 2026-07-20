@@ -19,6 +19,14 @@ type Identity struct {
 	// today's path.Base(spiffeID). Must be non-empty on success.
 	AgentID string
 
+	// OrgID is the owning organization derived from an org-scoped SPIFFE path
+	// (spiffe://<td>/org/{orgId}/agent/…), or "" for a platform-hosted
+	// (org-less) SVID and for non-SPIFFE credentials. It is NEVER a caller
+	// claim — it comes only from the cryptographically-signed SVID path. The
+	// OrgAwareVerifier binds a non-empty OrgID to the agent record's org, so an
+	// org-A SVID can never authenticate an agent recorded under org B.
+	OrgID string
+
 	// Subject is the raw verified identity string from the credential
 	// (SPIFFE ID, OIDC "sub", or cert SAN) — kept for logging/auditing.
 	Subject string

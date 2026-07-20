@@ -141,6 +141,16 @@ spec:
               value: "spiffe"
             - name: SPIRE_JWKS_URL
               value: "https://spire-spiffe-oidc-discovery-provider.spire-system/keys"
+            # Expected SPIFFE trust domain (remote-substrate Phase 1). The
+            # SpireCredentialVerifier pins it and parses the org-scoped path
+            # (spiffe://<td>/org/{orgId}/agent/…), and OrgAwareVerifier binds an
+            # org-scoped SVID to the agent record's org on BOTH the
+            # client-credentials mint and the token-exchange paths. Platform
+            # (org-less) SVIDs are unchanged. MUST match deploy/spire/values.yaml.
+            # Enforcement is not disablable via env (an empty value falls back to
+            # the default); set this to whatever trust domain SPIRE issues under.
+            - name: SPIRE_TRUST_DOMAIN
+              value: "cluster.local"
             # --- AWS attestor tiers (Phase 5; NOT active on kind) -----------
             # The seam factory (AttestorFactory) selects among all three
             # verifiers off ATTESTOR, exactly as identity-server's Program.cs

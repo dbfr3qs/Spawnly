@@ -2462,7 +2462,19 @@ func main() {
 		if err != nil {
 			log.Fatalf("SVID validator init: %v", err)
 		}
-		verifier = registrant.NewSpiffeVerifier(jwksValidator)
+		sv := registrant.NewSpiffeVerifier(jwksValidator)
+		// Trust-domain enforcement + org-scoped path parsing (remote-substrate
+		// Phase 1). Default "cluster.local" so a cluster deployed without new
+		// env behaves exactly as today for platform (org-less) SVIDs, while
+		// org-scoped substrate SVIDs get bound to their record's org by the
+		// OrgAwareVerifier below. To run under a different SPIRE trust domain,
+		// set SPIRE_TRUST_DOMAIN to that domain (it must match
+		// deploy/spire/values.yaml). Enforcement is NOT env-disablable: an empty
+		// value falls back to the default (getEnv), and the fail-closed legacy
+		// passthrough is reachable only via the bare NewSpiffeVerifier used by
+		// tests.
+		sv.TrustDomain = getEnv("SPIRE_TRUST_DOMAIN", "cluster.local")
+		verifier = sv
 	case "oidc":
 		cfg := registrant.OIDCConfig{
 			JWKSURL:               getEnv("OIDC_JWKS_URL", ""),

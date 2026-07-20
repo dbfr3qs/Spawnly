@@ -69,8 +69,12 @@ func NewOrgAwareVerifier(def Verifier, store orgStore, httpClient *http.Client) 
 func (v *OrgAwareVerifier) Verify(ctx context.Context, r *http.Request) (Identity, error) {
 	cred := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !looksLikeStsCredential(cred) {
-		// Not an STS presentation → the default (SPIRE/OIDC/mTLS) path, unchanged.
-		return v.def.Verify(ctx, r)
+		// Not an STS presentation → the default (SPIRE/OIDC/mTLS) verifier.
+		id, err := v.def.Verify(ctx, r)
+		if err != nil {
+			return Identity{}, err
+		}
+		return v.bindSpireOrg(ctx, id)
 	}
 
 	// STS presentation: replay against the trusted STS endpoint (org-independent —
@@ -121,6 +125,39 @@ func (v *OrgAwareVerifier) Verify(ctx context.Context, r *http.Request) (Identit
 		return Identity{}, errors.New("STS role ARN does not match the org anchor pattern")
 	}
 	return Identity{AgentID: agentID, Subject: id.Arn, Issuer: "aws-sts"}, nil
+}
+
+// bindSpireOrg is the SPIRE-side mirror of the STS org-binding: it sits beside
+// verifyStsOrgBound with the SAME fail-closed discipline. An org-scoped SVID
+// (Identity.OrgID != "", set by the trust-domain-enforcing SpiffeVerifier from
+// the signed path) authenticates ONLY against a record whose OrgID equals the
+// SVID's org — mismatch, an org-less record, an unknown record, or a store
+// outage is a generic rejection, never a fallback.
+//
+// An org-LESS identity (OrgID == "") is platform-hosted (or a non-SPIFFE
+// default verifier that never sets OrgID) and passes through bit-identical to
+// the pre-substrate behavior — the org store is never touched.
+func (v *OrgAwareVerifier) bindSpireOrg(ctx context.Context, id Identity) (Identity, error) {
+	if id.OrgID == "" {
+		// Platform-hosted / org-less: unchanged, no store lookup.
+		return id, nil
+	}
+	// Org-scoped SVID: bind the signed-path org to the record's org. The
+	// agentID is SVID-attested (path.Base of the signed path), so requiring the
+	// record it names to carry the SAME org is exactly the isolation check — an
+	// org-A SVID can never authenticate an agent recorded under org B.
+	rec, err := v.store.GetAgent(ctx, id.AgentID)
+	if err != nil {
+		// Store error ⇒ fail CLOSED (the handler renders the same oracle-free
+		// 401 as any other failure).
+		return Identity{}, err
+	}
+	if rec.AgentID == "" || rec.OrgID == "" || rec.OrgID != id.OrgID {
+		// Unknown record, org-less record (no org to match a scoped SVID), or a
+		// cross-org record ⇒ generic reject.
+		return Identity{}, errors.New("SVID org does not match the agent record's org")
+	}
+	return id, nil
 }
 
 // looksLikeStsCredential reports whether cred is a base64-encoded presigned

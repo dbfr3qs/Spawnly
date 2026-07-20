@@ -18,13 +18,15 @@ import (
 // stubStore implements orgStore from in-memory maps, with an optional forced
 // error on GetOrg to exercise the fail-closed path.
 type stubStore struct {
-	agents  map[string]registry.AgentRecord
-	orgs    map[string]registry.Organization
-	orgErr  error
-	getOrgs int
+	agents    map[string]registry.AgentRecord
+	orgs      map[string]registry.Organization
+	orgErr    error
+	getOrgs   int
+	getAgents int
 }
 
 func (s *stubStore) GetAgent(_ context.Context, id string) (registry.AgentRecord, error) {
+	s.getAgents++
 	return s.agents[id], nil
 }
 
