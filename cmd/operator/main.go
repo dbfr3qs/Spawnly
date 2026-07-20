@@ -13,6 +13,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -78,10 +79,19 @@ func main() {
 
 	cfg := ctrl.GetConfigOrDie()
 
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+	mgrOpts := ctrl.Options{
 		Scheme:                 scheme,
 		HealthProbeBindAddress: probeAddr,
-	})
+	}
+	// WATCH_NAMESPACE scopes the reconciler's cache+watch to a single namespace.
+	// Unset (the platform default) keeps today's cluster-wide behavior verbatim.
+	// The remote-substrate overlay sets it to `substrate-sim` so a SECOND operator
+	// can run there without racing the platform operator over `default` pods.
+	if ns := os.Getenv("WATCH_NAMESPACE"); ns != "" {
+		mgrOpts.Cache = cache.Options{DefaultNamespaces: map[string]cache.Config{ns: {}}}
+	}
+
+	mgr, err := ctrl.NewManager(cfg, mgrOpts)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)

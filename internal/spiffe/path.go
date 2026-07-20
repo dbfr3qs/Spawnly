@@ -55,13 +55,63 @@ type ParsedSVID struct {
 	AgentID string
 }
 
+// BuildOrgAgentPath returns the org-scoped workload SPIFFE ID
+//
+//	spiffe://<td>/org/{orgID}/agent/<seg0>/<seg1>/...
+//
+// for the canonical contract, the inverse of ParsePath's org-scoped shape. The
+// substrate entry creator (script today, the Phase-3 CP Entry API later) uses
+// this so the id it registers parses back through ParsePath to the same
+// {trustDomain, orgID, agentID} — the three halves can never drift.
+//
+// It fails closed on inputs that would produce a malformed or ambiguous id: an
+// empty trust domain or org, or any path segment containing '/' or empty (which
+// would let a caller smuggle extra structure — e.g. an orgID of "a/agent/x" —
+// into the id). agentID is the last segment supplied, matching ParsePath.
+func BuildOrgAgentPath(trustDomain, orgID string, segments ...string) (string, error) {
+	if trustDomain == "" {
+		return "", errors.New("empty trust domain")
+	}
+	// The trust domain is the URI authority, not a path segment: a '/' in it would
+	// silently shift every path segment (e.g. "cluster.local/x" round-trips back to
+	// a DIFFERENT trust domain with an empty org). Reject it — fail closed.
+	if strings.ContainsRune(trustDomain, '/') {
+		return "", errors.New("trust domain contains '/'")
+	}
+	if err := validSegment(orgID); err != nil {
+		return "", errors.New("invalid org id: " + err.Error())
+	}
+	if len(segments) == 0 {
+		return "", errors.New("at least one path segment (the agent id) is required")
+	}
+	for _, s := range segments {
+		if err := validSegment(s); err != nil {
+			return "", errors.New("invalid path segment: " + err.Error())
+		}
+	}
+	return scheme + trustDomain + "/org/" + orgID + "/agent/" + strings.Join(segments, "/"), nil
+}
+
+const scheme = "spiffe://"
+
+// validSegment rejects the empty string and any value containing a path
+// separator, so a single logical segment can never expand into several.
+func validSegment(s string) error {
+	if s == "" {
+		return errors.New("empty segment")
+	}
+	if strings.ContainsRune(s, '/') {
+		return errors.New("segment contains '/'")
+	}
+	return nil
+}
+
 // ParsePath decomposes a SPIFFE ID into {TrustDomain, OrgID, AgentID} per the
 // canonical contract. It returns an error for anything that is not a
 // well-formed spiffe:// URI or that begins with the org-scoped prefix but
 // violates the exact org template (fail closed — a malformed org claim is never
 // silently downgraded to a platform identity).
 func ParsePath(spiffeID string) (ParsedSVID, error) {
-	const scheme = "spiffe://"
 	if !strings.HasPrefix(spiffeID, scheme) {
 		return ParsedSVID{}, errors.New("not a spiffe:// URI")
 	}

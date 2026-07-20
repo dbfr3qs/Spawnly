@@ -1,0 +1,11 @@
+# The simulated substrate: a dedicated namespace in the SAME kind cluster that
+# stands in for a customer's separate kind cluster. Its SPIRE agent attests to
+# the platform's hosted SPIRE server via x509pop with a CP-issued org-bound leaf,
+# and its workloads get org-scoped SVIDs. Platform pods (namespace `default`)
+# are untouched.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: substrate-sim
+  labels:
+    spawnly.io/substrate-sim: "true"

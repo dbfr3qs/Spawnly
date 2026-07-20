@@ -161,6 +161,15 @@ kubectl -n spire-system rollout status deployment/spire-spiffe-oidc-discovery-pr
 echo "==> Applying ClusterSPIFFEID..."
 kubectl apply -f deploy/spire/clusterspiffeid.yaml
 
+# remote-substrate (Phase 2): ensure the throwaway x509pop dev CA Secret and
+# enable the x509pop node attestor on the hosted server ALONGSIDE k8s_psat, so a
+# simulated substrate can attest with a CP-issued org-bound leaf. Idempotent and
+# additive — platform pods keep attesting via k8s_psat, so the platform SPIRE
+# path is unchanged. The dev CA is generated at runtime into a Secret, never
+# committed or baked into an image.
+echo "==> Enabling x509pop node attestation for the remote substrate..."
+"${REPO_ROOT}/scripts/substrate-spire-x509pop.sh"
+
 # ── Manifests ────────────────────────────────────────────────────────────────
 
 echo "==> Applying CRD..."

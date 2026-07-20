@@ -58,3 +58,55 @@ func TestParsePath(t *testing.T) {
 		})
 	}
 }
+
+// BuildOrgAgentPath is the inverse of ParsePath's org-scoped shape: whatever it
+// emits MUST parse back to the same {td, org, agentID}. This round-trip is the
+// contract the substrate entry creator relies on.
+func TestBuildOrgAgentPath(t *testing.T) {
+	t.Run("round-trips through ParsePath", func(t *testing.T) {
+		cases := []struct {
+			td, org string
+			segs    []string
+			wantID  string
+		}{
+			{"cluster.local", "acme", []string{"t", "u", "weather", "agent-abc"}, "agent-abc"},
+			{"cluster.local", "globex", []string{"agent-xyz"}, "agent-xyz"},
+			{"spawnly.example", "acme", []string{"tenant", "alice", "chain", "id-1"}, "id-1"},
+		}
+		for _, c := range cases {
+			id, err := BuildOrgAgentPath(c.td, c.org, c.segs...)
+			if err != nil {
+				t.Fatalf("BuildOrgAgentPath(%q,%q,%v): %v", c.td, c.org, c.segs, err)
+			}
+			p, err := ParsePath(id)
+			if err != nil {
+				t.Fatalf("ParsePath(%q) built id failed: %v", id, err)
+			}
+			if p.TrustDomain != c.td || p.OrgID != c.org || p.AgentID != c.wantID {
+				t.Fatalf("round-trip %q = {td:%q org:%q id:%q}, want {td:%q org:%q id:%q}",
+					id, p.TrustDomain, p.OrgID, p.AgentID, c.td, c.org, c.wantID)
+			}
+		}
+	})
+
+	t.Run("fails closed on smuggling / empty inputs", func(t *testing.T) {
+		bad := []struct {
+			name    string
+			td, org string
+			segs    []string
+		}{
+			{"empty td", "", "acme", []string{"id"}},
+			{"td with slash smuggle", "cluster.local/x", "acme", []string{"id"}},
+			{"empty org", "cluster.local", "", []string{"id"}},
+			{"org with slash smuggle", "cluster.local", "a/agent/x", []string{"id"}},
+			{"no segments", "cluster.local", "acme", nil},
+			{"empty segment", "cluster.local", "acme", []string{""}},
+			{"segment with slash", "cluster.local", "acme", []string{"a/b"}},
+		}
+		for _, c := range bad {
+			if id, err := BuildOrgAgentPath(c.td, c.org, c.segs...); err == nil {
+				t.Fatalf("%s: BuildOrgAgentPath = %q, want error", c.name, id)
+			}
+		}
+	})
+}

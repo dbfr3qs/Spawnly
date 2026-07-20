@@ -1,0 +1,165 @@
+# Substrate SPIRE agent — attests to the hosted platform SPIRE server
+# (spire-server.spire-system) via x509pop in external_pki mode, presenting the
+# CP-issued org-bound leaf from the `substrate-identity` Secret
+# (scripts/substrate-dev-cert.sh). It serves the workload API on a DISTINCT
+# socket dir + health port so it coexists with the platform's own spire-agent on
+# the same node (single-cluster sim). On a real, separate substrate cluster this
+# would BE the node's only SPIRE agent, using the stock paths.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: substrate-spire-agent
+  namespace: substrate-sim
+---
+# The k8s WorkloadAttestor queries the kubelet/API to resolve calling pods.
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: substrate-spire-agent
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "nodes", "nodes/proxy"]
+    verbs: ["get"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: substrate-spire-agent
+subjects:
+  - kind: ServiceAccount
+    name: substrate-spire-agent
+    namespace: substrate-sim
+roleRef:
+  kind: ClusterRole
+  name: substrate-spire-agent
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: substrate-spire-agent
+  namespace: substrate-sim
+data:
+  agent.conf: |
+    {
+      "agent": {
+        "data_dir": "/var/lib/spire",
+        "log_level": "DEBUG",
+        "server_address": "spire-server.spire-system",
+        "server_port": "443",
+        "socket_path": "/run/spire/substrate-agent-sockets/spire-agent.sock",
+        "trust_bundle_format": "spiffe",
+        "trust_bundle_path": "/run/spire/bundle/bundle.spiffe",
+        "trust_domain": "cluster.local"
+      },
+      "health_checks": {
+        "bind_address": "0.0.0.0",
+        "bind_port": "9990",
+        "listener_enabled": true,
+        "live_path": "/live",
+        "ready_path": "/ready"
+      },
+      "plugins": {
+        "KeyManager": [
+          { "memory": { "plugin_data": null } }
+        ],
+        "NodeAttestor": [
+          {
+            "x509pop": {
+              "plugin_data": {
+                "certificate_path": "/run/spire/identity/svid.crt",
+                "private_key_path": "/run/spire/identity/svid.key"
+              }
+            }
+          }
+        ],
+        "WorkloadAttestor": [
+          {
+            "k8s": {
+              "plugin_data": {
+                "skip_kubelet_verification": true,
+                "disable_container_selectors": false
+              }
+            }
+          }
+        ]
+      }
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: substrate-spire-agent
+  namespace: substrate-sim
+  labels:
+    app.kubernetes.io/name: substrate-spire-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: substrate-spire-agent
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: substrate-spire-agent
+    spec:
+      hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: substrate-spire-agent
+      containers:
+        - name: spire-agent
+          image: ghcr.io/spiffe/spire-agent:1.15.1
+          imagePullPolicy: IfNotPresent
+          args: ["-config", "/opt/spire/conf/agent/agent.conf"]
+          env:
+            - name: PATH
+              value: "/opt/spire/bin:/bin"
+          ports:
+            - containerPort: 9990
+              name: healthz
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: healthz
+            initialDelaySeconds: 15
+            periodSeconds: 60
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: healthz
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          volumeMounts:
+            - name: spire-config
+              mountPath: /opt/spire/conf/agent
+              readOnly: true
+            - name: spire-identity
+              mountPath: /run/spire/identity
+              readOnly: true
+            - name: spire-bundle
+              mountPath: /run/spire/bundle
+              readOnly: true
+            - name: spire-data
+              mountPath: /var/lib/spire
+            - name: spire-agent-socket-dir
+              mountPath: /run/spire/substrate-agent-sockets
+      volumes:
+        - name: spire-config
+          configMap:
+            name: substrate-spire-agent
+        - name: spire-identity
+          secret:
+            secretName: substrate-identity
+        - name: spire-bundle
+          configMap:
+            name: spire-bundle
+        - name: spire-data
+          emptyDir: {}
+        # Distinct hostPath from the platform agent's /run/spire/agent-sockets so
+        # the two agents' workload-API sockets never collide on a shared node.
+        - name: spire-agent-socket-dir
+          hostPath:
+            path: /run/spire/substrate-agent-sockets
+            type: DirectoryOrCreate

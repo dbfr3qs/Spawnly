@@ -18,7 +18,7 @@ EXTRA_AGENTS  := keycloak weather-monitor
 MCP_SERVERS   := travel-tools
 SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS) $(EXTRA_AGENTS) $(MCP_SERVERS)
 
-.PHONY: build test test-provider test-dynamodb docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward mailpit kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed reseed-orgs print-% e2e-setup e2e-anchor-setup e2e e2e-subdomains mobile-dev tls-mimic tls-mimic-down
+.PHONY: build test test-provider test-dynamodb docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward mailpit kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed reseed-orgs print-% e2e-setup e2e-anchor-setup e2e e2e-subdomains mobile-dev tls-mimic tls-mimic-down substrate-ca substrate-setup substrate-verify substrate-down
 
 # print-<VAR> — echo a make variable so shell scripts can read the authoritative
 # lists instead of re-declaring them. e.g. `make -s print-SERVICES`.
@@ -95,6 +95,9 @@ spire:
 	kubectl -n spire-system wait --for=condition=available \
 		deployment/spire-spiffe-oidc-discovery-provider --timeout=120s
 	kubectl apply -f deploy/spire/clusterspiffeid.yaml
+	# remote-substrate (Phase 2): ensure the throwaway dev CA Secret and enable the
+	# x509pop node attestor ALONGSIDE k8s_psat (idempotent; platform pods untouched).
+	./scripts/substrate-spire-x509pop.sh
 
 deploy: spire
 	kubectl apply -k deploy/crds/
@@ -254,3 +257,30 @@ e2e-subdomains: tls-mimic
 	@echo ""
 	@echo "==> subdomains suite done. The TLS mimic is STILL UP (apex=localtest.me)."
 	@echo "    Return to the default localhost:8090 mode with:  make tls-mimic-down"
+
+# ── remote-substrate local sim (feature: remote-substrate, Phase 2) ───────────
+# substrate-ca — ensure ONLY the throwaway x509pop dev CA Secret exists (no server
+# changes). `make spire`/bootstrap already do this + enable x509pop; this is here
+# for standalone use.
+substrate-ca:
+	./scripts/substrate-ca.sh
+
+# substrate-setup — stand up the simulated substrate (deploy/substrate overlay:
+# SPIRE agent w/ x509pop, SPIFFE CSI driver, operator) for one org (default acme)
+# on a bootstrapped cluster: enables x509pop on the server, issues the org leaf,
+# copies the trust bundle, applies the overlay. Idempotent.
+#   make substrate-setup            # org=acme
+#   make substrate-setup ORG=globex
+substrate-setup:
+	./scripts/substrate-setup.sh $(ORG)
+
+# substrate-verify — prove the Phase-2 identity loop live (node under org path,
+# pod gets org-scoped SVID verified by the Phase-1 Go verifier, forged-CA
+# rejected). Run after substrate-setup. Wired for the Phase-6 harness / e2e.
+substrate-verify:
+	./scripts/substrate-verify.sh $(ORG)
+
+# substrate-down — remove the substrate sim overlay (leaves the dev CA Secret and
+# the server's x509pop attestor in place; re-run substrate-setup to bring back).
+substrate-down:
+	kubectl delete -k deploy/substrate --ignore-not-found
