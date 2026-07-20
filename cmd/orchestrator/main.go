@@ -611,6 +611,12 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	// the connections. Consistent with the dashboard-session in-memory precedent.
 	substrateHub := newSubstrateHub()
 
+	// Remote-substrate reaper (Phase 5): drives CP→substrate teardown of
+	// substrate-placed agents on DELETE/dismiss — mark the record terminal
+	// (reconcile-on-connect backstop) AND push a live kill down the org's channel.
+	// Shares the settle cadence with the platform DELETE cascade.
+	substrateReaper := &substrateReaper{reg: regClient, hub: substrateHub, settle: cascadeSettleDelay}
+
 	mux.HandleFunc("POST /spawn", func(w http.ResponseWriter, r *http.Request) {
 		var req SpawnRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1224,6 +1230,40 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		// enumeration — the manage-backstop parity the mutation forwards use. A
 		// normal caller forwards their own already-authorized sub.
 		subtreeUserID := manageUserID(ctx, regClient, id)
+
+		// Remote-substrate teardown (Phase 5, fixes B2): a substrate-placed agent has
+		// NO AgentWorkload CR in our `default` namespace, so the CR-delete loop below
+		// would be a silent no-op that returns 204 while the agent keeps running on the
+		// consumer cluster. Route it to the reaper instead: mark every subtree record
+		// terminal (dismiss ⇒ reconcile-on-connect backstop for an offline substrate)
+		// AND push a live kill down the org's channel (immediate teardown when
+		// connected). The org comes from the server-authoritative record, so teardown
+		// is own-org only. Homogeneous subtree: a child inherits its parent's org and
+		// an active substrate takes all of the org's spawns, so a substrate root's
+		// whole subtree is substrate-placed in the same org.
+		rootRec, gerr := regClient.GetAgent(ctx, id)
+		if gerr != nil {
+			// Placement is undecidable — FAIL CLOSED rather than fall through to the
+			// platform CR-delete loop below, which for a substrate agent would be a
+			// silent 204 no-op that leaves the record non-terminal (re-opening B2). This
+			// mirrors the platform path's own first-pass 502 on a registry outage;
+			// canManage already required a successful GetAgent moments ago, so a fresh
+			// error here is a rare transient blip.
+			http.Error(w, "registry unavailable", http.StatusBadGateway)
+			return
+		}
+		if isSubstratePlaced(rootRec) {
+			dismissed, failed := substrateReaper.reapSubtree(ctx, id, rootRec.OrgID, subtreeUserID)
+			if len(failed) > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusMultiStatus) // 207
+				json.NewEncoder(w).Encode(map[string]any{"deleted": dismissed, "failed": failed})
+				return
+			}
+			w.WriteHeader(http.StatusNoContent) // 204
+			return
+		}
+
 		const maxPasses = 8
 		deleted := 0
 		failedSet := map[string]bool{} // node ids whose delete errored (non-NotFound)
@@ -1346,6 +1386,12 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	mux.HandleFunc("POST /v1/agents/{id}/dismiss", requireToken(validator, audience, writeScope, requireCanManage(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
+		// Capture placement/org BEFORE the dismiss so a substrate agent's live pod is
+		// also torn down over the channel (Phase 5, B1). The registry dismiss below
+		// marks the record terminal — which is itself the reconcile-on-connect
+		// backstop for an OFFLINE substrate — and the push handles a CONNECTED one.
+		// A read miss falls through harmlessly (no push; the dismiss still lands).
+		rec, recErr := regClient.GetAgent(r.Context(), id)
 		// Ownership is enforced above by requireOwnedAgent (token sub); the
 		// forwarded userId keeps the registry's own agentOwnedBy check as a
 		// backstop.
@@ -1361,6 +1407,12 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			return
 		}
 		defer resp.Body.Close()
+		// Push the live kill only after the registry confirmed the dismiss (terminal
+		// marking is the durable backstop; the push is the live-teardown optimization).
+		// Own-org: the org comes from the server-authoritative record, never a body.
+		if recErr == nil && isSubstratePlaced(rec) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			substrateReaper.pushKill(rec.OrgID, id)
+		}
 		w.WriteHeader(resp.StatusCode)
 	})))
 

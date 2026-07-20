@@ -38,6 +38,16 @@ type agent struct {
 	// nil send drops reports (used by unit tests that assert side effects only).
 	mu   sync.Mutex
 	send func(channel.Up)
+
+	// opMu serializes the CR/entry-mutating operations (handleDown's spawn/kill and
+	// reconcileOnce) so the periodic-reconcile safety-net (remote-substrate Phase 5)
+	// can NEVER interleave with a live spawn/kill. reconcileOnce does a list-then-act
+	// (list desired, list actual, create/teardown the delta); a live handleSpawn
+	// creating a CR between those two reads would otherwise look like "actual not
+	// desired" and get torn down (or a duplicate created). Holding opMu across the
+	// whole of each makes them atomic w.r.t. one another. Heartbeats/reports do NOT
+	// take it (they use mu), so liveness keeps flowing while a reconcile runs.
+	opMu sync.Mutex
 }
 
 // setSend installs (or clears, with nil) the per-connection UP-frame sink.
@@ -56,8 +66,12 @@ func (a *agent) report(u channel.Up) {
 	}
 }
 
-// handleDown dispatches one CP→substrate frame.
+// handleDown dispatches one CP→substrate frame. It holds opMu for the whole
+// dispatch so a concurrent periodic reconcile (Phase 5) is serialized against the
+// live spawn/kill (see agent.opMu).
 func (a *agent) handleDown(ctx context.Context, d channel.Down) {
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
 	switch d.Type {
 	case channel.TypeSpawn:
 		a.handleSpawn(ctx, *d.Spawn)
@@ -109,13 +123,12 @@ func (a *agent) materialize(ctx context.Context, rec registry.AgentRecord, task 
 // local CR. Idempotent — an already-absent CR/entry is success (teardown must
 // converge even after a prior partial kill).
 //
-// NOTE (Phase 4 vs 5): this consumer-side kill handler + the reconcile teardown
-// path are complete, but the CONTROL-PLANE side that triggers them is Phase 5:
-// the orchestrator's dismiss/revoke/DELETE handlers do not yet push channel.Kill
-// nor mark a substrate record terminal, so a live kill is delivered only via the
-// next reconcile-on-connect (a stable channel misses it). Wiring the orchestrator
-// to push kills and to mark substrate DELETE/dismiss terminal is a Phase-5 task
-// (see plan Phase 5 — "Kill/delete over the channel").
+// The control plane drives this handler via the orchestrator's substrateReaper:
+// DELETE and dismiss of a substrate-placed agent push channel.Kill down this org's
+// channel for a live teardown AND mark the record terminal, so reconcile-on-connect
+// (and the periodic safety-net) still tears it down if the substrate was offline.
+// The kill's org is always the server-authoritative record's org — a substrate
+// only ever tears down its own workloads.
 func (a *agent) handleKill(ctx context.Context, agentID string) {
 	w, found, err := a.store.Get(ctx, agentID)
 	if err != nil {
@@ -161,6 +174,11 @@ func (a *agent) teardown(ctx context.Context, w localWorkload) error {
 // ARE the source of truth). Best-effort per item so one failure doesn't stall the
 // rest; the next reconnect retries.
 func (a *agent) reconcileOnce(ctx context.Context) error {
+	// Serialize against live spawn/kill (handleDown) so the list-then-act below is
+	// atomic w.r.t. a concurrent dispatch — otherwise the periodic reconcile could
+	// tear down a CR a live handleSpawn just created (see agent.opMu).
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
 	desired, err := a.lister.ListDesired(ctx)
 	if err != nil {
 		return err

@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -46,6 +47,12 @@ type substrateConn struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	connated time.Time
+	// lastSeen is the unix-nanos timestamp of the most recent frame read from the
+	// substrate (heartbeat or status). It bounds liveness staleness for the
+	// dashboard: the reader's per-frame deadline (channelReadTimeout) already drops
+	// a silent channel — so `connected` is bounded — and lastSeen surfaces "how
+	// fresh". Atomic: written by the reader goroutine, read by the status handler.
+	lastSeen atomic.Int64
 }
 
 // register installs conn as org's current connection, closing+cancelling any
@@ -81,6 +88,26 @@ func (h *substrateHub) connected(org string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.conns[org] != nil
+}
+
+// liveness reports the org's substrate channel state for the dashboard: online
+// (a live connection is registered) and the last time a frame was seen. This is
+// PURE in-memory connection state — reading it (or a disconnect that clears it)
+// NEVER mutates a registry record (spec AC 8: no terminal sweep on disconnect).
+// Bounded staleness comes from the reader's heartbeat/read timeout: a substrate
+// that stops heartbeating is unregistered within channelReadTimeout, so `online`
+// can never report a silently-dead channel as live for longer than that window.
+func (h *substrateHub) liveness(org string) (online bool, lastSeen time.Time) {
+	h.mu.Lock()
+	conn := h.conns[org]
+	h.mu.Unlock()
+	if conn == nil {
+		return false, time.Time{}
+	}
+	if ns := conn.lastSeen.Load(); ns > 0 {
+		lastSeen = time.Unix(0, ns).UTC()
+	}
+	return true, lastSeen
 }
 
 // push enqueues a Down frame for org's substrate. It returns false when the org
@@ -144,6 +171,7 @@ func (api *substrateAPI) channelHandler(w http.ResponseWriter, r *http.Request) 
 		cancel:   cancel,
 		connated: time.Now().UTC(),
 	}
+	conn.lastSeen.Store(time.Now().UnixNano()) // "seen" at connect until the first frame
 	api.hub.register(conn)
 	defer api.hub.unregister(conn)
 	defer cancel()
@@ -197,6 +225,9 @@ func (api *substrateAPI) channelHandler(w http.ResponseWriter, r *http.Request) 
 			log.Printf("substrate channel (org=%s): dropping malformed up frame: %v", org, verr)
 			continue
 		}
+		// Every valid frame (heartbeat or status) refreshes liveness — bounded
+		// staleness for the dashboard's online display.
+		conn.lastSeen.Store(time.Now().UnixNano())
 		switch up.Type {
 		case channel.TypeHeartbeat:
 			// liveness ping; the successful read already refreshed the deadline.

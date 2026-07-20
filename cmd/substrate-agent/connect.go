@@ -21,6 +21,11 @@ type dialer struct {
 	heartbeat  time.Duration
 	backoffMin time.Duration
 	backoffMax time.Duration
+	// reconcile is the period of the reconcile safety-net (remote-substrate
+	// Phase 5): in addition to reconcile-on-connect, a stably-connected substrate
+	// re-reconciles on this interval so a live kill/spawn it somehow missed still
+	// converges WITHOUT waiting for a reconnect. 0 ⇒ the 60s default.
+	reconcile time.Duration
 }
 
 func (d dialer) withDefaults() dialer {
@@ -32,6 +37,9 @@ func (d dialer) withDefaults() dialer {
 	}
 	if d.backoffMax <= 0 {
 		d.backoffMax = 30 * time.Second
+	}
+	if d.reconcile <= 0 {
+		d.reconcile = 60 * time.Second
 	}
 	return d
 }
@@ -138,6 +146,28 @@ func (a *agent) connectOnce(ctx context.Context, d dialer) (connected bool, err 
 	if rerr := a.reconcileOnce(connCtx); rerr != nil && connCtx.Err() == nil {
 		log.Printf("substrate-agent: reconcile-on-connect: %v", rerr)
 	}
+
+	// Periodic reconcile safety-net: reconcile-on-connect already converges a
+	// reconnecting substrate, but a substrate that stays connected for a long time
+	// and misses a single live kill/spawn (e.g. a frame lost when a buffer-full
+	// server-side drop was immediately re-established) would otherwise never
+	// converge until its next reconnect. A low-frequency periodic reconcile closes
+	// that gap. It is serialized with live spawn/kill via a.opMu (inside
+	// reconcileOnce), so it never races a dispatch.
+	go func() {
+		t := time.NewTicker(d.reconcile)
+		defer t.Stop()
+		for {
+			select {
+			case <-connCtx.Done():
+				return
+			case <-t.C:
+				if rerr := a.reconcileOnce(connCtx); rerr != nil && connCtx.Err() == nil {
+					log.Printf("substrate-agent: periodic reconcile: %v", rerr)
+				}
+			}
+		}
+	}()
 
 	// Reader: consume DOWN frames until the connection ends.
 	c.SetReadLimit(1 << 20)

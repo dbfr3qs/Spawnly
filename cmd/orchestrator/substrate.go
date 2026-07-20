@@ -246,8 +246,32 @@ func (api *substrateAPI) status(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no substrate connected", http.StatusNotFound)
 		return
 	}
+	// Liveness (remote-substrate Phase 5) is layered on from the orchestrator's
+	// in-memory channel state — NOT persisted on the record. `online` is true iff
+	// the org currently holds a live dispatch channel; a disconnect flips it back
+	// without ever mutating org.Substrate (spec AC 8). The record's `active` status
+	// (the routing latch) persists across a disconnect; `online` is the separate
+	// "is it reachable right now" signal the dashboard renders as online/offline.
+	resp := substrateStatusResponse{Substrate: org.Substrate}
+	if api.hub != nil {
+		online, lastSeen := api.hub.liveness(orgID)
+		resp.Online = online
+		if !lastSeen.IsZero() {
+			resp.LastSeen = &lastSeen
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(org.Substrate)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// substrateStatusResponse is the GET status payload: the persisted substrate
+// record (fields flattened via the embedded pointer) plus the live-only liveness
+// signal. Online/LastSeen come from the in-memory channel hub, so they reflect
+// "reachable right now", independent of the record's persisted status.
+type substrateStatusResponse struct {
+	*registry.Substrate
+	Online   bool       `json:"online"`
+	LastSeen *time.Time `json:"lastSeen,omitempty"`
 }
 
 // disconnect clears the org's substrate record (revoke) and best-effort removes
