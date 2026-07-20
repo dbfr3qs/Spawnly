@@ -24,9 +24,28 @@ FROM gcr.io/distroless/static-debian12 AS operator
 COPY --from=build-operator /bin/operator /
 ENTRYPOINT ["/operator"]
 
+FROM builder AS build-substrate-agent
+RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/substrate-agent ./cmd/substrate-agent
+
+# spire-server binary source for the orchestrator's LOCAL-SIM Entry-API broker
+# (execEntryBroker shells out to `spire-server entry …` as a delegated admin over
+# the server's admin socket). Pinned to the substrate SPIRE agent version. This
+# is the local-sim mechanism behind the substrate.EntryBroker seam; the
+# infra-track upgrade swaps it for the SPIRE server entry gRPC admin API and this
+# binary drops out.
+FROM ghcr.io/spiffe/spire-server:1.15.1 AS spire-server-bin
+
 FROM gcr.io/distroless/static-debian12 AS orchestrator
 COPY --from=build-orchestrator /bin/orchestrator /
+# The spire-server CLI (static Go binary) for the Entry-API broker. Present but
+# INERT unless SPIRE_SERVER_SOCKET points at a shared admin socket (else the
+# Entry API stays 503 — never insecure). SPIRE_SERVER_BIN=/spire-server selects it.
+COPY --from=spire-server-bin /opt/spire/bin/spire-server /spire-server
 ENTRYPOINT ["/orchestrator"]
+
+FROM gcr.io/distroless/static-debian12 AS substrate-agent
+COPY --from=build-substrate-agent /bin/substrate-agent /
+ENTRYPOINT ["/substrate-agent"]
 
 FROM gcr.io/distroless/static-debian12 AS registry
 COPY --from=build-registry /bin/registry /

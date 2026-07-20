@@ -64,6 +64,36 @@ func registerSubstrateRoutes(mux *http.ServeMux, s registry.Store, cp func(http.
 		writeJSON(w, org)
 	}))
 
+	// POST /v1/orgs/{id}/substrate/activate — flip the org's substrate to `active`
+	// (remote-substrate Phase 4). Called by the orchestrator (control-plane bearer)
+	// the first time the substrate's dispatch channel connects. Idempotent: an
+	// already-active substrate is a no-op re-write. Never re-creates a cleared
+	// record (a disconnected org whose record was DELETEd stays gone — 404) so a
+	// stale channel cannot resurrect a revoked substrate. `active` is the routing
+	// latch: it survives a later channel disconnect (spec AC 8 — no record mutation
+	// on drop), while online/offline liveness is separate in-memory channel state.
+	mux.HandleFunc("POST /v1/orgs/{id}/substrate/activate", cp(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		id := r.PathValue("id")
+		org, ok, err := s.GetOrg(ctx, id)
+		if storeErr(w, err) {
+			return
+		}
+		if !ok || org.Substrate == nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if org.Substrate.Status != registry.SubstrateActive {
+			now := time.Now().UTC()
+			org.Substrate.Status = registry.SubstrateActive
+			org.Substrate.ActivatedAt = &now
+			if err := s.PutOrg(ctx, org); storeErr(w, err) {
+				return
+			}
+		}
+		writeJSON(w, org.Substrate)
+	}))
+
 	// DELETE /v1/orgs/{id}/substrate — disconnect/revoke the org's substrate. The
 	// record is cleared (the issued credential's fingerprint no longer maps to an
 	// active substrate); the org's agents fall back to platform-hosted, exactly as

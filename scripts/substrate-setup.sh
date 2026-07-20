@@ -37,6 +37,28 @@ kubectl -n "$SPIRE_NS" get configmap spire-bundle -o json \
   | kubectl apply -f -
 
 echo "==> [4/4] Applying the substrate overlay..."
+# The substrate operator + agent call the control-plane-gated registry (template
+# reads, preregister lookups). Copy the platform's control-plane-auth Secret into
+# substrate-sim so those calls carry the shared token instead of silently 401ing
+# (carry-forward from the Phase-2 RBAC/secret review). Harmless no-op under the
+# `none` demo tier (the Secret is absent → optional secretKeyRefs stay unset).
+#
+# ⚠ SIM-ONLY, DO NOT SHIP TO A REAL SUBSTRATE. This shared secret is a
+# high-privilege, cross-org control-plane credential — exactly the authority the
+# Entry-API/channel isolation spine denies the substrate side. It is acceptable
+# here only because the sim is one cluster; in the real design the substrate is a
+# separate cluster that reaches ONLY the public edge (orchestrator/Keycloak, over
+# its org-scoped SVID) and has no network path to the internal ClusterIP registry.
+# For a genuine remote substrate, do NOT distribute this secret: the substrate
+# operator must reach the registry solely through the SVID-authenticated,
+# org-scoped orchestrator surface (as the substrate-agent already does), or be
+# issued a distinct org-scoped credential. (Phase-4 security review, LOW.)
+if kubectl -n default get secret control-plane-auth >/dev/null 2>&1; then
+  echo "    copying control-plane-auth Secret into ${SUBSTRATE_NS}..."
+  kubectl -n default get secret control-plane-auth -o json \
+    | jq '{apiVersion,kind,type,metadata:{name:"control-plane-auth",namespace:"'"$SUBSTRATE_NS"'"},data}' \
+    | kubectl apply -f - >/dev/null
+fi
 kubectl apply -k "$REPO_ROOT/deploy/substrate"
 
 # A re-run (e.g. a different ORG, or a re-issued leaf) rewrites the identity Secret
@@ -51,6 +73,7 @@ echo "==> Waiting for the substrate components..."
 kubectl -n "$SUBSTRATE_NS" rollout status daemonset/substrate-spiffe-csi-driver --timeout=120s
 kubectl -n "$SUBSTRATE_NS" rollout status daemonset/substrate-spire-agent --timeout=120s
 kubectl -n "$SUBSTRATE_NS" rollout status deployment/substrate-agent-operator --timeout=120s
+kubectl -n "$SUBSTRATE_NS" rollout status deployment/substrate-agent --timeout=120s
 
 echo ""
 echo "Substrate sim is up for org '${ORG}'."

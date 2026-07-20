@@ -1,0 +1,112 @@
+# substrate-agent — the consumer-side dispatch adapter (remote-substrate Phase 4).
+# It holds the outbound WebSocket to the control-plane orchestrator, authenticated
+# by its org-scoped SPIRE SVID (the Phase-3 CP-provisioned substrate-agent
+# bootstrap entry), and materializes dispatched spawns into local AgentWorkload
+# CRs + org-scoped SPIRE entries (via the CP Entry API). It reconciles
+# desired-vs-actual on every (re)connect.
+#
+# Identity: a NORMAL SPIFFE workload. It mounts the substrate CSI driver
+# (csi.substrate.spiffe.io) to reach the substrate SPIRE agent's workload API, and
+# the substrate-identity leaf (svid.crt only) to derive its org + x509pop node id
+# for entry parenting. No AWS creds, no SPIRE server.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: substrate-agent
+  namespace: substrate-sim
+---
+# Namespaced Role: the substrate-agent creates/deletes/reads AgentWorkload CRs in
+# its OWN namespace only. A remote, lower-trust cluster component gets no
+# cluster-wide authority (carry-forward from the Phase-2 RBAC-narrowing review).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: substrate-agent
+  namespace: substrate-sim
+rules:
+  - apiGroups: ["agent-platform.io"]
+    resources: ["agentworkloads"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: substrate-agent
+  namespace: substrate-sim
+subjects:
+  - kind: ServiceAccount
+    name: substrate-agent
+    namespace: substrate-sim
+roleRef:
+  kind: Role
+  name: substrate-agent
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: substrate-agent
+  namespace: substrate-sim
+  labels:
+    app: substrate-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: substrate-agent
+  template:
+    metadata:
+      labels:
+        app: substrate-agent
+    spec:
+      serviceAccountName: substrate-agent
+      containers:
+        - name: substrate-agent
+          image: agent-substrate-agent:latest
+          imagePullPolicy: Never
+          env:
+            - name: SPIRE_TRUST_DOMAIN
+              value: "cluster.local"
+            - name: SUBSTRATE_NAMESPACE
+              value: "substrate-sim"
+            - name: SUBSTRATE_SVID_AUDIENCE
+              value: "orchestrator"
+            # The control-plane orchestrator (in-cluster Service in the sim; the
+            # public edge in a real deployment). Entry API + channel both terminate
+            # here; the channel URL is derived by swapping http→ws.
+            - name: ORCHESTRATOR_URL
+              value: "http://orchestrator.default:8080"
+            # The substrate SPIRE agent's workload-API socket (via the substrate CSI
+            # driver mount below).
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix:///spiffe-workload-api/spire-agent.sock"
+            # The org-bound x509 leaf (public cert only) — org (CN) + node
+            # fingerprint (SHA-1) are read from it to parent org-scoped entries.
+            - name: SUBSTRATE_LEAF_CERT_FILE
+              value: "/run/spire/identity/svid.crt"
+            # The service account substrate agent PODS run as (SpiffeInjector leaves
+            # it default); the workload entry's k8s:sa selector binds to it.
+            - name: SUBSTRATE_WORKLOAD_SA
+              value: "default"
+          volumeMounts:
+            - name: spiffe-workload-api
+              mountPath: /spiffe-workload-api
+              readOnly: true
+            - name: substrate-identity
+              mountPath: /run/spire/identity
+              readOnly: true
+      volumes:
+        # Substrate CSI driver (distinct from the platform's csi.spiffe.io) so the
+        # agent talks to the substrate SPIRE agent on a shared node.
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.substrate.spiffe.io
+            readOnly: true
+        # The leaf cert ONLY (svid.crt) — never the key; the agent needs only the
+        # public cert to derive org + node fingerprint.
+        - name: substrate-identity
+          secret:
+            secretName: substrate-identity
+            items:
+              - key: svid.crt
+                path: svid.crt

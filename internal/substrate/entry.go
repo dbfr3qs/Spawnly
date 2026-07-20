@@ -56,6 +56,17 @@ type EntryBroker interface {
 	DeleteEntry(ctx context.Context, spiffeID string) error
 }
 
+// ParentPrefixDeleter is an OPTIONAL EntryBroker capability: delete EVERY entry
+// whose parent id begins with parentPrefix. It backs the rotate hygiene
+// (InvalidateOrgNodeEntries) — sweeping an org's stale node entries so a
+// superseded x509pop node (old cert fingerprint) cannot keep re-issuing SVIDs to
+// workload entries parented under it if the old leaf is replayed. A broker that
+// cannot enumerate entries omits this; InvalidateOrgNodeEntries then reports the
+// gap rather than silently skipping.
+type ParentPrefixDeleter interface {
+	DeleteEntriesUnderParent(ctx context.Context, parentPrefix string) error
+}
+
 // RecordOrgResolver resolves the server-authoritative owning org of an agent
 // record, so the Entry API can require that a requested workload identity names a
 // record that actually belongs to the caller's org. found is false for an unknown
@@ -154,6 +165,36 @@ func (s *EntryService) DeleteWorkloadEntry(ctx context.Context, callerOrg, spiff
 		return fmt.Errorf("broker delete entry: %w", err)
 	}
 	return nil
+}
+
+// InvalidateOrgNodeEntries deletes ALL registration entries parented under the
+// org's x509pop node prefix (spiffe://<td>/spire/agent/x509pop/org/{org}/). It is
+// the substrate ROTATE / disconnect hygiene: a rotate mints a NEW node
+// (fingerprint) and the connect flow re-provisions the bootstrap entry under it,
+// but the OLD node's entries (the superseded bootstrap entry + any workload
+// entries the substrate authored) would otherwise linger and keep issuing SVIDs
+// if the old (replaced) leaf were replayed. Sweeping the whole org-node prefix
+// removes both in one shot; the substrate then re-authors its workload entries
+// under the new node on reconcile-on-connect. Org is server-authoritative
+// (normalized here); a broker without enumeration support returns an error the
+// caller treats as best-effort.
+func (s *EntryService) InvalidateOrgNodeEntries(ctx context.Context, orgID string) error {
+	if s.TrustDomain == "" {
+		return ErrEntryUnauthorized
+	}
+	normOrg, err := devca.NormalizeOrgID(orgID)
+	if err != nil {
+		return fmt.Errorf("invalid org id: %w", err)
+	}
+	prefix, err := devca.NodeSpiffePathPrefix(s.TrustDomain, normOrg)
+	if err != nil {
+		return fmt.Errorf("node prefix: %w", err)
+	}
+	pd, ok := s.Broker.(ParentPrefixDeleter)
+	if !ok {
+		return errors.New("entry broker does not support parent-prefix deletion")
+	}
+	return pd.DeleteEntriesUnderParent(ctx, prefix)
 }
 
 // authorizeWorkload is the pure authorization core shared by create (and the

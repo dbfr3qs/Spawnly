@@ -62,11 +62,19 @@ fi
 # 3. Inject the x509pop NodeAttestor into the server ConfigMap (server.conf JSON),
 #    exactly once (idempotent jq: drop any existing x509pop, then append).
 echo "==> Ensuring x509pop NodeAttestor in the spire-server ConfigMap..."
+# ORCH_ADMIN_ID is the orchestrator's SPIFFE id trusted as a delegated admin for
+# the Entry API's gRPC path (the infra-track upgrade of the local-sim CLI broker).
+# admin_ids only gates who may call the SPIRE server ADMIN API; the per-entry
+# org authorization lives in internal/substrate.EntryService, never here. Adding
+# it is harmless for the CLI-over-socket local-sim broker (which is admin by
+# virtue of socket access) and readies the server for the gRPC broker.
+ORCH_ADMIN_ID="${ORCH_ADMIN_ID:-spiffe://cluster.local/agent/orchestrator}"
 cur="$(kubectl -n "$NS" get cm spire-server -o jsonpath='{.data.server\.conf}')"
 new="$(printf '%s' "$cur" | jq \
-  --arg ca "$CA_BUNDLE_PATH" --arg tmpl "$AGENT_PATH_TEMPLATE" \
+  --arg ca "$CA_BUNDLE_PATH" --arg tmpl "$AGENT_PATH_TEMPLATE" --arg admin "$ORCH_ADMIN_ID" \
   '.plugins.NodeAttestor = ([.plugins.NodeAttestor[] | select(has("x509pop") | not)]
-     + [{"x509pop":{"plugin_data":{"ca_bundle_path":$ca,"agent_path_template":$tmpl}}}])')"
+     + [{"x509pop":{"plugin_data":{"ca_bundle_path":$ca,"agent_path_template":$tmpl}}}])
+   | .server.admin_ids = (((.server.admin_ids // []) - [$admin]) + [$admin])')"
 
 if [ "$(printf '%s' "$cur" | jq -S .)" != "$(printf '%s' "$new" | jq -S .)" ]; then
   # Merge-patch the single data key with the new JSON string.

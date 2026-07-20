@@ -263,4 +263,13 @@ type AgentRecord struct {
 	// agent immortal against the operator's stale sweep. Distinct from OrgID and
 	// TenantID.
 	Placement string `json:"placement,omitempty"`
+	// ConsentRequired mirrors the spawn-time decision (parent template gates this
+	// child behind CIBA consent) onto the durable record. It exists so a
+	// remote-substrate reconcile-on-connect (which re-materializes a CR from the
+	// record alone, after the live spawn push was missed while the substrate was
+	// offline) preserves the consent gate — without it an offline-then-reconciled
+	// child could serve tokens without the CIBA backchannel (a consent bypass).
+	// Server-set at preregistration alongside Placement; platform-hosted spawns
+	// leave it false (their CR carries the flag directly and survives in etcd).
+	ConsentRequired bool `json:"consentRequired,omitempty"`
 }

@@ -1,7 +1,6 @@
 package substrate
 
 import (
-	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -86,16 +85,18 @@ func (i *Issuer) IssueOrgIdentity(orgID string) (IssuedIdentity, error) {
 		return IssuedIdentity{}, err
 	}
 	sum := sha256.Sum256(cert.Raw)
-	nodePrefix, err := devca.NodeSpiffePathPrefix(i.trustDomain, normOrg)
+	// NodeID via the shared devca helper — the SINGLE source of the x509pop
+	// SHA-1 node-fingerprint decision, so the connect flow and the substrate-agent
+	// derive the SAME parent id for org entries.
+	nodeID, err := devca.NodeIDFromLeaf(i.trustDomain, leaf.CertPEM)
 	if err != nil {
-		return IssuedIdentity{}, fmt.Errorf("node prefix: %w", err)
+		return IssuedIdentity{}, fmt.Errorf("node id: %w", err)
 	}
-	nodeFP := sha1.Sum(cert.Raw) //nolint:gosec // x509pop node fingerprint is SHA-1 by SPIRE plugin design, not a security digest here.
 	return IssuedIdentity{
 		Leaf:            leaf,
 		CertFingerprint: hex.EncodeToString(sum[:]),
 		CertSerial:      cert.SerialNumber.Text(16),
-		NodeID:          nodePrefix + hex.EncodeToString(nodeFP[:]),
+		NodeID:          nodeID,
 		ExpiresAt:       cert.NotAfter,
 	}, nil
 }

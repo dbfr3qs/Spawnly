@@ -2,7 +2,7 @@
 MODULE        := github.com/spawnly/platform
 KIND_CLUSTER  := agent-platform
 IMAGE_TAG     := latest
-GO_SERVICES   := operator orchestrator registry sample-api agent-sidecar dashboard mobile-gateway
+GO_SERVICES   := operator orchestrator registry sample-api agent-sidecar dashboard mobile-gateway substrate-agent
 # Separate-module Go agents: their own go.mod (not the root module), so they
 # build via `cd agents/<name> && go build .` and map to image agent-<name>.
 # (None at present — listed here so the build/Docker plumbing stays in place.)

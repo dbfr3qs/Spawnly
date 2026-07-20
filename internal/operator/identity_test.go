@@ -90,4 +90,28 @@ func TestSpiffeInjector_MountsWorkloadAPIAndScope(t *testing.T) {
 	if sidecarEnv(pod)["SPIFFE_ENDPOINT_SOCKET"] == "" {
 		t.Error("SPIFFE_ENDPOINT_SOCKET not set on sidecar")
 	}
+	// Default (empty Driver) uses the platform CSI driver.
+	if d := workloadCSIDriver(pod); d != "csi.spiffe.io" {
+		t.Errorf("default CSI driver = %q, want csi.spiffe.io", d)
+	}
+}
+
+// The substrate overlay sets a distinct CSI driver so substrate pods mount the
+// substrate SPIRE agent's socket on a shared node (remote-substrate Phase 4).
+func TestSpiffeInjector_ConfigurableCSIDriver(t *testing.T) {
+	pod := podWithSidecar()
+	aw := &agentv1alpha1.AgentWorkload{ObjectMeta: metav1.ObjectMeta{Name: "worker-xyz"}}
+	SpiffeInjector{Driver: "csi.substrate.spiffe.io"}.Apply(pod, aw)
+	if d := workloadCSIDriver(pod); d != "csi.substrate.spiffe.io" {
+		t.Errorf("CSI driver = %q, want csi.substrate.spiffe.io", d)
+	}
+}
+
+func workloadCSIDriver(pod *corev1.Pod) string {
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == "spiffe-workload-api" && v.CSI != nil {
+			return v.CSI.Driver
+		}
+	}
+	return ""
 }

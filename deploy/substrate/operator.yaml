@@ -5,10 +5,10 @@
 # proof uses a script-created SPIRE entry + a plain test pod); it is wired now so
 # the bundle is complete for Phase 4's dispatch path.
 #
-# NOTE (Phase 4): the reconciler's SpiffeInjector mounts driver csi.spiffe.io.
-# For the single-cluster sim, substrate pods must instead mount
-# csi.substrate.spiffe.io; making that driver name configurable is a Phase-4
-# item. On a real separate substrate cluster csi.spiffe.io is correct as-is.
+# RBAC (Phase 4): a namespaced Role/RoleBinding scoped to substrate-sim — a
+# lower-trust remote cluster component gets NO cluster-wide authority
+# (carry-forward from the Phase-2 RBAC-narrowing review). The reconciler is
+# already namespace-scoped via WATCH_NAMESPACE; the Role matches that blast radius.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -16,9 +16,10 @@ metadata:
   namespace: substrate-sim
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
-  name: substrate-agent-operator-role
+  name: substrate-agent-operator
+  namespace: substrate-sim
 rules:
   - apiGroups: ["agent-platform.io"]
     resources: ["agentworkloads"]
@@ -43,16 +44,17 @@ rules:
     verbs: ["create", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
-  name: substrate-agent-operator-binding
+  name: substrate-agent-operator
+  namespace: substrate-sim
 subjects:
   - kind: ServiceAccount
     name: substrate-agent-operator
     namespace: substrate-sim
 roleRef:
-  kind: ClusterRole
-  name: substrate-agent-operator-role
+  kind: Role
+  name: substrate-agent-operator
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: apps/v1
@@ -82,6 +84,12 @@ spec:
             # Substrate pods get identity from the local SPIRE agent (SPIFFE).
             - name: ATTESTOR
               value: "spiffe"
+            # Single-cluster sim: substrate pods must mount the SUBSTRATE CSI driver
+            # (distinct from the platform's csi.spiffe.io) so they reach the
+            # substrate SPIRE agent's socket on a shared node. On a real separate
+            # substrate cluster, unset this to use the stock csi.spiffe.io.
+            - name: SPIFFE_CSI_DRIVER
+              value: "csi.substrate.spiffe.io"
             # The stale-sweep is a platform-cluster concern; the substrate's
             # liveness is the Phase-4 channel, not a CR sweep.
             - name: STALE_SWEEP

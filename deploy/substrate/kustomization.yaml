@@ -17,3 +17,5 @@ resources:
   - spire-agent.yaml
   - spiffe-csi-driver.yaml
   - operator.yaml
+  - substrate-agent.yaml
+  - networkpolicy.yaml

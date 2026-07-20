@@ -60,7 +60,10 @@ func main() {
 	var identityInjector operator.IdentityInjector
 	switch v := getenv("ATTESTOR", "spiffe"); v {
 	case "spiffe":
-		identityInjector = operator.SpiffeInjector{}
+		// SPIFFE_CSI_DRIVER lets the substrate overlay point at its own CSI driver
+		// (csi.substrate.spiffe.io) so substrate pods mount the substrate SPIRE
+		// agent's socket on a shared node; empty ⇒ the platform default.
+		identityInjector = operator.SpiffeInjector{Driver: getenv("SPIFFE_CSI_DRIVER", "")}
 	case "aws-sts":
 		identityInjector = operator.AwsInjector{
 			ServiceAccount: getenv("AWS_AGENT_SERVICE_ACCOUNT", "spawnly-agent"),

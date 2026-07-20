@@ -34,6 +34,7 @@ import (
 	"github.com/spawnly/platform/internal/events"
 	"github.com/spawnly/platform/internal/registry"
 	"github.com/spawnly/platform/internal/spicedb"
+	"github.com/spawnly/platform/internal/substrate/channel"
 	"github.com/spawnly/platform/internal/tokenvalidator"
 )
 
@@ -604,6 +605,12 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	// under auth=none, exactly like its registry client).
 	evtClient := events.NewWithToken(registryURL, controlPlaneBearer)
 
+	// Remote-substrate dispatch hub (Phase 4): in-memory, one live channel per
+	// org. Constructed here so the /spawn path can push a spawn command to a
+	// connected substrate, and the channel endpoint (registered below) can hold
+	// the connections. Consistent with the dashboard-session in-memory precedent.
+	substrateHub := newSubstrateHub()
+
 	mux.HandleFunc("POST /spawn", func(w http.ResponseWriter, r *http.Request) {
 		var req SpawnRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -829,6 +836,73 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		// The workload name becomes the pod name and the agent-id label, which SPIRE
 		// uses to issue the SVID. The agent's identity is the SVID, not this name.
 		workloadName := "agent-" + shortID()
+
+		// Remote-substrate targeting (Phase 4): if the spawn's org has an ACTIVE
+		// substrate, the agent runs on the CONSUMER'S compute, not ours — so we
+		// SKIP the local AgentWorkload CR and instead preregister the record as
+		// substrate-placed, then push a spawn command down the org's channel. An
+		// offline substrate (record active but no live channel) leaves the record
+		// `pending`; the substrate's reconcile-on-connect delivers it. All spawns
+		// for the org — top-level AND child (a child inherits its parent's org) —
+		// take this path (spec: one substrate takes ALL the org's spawns). Orgs
+		// WITHOUT a substrate skip this entirely (req.OrgID == "" ⇒ never fetch),
+		// so they are bit-identical to today. Server-authoritative: the org is
+		// req.OrgID (token/lineage-derived), never a body field, and the channel is
+		// bound to the substrate's own SVID org — a substrate can never receive
+		// another org's work.
+		if req.OrgID != "" {
+			org, ferr := fetchOrg(r.Context(), registryURL, controlPlaneBearer, req.OrgID)
+			if ferr != nil {
+				// Fail OPEN to the platform path: substrate placement is an
+				// optimization/routing choice, not an authorization gate, and
+				// platform hosting is the safe default (the agent gets an org-less
+				// platform SVID that authenticates exactly as today). A registry blip
+				// on the org read must NOT break the org's spawns — it just means this
+				// spawn runs on the platform this time; a substrate org keeps routing
+				// to its substrate on the next spawn once the read succeeds. Orgs
+				// without a substrate are unaffected either way.
+				log.Printf("spawn: resolve org %s for substrate placement (falling through to platform): %v", req.OrgID, ferr)
+			} else if org.Substrate != nil && org.Substrate.Status == registry.SubstrateActive {
+				if err := regClient.PreRegisterAgent(r.Context(), registry.AgentRecord{
+					AgentID:      workloadName,
+					AgentType:    req.AgentType,
+					TenantID:     req.TenantID,
+					UserID:       req.UserID,
+					Lifecycle:    lifecycle,
+					SupportsChat: tpl.Runtime.SupportsChat,
+					ParentID:     req.ParentID,
+					OrgID:        req.OrgID,
+					// Server-set placement — immutable thereafter; excludes the record
+					// from the platform stale-sweep (its CR is on the substrate, not here).
+					Placement: registry.PlacementSubstrate,
+					// Persist the consent gate so an offline-then-reconciled child keeps
+					// its CIBA requirement (no consent bypass on reconcile-on-connect).
+					ConsentRequired: consentRequired,
+				}); err != nil {
+					log.Printf("pre-register substrate agent: %v", err)
+					http.Error(w, "failed to spawn agent", http.StatusInternalServerError)
+					return
+				}
+				pushed := substrateHub.push(req.OrgID, channel.NewSpawn(channel.SpawnCommand{
+					AgentID:         workloadName,
+					AgentType:       req.AgentType,
+					UserID:          req.UserID,
+					TenantID:        req.TenantID,
+					OrgID:           req.OrgID,
+					Task:            req.Task,
+					ParentID:        req.ParentID,
+					Lifecycle:       lifecycle,
+					ConsentRequired: consentRequired,
+					SupportsChat:    tpl.Runtime.SupportsChat,
+				}))
+				log.Printf("spawned substrate workload %s for org %s (pushed=%v)", workloadName, req.OrgID, pushed)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusAccepted)
+				json.NewEncoder(w).Encode(SpawnResponse{WorkloadName: workloadName})
+				return
+			}
+		}
+
 		aw := &agentv1alpha1.AgentWorkload{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      workloadName,
@@ -1876,7 +1950,7 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	// Remote-substrate connect surface + CP-mediated Entry API (Phase 3). Built
 	// from env; unconfigured components (no dev CA / no entry broker) leave the
 	// routes returning 503 rather than behaving insecurely.
-	substrateAPI := newSubstrateAPI(regClient, registryURL, controlPlaneBearer)
+	substrateAPI := newSubstrateAPI(regClient, registryURL, controlPlaneBearer, substrateHub)
 	registerSubstrateRoutes(mux, substrateAPI, validator, audience, readScope, writeScope, sdb)
 
 	return mux

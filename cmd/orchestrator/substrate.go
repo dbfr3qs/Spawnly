@@ -33,6 +33,17 @@ type substrateAPI struct {
 	cpBearer    func() string
 	trustDomain string
 
+	// reg is the registry client used by the substrate-scoped agent list
+	// (reconcile-on-connect source). It reads ALL records; listAgents filters to
+	// the caller's own org server-side.
+	reg registry.Client
+	// hub holds the live dispatch-channel connections (Phase 4). nil ⇒ the channel
+	// endpoint returns 503. In-memory, one connection per org (newest-wins).
+	hub *substrateHub
+	// readTimeout bounds how long the channel waits for the next UP frame before
+	// treating it as dead (0 ⇒ the 90s default). Overridable in tests.
+	readTimeout time.Duration
+
 	// issuer mints the org-bound x509 identity off the dev CA. nil when the CA is
 	// not mounted (feature not configured) ⇒ connect returns 503.
 	issuer *substrate.Issuer
@@ -82,6 +93,12 @@ func registerSubstrateRoutes(mux *http.ServeMux, api *substrateAPI, v tokenvalid
 	// human token. Creates/deletes SPIRE entries ONLY under the caller's own org.
 	mux.HandleFunc("POST /v1/substrate/entries", api.createEntry)
 	mux.HandleFunc("DELETE /v1/substrate/entries", api.deleteEntry)
+
+	// Dispatch channel + reconcile source (Phase 4) — both substrate-SVID
+	// authenticated, own-org-only. The channel is the persistent WebSocket the
+	// substrate-agent holds; the list is its desired-state pull on (re)connect.
+	mux.HandleFunc("GET /v1/substrate/channel", api.channelHandler)
+	mux.HandleFunc("GET /v1/substrate/agents", api.listAgents)
 }
 
 // connectResponse is the one-time connect payload. identity (cert+key) is
@@ -157,11 +174,21 @@ func (api *substrateAPI) connect(w http.ResponseWriter, r *http.Request) {
 	//    configured (Phase-4 reconcile re-drives it); a provisioning ERROR with a
 	//    configured broker fails the connect so it isn't silently half-wired.
 	if api.entries != nil {
-		if agentID, berr := spiffe.BuildSubstrateAgentPath(api.trustDomain, normOrg); berr == nil {
-			if derr := api.entries.Broker.DeleteEntry(ctx, agentID); derr != nil {
-				log.Printf("substrate connect %s: clear prior bootstrap entry: %v", normOrg, derr)
-				http.Error(w, "failed to provision substrate identity", http.StatusBadGateway)
-				return
+		// Rotate hygiene: sweep EVERY entry under the org's x509pop node prefix
+		// (the superseded bootstrap entry AND any workload entries the substrate
+		// authored under the OLD node), so a replaced/compromised prior leaf can't
+		// keep issuing SVIDs. On a fresh connect this is a no-op. The substrate
+		// re-authors its workload entries under the NEW node on reconcile-on-connect.
+		if derr := api.entries.InvalidateOrgNodeEntries(ctx, normOrg); derr != nil {
+			// Fall back to at least clearing the bootstrap entry if the broker can't
+			// enumerate (keeps older brokers working); a hard failure fails the connect.
+			log.Printf("substrate connect %s: sweep prior org-node entries: %v (falling back to bootstrap-only)", normOrg, derr)
+			if agentID, berr := spiffe.BuildSubstrateAgentPath(api.trustDomain, normOrg); berr == nil {
+				if berr := api.entries.Broker.DeleteEntry(ctx, agentID); berr != nil {
+					log.Printf("substrate connect %s: clear prior bootstrap entry: %v", normOrg, berr)
+					http.Error(w, "failed to provision substrate identity", http.StatusBadGateway)
+					return
+				}
 			}
 		}
 		selectors := []string{"k8s:ns:" + api.agentNamespace, "k8s:sa:" + api.agentSA}
@@ -238,14 +265,19 @@ func (api *substrateAPI) disconnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to disconnect substrate", http.StatusBadGateway)
 		return
 	}
-	// Best-effort: remove the substrate-agent bootstrap entry so a disconnected
-	// org can't keep an SVID. A failure here is logged, not fatal (the record —
-	// the authoritative gate — is already gone; a stale entry issues an SVID that
-	// authenticates nothing without a record).
+	// Best-effort: sweep EVERY entry under the org's x509pop node (the bootstrap
+	// entry AND any workload entries) so a disconnected org can't keep issuing
+	// SVIDs. A failure here is logged, not fatal (the record — the authoritative
+	// gate — is already gone; a stale entry issues an SVID that authenticates
+	// nothing without a record). Falls back to bootstrap-only if enumeration is
+	// unsupported.
 	if api.entries != nil {
-		if id, berr := spiffe.BuildSubstrateAgentPath(api.trustDomain, normOrg); berr == nil {
-			if derr := api.entries.Broker.DeleteEntry(ctx, id); derr != nil {
-				log.Printf("substrate disconnect %s: delete bootstrap entry: %v", normOrg, derr)
+		if derr := api.entries.InvalidateOrgNodeEntries(ctx, normOrg); derr != nil {
+			log.Printf("substrate disconnect %s: sweep org-node entries: %v", normOrg, derr)
+			if id, berr := spiffe.BuildSubstrateAgentPath(api.trustDomain, normOrg); berr == nil {
+				if berr := api.entries.Broker.DeleteEntry(ctx, id); berr != nil {
+					log.Printf("substrate disconnect %s: delete bootstrap entry: %v", normOrg, berr)
+				}
 			}
 		}
 	}
@@ -527,6 +559,73 @@ func (b *execEntryBroker) DeleteEntry(ctx context.Context, spiffeID string) erro
 	return nil
 }
 
+// DeleteEntriesUnderParent implements substrate.ParentPrefixDeleter: list ALL
+// entries and delete each whose Parent ID begins with parentPrefix. Backs the
+// rotate hygiene (EntryService.InvalidateOrgNodeEntries) — sweeping an org's
+// stale node entries so a superseded x509pop node can't keep issuing SVIDs. A
+// missing entry on delete is a no-op success (idempotent).
+func (b *execEntryBroker) DeleteEntriesUnderParent(ctx context.Context, parentPrefix string) error {
+	if parentPrefix == "" {
+		return fmt.Errorf("empty parent prefix")
+	}
+	showArgs := append([]string{"entry", "show"}, b.baseArgs()...)
+	out, err := b.runCmd(ctx, b.bin, showArgs...)
+	if err != nil {
+		return fmt.Errorf("spire-server entry show: %v: %s", err, strings.TrimSpace(out))
+	}
+	for _, e := range parseEntriesWithParent(out) {
+		if !strings.HasPrefix(e.parent, parentPrefix) {
+			continue
+		}
+		delArgs := append([]string{"entry", "delete"}, b.baseArgs()...)
+		delArgs = append(delArgs, "-entryID", e.id)
+		if delOut, derr := b.runCmd(ctx, b.bin, delArgs...); derr != nil {
+			if strings.Contains(strings.ToLower(delOut), "not found") {
+				continue
+			}
+			return fmt.Errorf("spire-server entry delete: %v: %s", derr, strings.TrimSpace(delOut))
+		}
+	}
+	return nil
+}
+
+// parsedEntry is one entry's id + parent id from `spire-server entry show`.
+type parsedEntry struct{ id, parent string }
+
+// parseEntriesWithParent extracts (Entry ID, Parent ID) pairs from
+// `spire-server entry show` output. Each entry block starts with "Entry ID" and
+// carries a "Parent ID"; the two are paired within a block.
+func parseEntriesWithParent(out string) []parsedEntry {
+	var entries []parsedEntry
+	var cur parsedEntry
+	flush := func() {
+		if cur.id != "" {
+			entries = append(entries, cur)
+		}
+		cur = parsedEntry{}
+	}
+	sc := bufio.NewScanner(strings.NewReader(out))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		switch {
+		case strings.HasPrefix(line, "Entry ID"):
+			flush()
+			cur.id = valueAfterColon(line)
+		case strings.HasPrefix(line, "Parent ID"):
+			cur.parent = valueAfterColon(line)
+		}
+	}
+	flush()
+	return entries
+}
+
+func valueAfterColon(line string) string {
+	if i := strings.Index(line, ":"); i >= 0 {
+		return strings.TrimSpace(line[i+1:])
+	}
+	return ""
+}
+
 // parseEntryIDs extracts every "Entry ID : <id>" from `spire-server entry show`
 // output.
 func parseEntryIDs(out string) []string {
@@ -551,12 +650,14 @@ func parseEntryIDs(out string) []string {
 // component that is not configured (no dev CA mounted, no entry broker) is left
 // nil and its routes return 503 rather than behaving insecurely. Wiring the real
 // broker + JWKS auth lands with the dispatch channel (Phase 4).
-func newSubstrateAPI(reg registry.Client, registryURL string, cpBearer func() string) *substrateAPI {
+func newSubstrateAPI(reg registry.Client, registryURL string, cpBearer func() string, hub *substrateHub) *substrateAPI {
 	td := getEnv("SPIRE_TRUST_DOMAIN", "cluster.local")
 	api := &substrateAPI{
 		registryURL:    registryURL,
 		cpBearer:       cpBearer,
 		trustDomain:    td,
+		reg:            reg,
+		hub:            hub,
 		agentNamespace: getEnv("SUBSTRATE_AGENT_NAMESPACE", "substrate-sim"),
 		agentSA:        getEnv("SUBSTRATE_AGENT_SA", "substrate-agent"),
 		leafTTL:        90 * 24 * time.Hour,

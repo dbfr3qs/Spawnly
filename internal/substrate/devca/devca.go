@@ -34,8 +34,10 @@ package devca
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha1" //nolint:gosec // SHA-1 is the SPIRE x509pop node fingerprint algorithm, matched here by design.
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -73,6 +75,33 @@ func NodeSpiffePathPrefix(trustDomain, orgID string) (string, error) {
 		return "", err
 	}
 	return "spiffe://" + trustDomain + "/spire/agent/x509pop/org/" + orgID + "/", nil
+}
+
+// NodeIDFromLeaf computes the exact x509pop NODE SPIFFE ID the hosted SPIRE
+// server assigns to a substrate node presenting leafCertPEM, i.e.
+//
+//	spiffe://<td>/spire/agent/x509pop/org/{CN}/{sha1-hex-of-DER}
+//
+// It is the single source of the node-fingerprint decision (SHA-1 of the leaf
+// DER, matching the SPIRE x509pop plugin and scripts/substrate-verify.sh), shared
+// by the connect flow's Issuer and the substrate-agent so both derive the SAME
+// parent for org-scoped entries. The org comes from the leaf's CommonName — never
+// a caller claim — so a substrate can only ever compute its OWN node id.
+func NodeIDFromLeaf(trustDomain string, leafCertPEM []byte) (string, error) {
+	org, err := OrgFromLeaf(leafCertPEM)
+	if err != nil {
+		return "", err
+	}
+	prefix, err := NodeSpiffePathPrefix(trustDomain, org)
+	if err != nil {
+		return "", err
+	}
+	cert, err := parseCert(leafCertPEM)
+	if err != nil {
+		return "", err
+	}
+	fp := sha1.Sum(cert.Raw) //nolint:gosec // x509pop node fingerprint is SHA-1 by SPIRE plugin design, not a security digest.
+	return prefix + hex.EncodeToString(fp[:]), nil
 }
 
 // orgIDPattern is the strict charset for an org id used as a path segment. No

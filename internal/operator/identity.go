@@ -21,19 +21,33 @@ type IdentityInjector interface {
 	Apply(pod *corev1.Pod, aw *agentv1alpha1.AgentWorkload)
 }
 
-// SpiffeInjector delivers identity via SPIRE: a csi.spiffe.io volume surfaces
-// the workload-API socket to the sidecar, and the pod's scope label routes
-// which ClusterSPIFFEID SPIRE applies (see deploy/spire/clusterspiffeid.yaml).
-type SpiffeInjector struct{}
+// SpiffeInjector delivers identity via SPIRE: a SPIFFE-CSI volume surfaces the
+// workload-API socket to the sidecar, and the pod's scope label routes which
+// ClusterSPIFFEID SPIRE applies (see deploy/spire/clusterspiffeid.yaml).
+//
+// Driver is the SPIFFE CSI driver name. Empty ⇒ the platform default
+// "csi.spiffe.io". The remote-substrate sim (Phase 4) sets it to
+// "csi.substrate.spiffe.io" (via SPIFFE_CSI_DRIVER) so substrate pods mount the
+// substrate SPIRE agent's socket, not the co-located platform agent's, on a
+// shared node. On a real separate substrate cluster the default is correct.
+type SpiffeInjector struct {
+	Driver string
+}
+
+const defaultSpiffeCSIDriver = "csi.spiffe.io"
 
 // Apply implements IdentityInjector.
-func (SpiffeInjector) Apply(pod *corev1.Pod, aw *agentv1alpha1.AgentWorkload) {
+func (s SpiffeInjector) Apply(pod *corev1.Pod, aw *agentv1alpha1.AgentWorkload) {
+	driver := s.Driver
+	if driver == "" {
+		driver = defaultSpiffeCSIDriver
+	}
 	readOnly := true
 	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
 		Name: "spiffe-workload-api",
 		VolumeSource: corev1.VolumeSource{
 			CSI: &corev1.CSIVolumeSource{
-				Driver:   "csi.spiffe.io",
+				Driver:   driver,
 				ReadOnly: &readOnly,
 			},
 		},
