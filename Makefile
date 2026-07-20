@@ -312,3 +312,22 @@ substrate-isolation:
 # also unwires the Entry API socket back to seed.
 substrate-down:
 	./scripts/substrate-down.sh
+
+# e2e-substrate — run ONLY the remote-substrate Playwright specs (substrate,
+# dispatch, lifecycle, isolation: 9 tests) instead of the full ~60-test gate, for
+# a fast feature loop. Stands up the live two-org sim first (substrate-e2e-setup,
+# idempotent) so the specs run END-TO-END rather than skipping — without it they
+# all `test.skip` on the "sim not installed" guard and prove nothing.
+#
+# A file filter does NOT drop the auth `setup` project (Playwright keeps
+# dependency projects), so the session is authenticated exactly as in `make e2e`,
+# and the `cleanup` teardown still sweeps residue at the end.
+#
+# Assumes a bootstrapped cluster (make bootstrap). Tear the sim down with
+# `make substrate-down`.
+#
+# Faster inner loop once the sim is already up (skips re-running setup):
+#   cd e2e && npx playwright test tests/substrate-isolation.spec.ts
+#   cd e2e && npx playwright test tests/substrate*.spec.ts --grep "AC 7"
+e2e-substrate: substrate-e2e-setup
+	cd e2e && npx playwright test tests/substrate*.spec.ts
