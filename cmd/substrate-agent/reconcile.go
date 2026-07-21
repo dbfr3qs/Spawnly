@@ -34,9 +34,10 @@ func shouldRun(rec registry.AgentRecord) bool {
 // (re)connect. desired is the caller org's substrate-placed registry records
 // (the authoritative desired state pulled over the org-scoped list); actual is
 // the substrate's current local CRs. It returns the records to CREATE (a
-// should-run record with no local CR) and the local CRs to DELETE (no matching
-// should-run record — the record was killed, dismissed, or removed while the
-// substrate was offline). Pure and deterministic, so it is unit-tested directly.
+// should-run, non-revoked record with no local CR) and the local CRs to DELETE
+// (no matching should-run record — the record was killed, dismissed, or removed
+// while the substrate was offline). Pure and deterministic, so it is unit-tested
+// directly.
 func reconcile(desired []registry.AgentRecord, actual []localWorkload) (toCreate []registry.AgentRecord, toDelete []localWorkload) {
 	want := make(map[string]registry.AgentRecord, len(desired))
 	for _, rec := range desired {
@@ -49,9 +50,23 @@ func reconcile(desired []registry.AgentRecord, actual []localWorkload) (toCreate
 		have[w.AgentID] = struct{}{}
 	}
 	for id, rec := range want {
-		if _, ok := have[id]; !ok {
-			toCreate = append(toCreate, rec)
+		if _, ok := have[id]; ok {
+			continue
 		}
+		// Keep-but-never-create: a REVOKED record keeps an existing CR (revoke bites
+		// at mint time, not by deleting the pod) but must never be MATERIALIZED from
+		// scratch. Revoking an agent that was still `pending` — which the control
+		// plane now permits, so an in-flight spawn can actually be severed — would
+		// otherwise leave the substrate creating its pod and authoring its SPIRE
+		// entry on the next reconcile, spending consumer compute and issuing an
+		// identity for an agent whose owner explicitly revoked it. It could still
+		// never mint (a revoked record refuses self-registration), but the pod has no
+		// business existing. A later resume flips the record back to `active`, and
+		// the reconcile after that materializes it normally.
+		if rec.Status == "revoked" {
+			continue
+		}
+		toCreate = append(toCreate, rec)
 	}
 	for _, w := range actual {
 		if _, ok := want[w.AgentID]; !ok {
@@ -59,6 +74,29 @@ func reconcile(desired []registry.AgentRecord, actual []localWorkload) (toCreate
 		}
 	}
 	return toCreate, toDelete
+}
+
+// ensureEntryFor returns the should-run records that ALREADY have a local CR —
+// the complement of reconcile's toCreate within the desired set. These are the
+// workloads whose org-scoped SPIRE entry must be RE-ASSERTED on (re)connect: a
+// connect is also a rotate, and the CP sweeps every entry under the org's previous
+// x509pop node, so a live workload's identity is gone while its CR looks healthy.
+// Pure and deterministic, like reconcile, so the rotate-survival rule is unit-testable.
+func ensureEntryFor(desired []registry.AgentRecord, actual []localWorkload) []registry.AgentRecord {
+	have := make(map[string]struct{}, len(actual))
+	for _, w := range actual {
+		have[w.AgentID] = struct{}{}
+	}
+	var out []registry.AgentRecord
+	for _, rec := range desired {
+		if !shouldRun(rec) {
+			continue
+		}
+		if _, ok := have[rec.AgentID]; ok {
+			out = append(out, rec)
+		}
+	}
+	return out
 }
 
 // workloadSpiffeID builds the ORG-SCOPED workload SVID id the substrate registers

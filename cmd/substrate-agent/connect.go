@@ -143,7 +143,7 @@ func (a *agent) connectOnce(ctx context.Context, d dialer) (connected bool, err 
 	// reconcile first makes the live stream strictly post-reconcile. Heartbeats keep
 	// flowing meanwhile (that goroutine is already running), so the server's read
 	// deadline never expires while reconcile does its I/O.
-	if rerr := a.reconcileOnce(connCtx); rerr != nil && connCtx.Err() == nil {
+	if rerr := a.reconcileOnConnect(connCtx); rerr != nil && connCtx.Err() == nil {
 		log.Printf("substrate-agent: reconcile-on-connect: %v", rerr)
 	}
 

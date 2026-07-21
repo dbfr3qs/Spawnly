@@ -91,8 +91,10 @@ test.describe.serial('remote-substrate two-org isolation matrix', () => {
   });
 
   test.afterAll(async () => {
-    await alice?.request.delete('/api/org/substrate').catch(() => {});
-    await bob?.request.delete('/api/org/substrate').catch(() => {});
+    // Deliberately does NOT disconnect: the org-A channel is SHARED state owned by
+    // the substrate-setup project and torn down by global.teardown's sweepSubstrate.
+    // Disconnecting here dropped the channel for every substrate spec that runs
+    // after this file (substrate-lifecycle), which is why they skipped in a full run.
     await aliceCtx?.close();
     await viewerCtx?.close();
     await bobCtx?.close();
@@ -123,15 +125,14 @@ test.describe.serial('remote-substrate two-org isolation matrix', () => {
   // the substrate (the positive diagonal). Skips if the channel never activates
   // (Entry API/admin socket not wired), like the dispatch/lifecycle specs.
   test('active org-A substrate is invisible to org B; org-A member spawn runs on it (diagonal, AC 3/5)', async () => {
-    // Connect org A's substrate and wait for the channel to activate.
-    const connect = await alice.request.post('/api/org/substrate');
-    if (connect.status() === 503) {
-      test.skip(true, 'orchestrator dev-CA issuer not wired in this cluster');
-      return;
-    }
-    expect(connect.ok(), `connect: ${connect.status()} ${await connect.text()}`).toBeTruthy();
+    // Use the channel the substrate-setup project brought online; do NOT connect
+    // here. Connect ROTATES the org identity: it issues a new leaf (which only the
+    // setup project installs into the substrate cluster) and sweeps the previous
+    // node's entries, so the running substrate-agent — still presenting the old
+    // leaf — can no longer attest. The channel then dropped and this very test
+    // skipped on its own `active` guard, taking substrate-lifecycle down with it.
     const active = await waitUntil(async () => (await substrateStatus(alice)) === 'active', 30);
-    test.skip(!active, 'substrate channel never activated (Entry API/admin socket not wired in this cluster)');
+    test.skip(!active, 'substrate channel not active — run `make substrate-e2e-setup` (the substrate-setup project brings it online)');
 
     // Cross-org: org B's admin sees his OWN org's substrate state (here: none/his
     // own), NEVER org A's — the /api/org substrate is derived from the session org

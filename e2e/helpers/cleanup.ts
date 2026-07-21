@@ -141,6 +141,25 @@ export async function sweepSubstrate(browser: Browser): Promise<void> {
   } catch {
     /* best-effort */
   }
+  // 3. Remove every dispatched AgentWorkload CR (and its pod) left on the substrate.
+  //    The disconnect in step 1 drops the channel, so any CR still present can no
+  //    longer be torn down over it — and the CP sweeps the org's SPIRE entries on
+  //    the next connect, which leaves those pods identity-less forever (Init:Error
+  //    backoff). That residue outlives the run and poisons the NEXT one: a stuck
+  //    pod looks exactly like a genuine dispatch failure. Deleting the CR lets the
+  //    substrate operator garbage-collect the pod; the explicit pod delete covers
+  //    an already-orphaned one. Runs LAST, after the disconnect, because a live
+  //    channel would otherwise race these deletes with its own reconcile.
+  for (const args of [
+    ['delete', 'agentworkload', '--all', '-n', 'substrate-sim', '--ignore-not-found', '--wait=false'],
+    ['delete', 'pod', '-l', 'agent-platform.io/managed=true', '-n', 'substrate-sim', '--ignore-not-found', '--grace-period=0', '--wait=false'],
+  ]) {
+    try {
+      execFileSync('kubectl', args, { stdio: 'ignore' });
+    } catch {
+      /* best-effort: sim not installed, or nothing to delete */
+    }
+  }
 }
 
 // clearDemoAnchors best-effort resets the demo orgs' attestation anchors to their

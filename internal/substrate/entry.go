@@ -67,6 +67,19 @@ type ParentPrefixDeleter interface {
 	DeleteEntriesUnderParent(ctx context.Context, parentPrefix string) error
 }
 
+// NodeEvicter is an OPTIONAL EntryBroker capability: evict every ATTESTED NODE
+// under an org's x509pop path prefix except the one to keep. It is the other half
+// of the rotate hygiene: InvalidateOrgNodeEntries removes the superseded node's
+// ENTRIES, this removes the node ATTESTATIONS themselves, so a rotated org does
+// not accumulate one attested node per connect (each pinned to a leaf fingerprint
+// that is no longer valid). A broker that cannot enumerate agents omits this;
+// EvictSupersededOrgNodes then reports the gap rather than silently skipping.
+// It returns how many nodes it evicted so the caller can AUDIT the rotate (a
+// credential-invalidating action should never be silent).
+type NodeEvicter interface {
+	EvictNodesUnderPrefix(ctx context.Context, prefix, keepNodeID string) (int, error)
+}
+
 // RecordOrgResolver resolves the server-authoritative owning org of an agent
 // record, so the Entry API can require that a requested workload identity names a
 // record that actually belongs to the caller's org. found is false for an unknown
@@ -195,6 +208,39 @@ func (s *EntryService) InvalidateOrgNodeEntries(ctx context.Context, orgID strin
 		return errors.New("entry broker does not support parent-prefix deletion")
 	}
 	return pd.DeleteEntriesUnderParent(ctx, prefix)
+}
+
+// EvictSupersededOrgNodes evicts every attested x509pop node under the org's node
+// prefix EXCEPT keepNodeID (the node the just-issued leaf will attest as). It is
+// the node-side companion to InvalidateOrgNodeEntries on substrate connect/rotate:
+// without it every rotate leaves the previous node attested forever (one stale
+// node per connect), each still bound to a superseded leaf fingerprint. The
+// entries under those nodes are already gone, so a stale node issues nothing — but
+// it is live attestation state for a credential that has been replaced, and it
+// must not outlive it.
+//
+// Org is server-authoritative (normalized here) and the prefix is derived from it,
+// so this can only ever evict the CALLER ORG'S OWN nodes — never another org's,
+// never a platform k8s_psat node. keepNodeID must be that org's node; a keep from
+// outside the prefix is ignored (it simply matches nothing). A broker without
+// eviction support returns an error the caller treats as best-effort.
+func (s *EntryService) EvictSupersededOrgNodes(ctx context.Context, orgID, keepNodeID string) (int, error) {
+	if s.TrustDomain == "" {
+		return 0, ErrEntryUnauthorized
+	}
+	normOrg, err := devca.NormalizeOrgID(orgID)
+	if err != nil {
+		return 0, fmt.Errorf("invalid org id: %w", err)
+	}
+	prefix, err := devca.NodeSpiffePathPrefix(s.TrustDomain, normOrg)
+	if err != nil {
+		return 0, fmt.Errorf("node prefix: %w", err)
+	}
+	ev, ok := s.Broker.(NodeEvicter)
+	if !ok {
+		return 0, errors.New("entry broker does not support node eviction")
+	}
+	return ev.EvictNodesUnderPrefix(ctx, prefix, keepNodeID)
 }
 
 // authorizeWorkload is the pure authorization core shared by create (and the

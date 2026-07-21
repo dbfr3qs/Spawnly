@@ -226,3 +226,122 @@ func TestReconcileOnce_PreservesConsentGate(t *testing.T) {
 		t.Fatal("reconcile dropped ConsentRequired — consent bypass")
 	}
 }
+
+// ── rotate survival: entries re-authored on (re)connect ───────────────────────
+
+// A substrate CONNECT is also a ROTATE: the control plane sweeps every entry under
+// the org's previous x509pop node, including the workload entries this substrate
+// authored. Plain CR convergence sees those workloads as present and touches
+// nothing, so they would stay identity-less forever behind a healthy-looking CR.
+// reconcileOnConnect must RE-AUTHOR the entry of every should-run workload that
+// already has a local CR (and parent it to the CURRENT node).
+func TestReconcileOnConnect_ReauthorsEntriesForExistingCRs(t *testing.T) {
+	store := newFakeStore(localWorkload{AgentID: "live", AgentType: "worker"})
+	entries := newFakeEntries()
+	lister := fakeLister{recs: []registry.AgentRecord{
+		{AgentID: "live", AgentType: "worker", Status: "active", OrgID: "acme", Placement: registry.PlacementSubstrate},
+	}}
+	a := newTestAgent(store, entries, lister)
+
+	if err := a.reconcileOnConnect(context.Background()); err != nil {
+		t.Fatalf("reconcile-on-connect: %v", err)
+	}
+	parent, ok := entries.created["spiffe://cluster.local/org/acme/agent/worker/live"]
+	if !ok {
+		t.Fatalf("entry for a live workload was not re-authored on connect: %v", entries.created)
+	}
+	if parent != a.nodeID {
+		t.Fatalf("re-authored entry parent = %q, want the CURRENT node %q", parent, a.nodeID)
+	}
+	if len(entries.deleted) != 0 {
+		t.Fatalf("re-authoring must not delete anything: %v", entries.deleted)
+	}
+	if _, gone := store.created["live"]; !gone {
+		t.Fatal("re-authoring must not disturb the live CR")
+	}
+}
+
+// The PERIODIC reconcile deliberately does NOT re-author (nothing sweeps entries
+// mid-connection, and it would mean one broker round-trip per workload per tick).
+func TestReconcileOnce_DoesNotReauthorEntries(t *testing.T) {
+	store := newFakeStore(localWorkload{AgentID: "live", AgentType: "worker"})
+	entries := newFakeEntries()
+	lister := fakeLister{recs: []registry.AgentRecord{
+		{AgentID: "live", AgentType: "worker", Status: "active", OrgID: "acme", Placement: registry.PlacementSubstrate},
+	}}
+	a := newTestAgent(store, entries, lister)
+
+	if err := a.reconcileOnce(context.Background()); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if len(entries.created) != 0 {
+		t.Fatalf("periodic reconcile must not re-author entries: %v", entries.created)
+	}
+}
+
+// ensureEntryFor is the pure rule: should-run records that ALREADY have a CR.
+func TestEnsureEntryFor(t *testing.T) {
+	desired := []registry.AgentRecord{
+		{AgentID: "live", AgentType: "worker", Status: "active"},
+		{AgentID: "revoked", AgentType: "worker", Status: "revoked"}, // still runs
+		{AgentID: "new", AgentType: "worker", Status: "pending"},     // no CR yet
+		{AgentID: "done", AgentType: "worker", Status: "completed"},  // terminal
+		{AgentID: "gone", AgentType: "worker", Status: "active", Dismissed: true},
+	}
+	actual := []localWorkload{
+		{AgentID: "live"}, {AgentID: "revoked"}, {AgentID: "done"}, {AgentID: "gone"}, {AgentID: "orphan"},
+	}
+	got := map[string]bool{}
+	for _, rec := range ensureEntryFor(desired, actual) {
+		got[rec.AgentID] = true
+	}
+	if !got["live"] || !got["revoked"] {
+		t.Errorf("live/revoked workloads with a CR must keep their entry: %v", got)
+	}
+	for _, id := range []string{"new", "done", "gone", "orphan"} {
+		if got[id] {
+			t.Errorf("%s must not be re-authored: %v", id, got)
+		}
+	}
+}
+
+// A revoked record KEEPS an existing CR (revoke bites at mint time, not by
+// deleting the pod) but is never materialized from scratch — otherwise revoking
+// an agent while it was still `pending` would have the substrate spend compute
+// and author a SPIRE entry for an agent its owner explicitly revoked.
+func TestReconcile_RevokedRecordIsKeptButNeverCreated(t *testing.T) {
+	desired := []registry.AgentRecord{
+		{AgentID: "running-revoked", AgentType: "worker", Status: "revoked"},
+		{AgentID: "never-started", AgentType: "worker", Status: "revoked"},
+		{AgentID: "normal", AgentType: "worker", Status: "pending"},
+	}
+	actual := []localWorkload{{AgentID: "running-revoked", AgentType: "worker"}}
+
+	toCreate, toDelete := reconcile(desired, actual)
+	created := map[string]bool{}
+	for _, rec := range toCreate {
+		created[rec.AgentID] = true
+	}
+	if created["never-started"] {
+		t.Error("a revoked record with no CR must NOT be materialized")
+	}
+	if !created["normal"] {
+		t.Error("a normal pending record must still be materialized")
+	}
+	if len(toDelete) != 0 {
+		t.Errorf("a revoked agent's existing CR must be kept (revoke is not a kill): %v", toDelete)
+	}
+}
+
+// The same rule at the entry layer: a revoked agent that still has a CR keeps its
+// entry re-authored on reconnect (its pod is running and must not lose identity
+// mid-flight; enforcement is at mint, and its record refuses registration).
+func TestEnsureEntryFor_RevokedWithCRStillReauthored(t *testing.T) {
+	got := ensureEntryFor(
+		[]registry.AgentRecord{{AgentID: "running-revoked", AgentType: "worker", Status: "revoked"}},
+		[]localWorkload{{AgentID: "running-revoked"}},
+	)
+	if len(got) != 1 || got[0].AgentID != "running-revoked" {
+		t.Fatalf("ensureEntryFor = %+v, want the running revoked workload", got)
+	}
+}

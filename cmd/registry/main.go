@@ -810,6 +810,87 @@ func orgIsDisabled(ctx context.Context, s registry.Store, orgID string) (bool, e
 	return ok && org.Disabled, nil
 }
 
+// authzTuple is one SpiceDB relationship as recorded in the agent's audit event.
+// The JSON shape is the wire contract of the `spicedb_relations_written` event.
+type authzTuple struct {
+	Resource string `json:"resource"`
+	Relation string `json:"relation"`
+	Subject  string `json:"subject"`
+}
+
+// writeAuthorityTuples writes the HUMAN lifecycle authority tuples for an agent —
+// `owner` (the spawning user) and, for an org-scoped record, `org` — and returns
+// what it wrote for the audit event. These two tuples are what the agent
+// `view`/`manage` permissions resolve through, so they are the sole reason a
+// human can read or mutate their own agent.
+//
+// It is called at BOTH points a record comes into existence:
+//
+//   - PREREGISTRATION (cp-gated, orchestrator-asserted) — the record exists and is
+//     `pending` from this moment, and the dashboard already lists and offers to
+//     manage it, so its owner must hold manage from this moment too. Writing them
+//     only at self-registration left every preregistered agent UNMANAGEABLE until
+//     its pod came up and registered itself: revoke/resume/dismiss all 404'd
+//     (fail-closed deny, rendered non-enumerably). For a platform agent that
+//     window is seconds; for a SUBSTRATE-PLACED agent — whose pod lives in the
+//     consumer's cluster and may be slow, offline, or never arrive — it is
+//     unbounded, which is exactly how spec AC 7 (lifecycle parity) failed live.
+//   - SELF-REGISTRATION — unchanged, and idempotent w.r.t. this write (SpiceDB
+//     WriteRelationship is a touch), so a preregistered record simply re-asserts
+//     the same two tuples.
+//
+// userId/orgId are the record's SERVER-DERIVED values (token sub / token-or-lineage
+// org), never client body fields, and are normalized with the SAME
+// spicedb.EncodeObjectID the read side (agentAllowed) applies. Empty values are
+// skipped so we never write a malformed `user:`/`organization:` (empty id) tuple.
+// Tuple-write errors are logged, not fatal: the caller's own record write is the
+// durable pivot, and a SpiceDB blip must not fail the spawn — the check side fails
+// CLOSED, so a missing tuple can only ever deny, never widen. A tuple that failed
+// to write is NOT reported to the caller, so the `spicedb_relations_written` audit
+// event never claims authority that isn't actually in SpiceDB.
+func writeAuthorityTuples(ctx context.Context, sdb spicedb.Client, agentID, userID, orgID string) []authzTuple {
+	tuples := []authzTuple{}
+	if userID != "" {
+		res, sub := "agent:"+agentID, "user:"+spicedb.EncodeObjectID(userID)
+		if err := sdb.WriteRelationship(ctx, res, "owner", sub); err != nil {
+			log.Printf("spicedb owner-tuple write error for %s: %v", agentID, err)
+		} else {
+			tuples = append(tuples, authzTuple{Resource: res, Relation: "owner", Subject: sub})
+		}
+	}
+	if orgID != "" {
+		res, sub := "agent:"+agentID, "organization:"+spicedb.EncodeObjectID(orgID)
+		if err := sdb.WriteRelationship(ctx, res, "org", sub); err != nil {
+			log.Printf("spicedb org-tuple write error for %s: %v", agentID, err)
+		} else {
+			tuples = append(tuples, authzTuple{Resource: res, Relation: "org", Subject: sub})
+		}
+	}
+	return tuples
+}
+
+// revocableStatus reports whether an agent in this status can still be revoked.
+//
+// "active" is the settled agent. "pending" is the IN-FLIGHT one: the record was
+// preregistered by the orchestrator and the workload is on its way up — a
+// platform pod starting, or (remote-substrate) a spawn dispatched to a consumer
+// cluster that may take a while, be offline, or be reconciled on reconnect. Its
+// authority has not been exercised YET, which is precisely when severing it
+// matters most: revoke flips the record to `revoked`, and a revoked record REFUSES
+// self-registration (the 409 above), so the workload can never obtain its first
+// token. That is "revoke severs the next mint" (spec AC 7) for an agent whose
+// first mint has not happened yet.
+//
+// Excluding `pending` made revoke a silent no-op over exactly that window — a 200
+// reporting nothing revoked, while the agent went on to register and mint. It is
+// unbounded for a substrate-placed agent, whose pod is not ours to hurry.
+// Terminal statuses (completed/failed/killed) and an already-`revoked` node are
+// still skipped, so a cascade never clobbers a node that exited and revoke stays
+// idempotent.
+func revocableStatus(status string) bool {
+	return status == "active" || status == "pending"
+}
+
 // revokeNode is the per-agent core of revocation, shared by the cascading revoke
 // endpoint: drop the agent's SpiceDB authorization and mark the record "revoked"
 // so any permission check denies in real time. The pod is left running —
@@ -834,7 +915,7 @@ func revokeNode(ctx context.Context, s registry.Store, sdb spicedb.Client, id st
 	if err != nil {
 		return false, err
 	}
-	if rec.Status != "active" {
+	if !revocableStatus(rec.Status) {
 		return false, nil // idempotent: never clobber a node that already exited
 	}
 	if _, err := s.UpdateAgentStatus(ctx, id, "revoked"); err != nil {
@@ -940,6 +1021,12 @@ func resumeNode(ctx context.Context, s registry.Store, sdb spicedb.Client, id st
 	if rec.Status != "revoked" {
 		return false, nil
 	}
+	// Resume always restores to "active", including for an agent revoked while it
+	// was still `pending` (revocableStatus). That is deliberate and converges: the
+	// workload's own self-registration — which the revoked record was refusing with
+	// a 409 and which its sidecar retries — sets exactly this status the moment it
+	// lands, so resume simply grants the authority back a beat early rather than
+	// inventing a second "un-revoke to pending" state to reconcile.
 	if _, err := s.UpdateAgentStatus(ctx, id, "active"); err != nil {
 		return false, err
 	}
@@ -1345,11 +1432,25 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		if storeErr(w, s.RegisterAgent(r.Context(), rec)) {
 			return
 		}
+		// Human lifecycle authority from the moment the record exists: the owner
+		// (and org) tuples the agent `view`/`manage` permissions resolve through.
+		// Without them a `pending` agent is listed in the dashboard but cannot be
+		// revoked/resumed/dismissed by its own owner (the gate fails closed and
+		// renders 404) — unbounded for a substrate-placed agent, whose pod lives in
+		// the consumer's cluster. Self-registration re-asserts the same tuples.
+		tuples := writeAuthorityTuples(r.Context(), sdb, rec.AgentID, rec.UserID, rec.OrgID)
 		s.AppendEvent(r.Context(), rec.AgentID, events.Event{
 			Source:  events.SourceOrchestrator,
 			Type:    "workload_spawning",
 			Payload: mustMarshal(map[string]string{"agentId": rec.AgentID, "agentType": rec.AgentType}),
 		})
+		if len(tuples) > 0 {
+			s.AppendEvent(r.Context(), rec.AgentID, events.Event{
+				Source:  events.SourceRegistry,
+				Type:    "spicedb_relations_written",
+				Payload: mustMarshal(tuples),
+			})
+		}
 		w.WriteHeader(http.StatusCreated)
 	})
 
@@ -1516,37 +1617,14 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		}
 		tuples = append(tuples, relTuple{Resource: enabledRes, Relation: "enabled", Subject: enabledSub})
 
-		// Human lifecycle authority tuples (Phase 1, org multi-tenancy). Always
-		// write the owner tuple; when the record is org-scoped also write the org
-		// tuple so org admins/members inherit view/manage via `org->...`. These
-		// feed the agent `view`/`manage` permissions; nothing enforces them yet
-		// (the authz flip from userId-equality is Phase 4) — writing them now is
-		// additive and keeps the tuples present for when it lands.
-		//
-		// OrgID is the record's server-derived org (rec.OrgID == existing.OrgID),
-		// never a body value. The owner tuple is skipped for a user-less global
-		// agent so we never write a malformed `user:` (empty id) tuple — the same
-		// guard the tenant-relation skip applies above for a tenant-less agent.
-		// userId/orgId are normalized to a SpiceDB-safe object id here on the WRITE
-		// side; agentAllowed applies the SAME spicedb.EncodeObjectID on the READ
-		// (CheckPermission) side, and orgTuple does likewise for org membership —
-		// so the owner/org/membership tuples and the Phase-4 checks agree even for
-		// subjects carrying '. : @' (which ValidUserID admits but SpiceDB rejects
-		// raw). For the common UUID-sub / DNS-label-org case the encoding is the
-		// identity, so nothing changes for existing tuples.
-		if rec.UserID != "" {
-			ownerRes, ownerSub := "agent:"+agentID, "user:"+spicedb.EncodeObjectID(rec.UserID)
-			if err := sdb.WriteRelationship(ctx, ownerRes, "owner", ownerSub); err != nil {
-				log.Printf("spicedb owner-tuple write error for %s: %v", agentID, err)
-			}
-			tuples = append(tuples, relTuple{Resource: ownerRes, Relation: "owner", Subject: ownerSub})
-		}
-		if rec.OrgID != "" {
-			orgRes, orgSub := "agent:"+agentID, "organization:"+spicedb.EncodeObjectID(rec.OrgID)
-			if err := sdb.WriteRelationship(ctx, orgRes, "org", orgSub); err != nil {
-				log.Printf("spicedb org-tuple write error for %s: %v", agentID, err)
-			}
-			tuples = append(tuples, relTuple{Resource: orgRes, Relation: "org", Subject: orgSub})
+		// Human lifecycle authority tuples (Phase 1, org multi-tenancy): `owner`
+		// plus, for an org-scoped record, `org` (so org admins inherit view/manage
+		// via `org->admin_agents`). Shared with the preregister path — see
+		// writeAuthorityTuples for why both write them and why re-writing is safe.
+		// OrgID/UserID here are the record's server-derived values
+		// (rec.OrgID == existing.OrgID), never body fields.
+		for _, t := range writeAuthorityTuples(ctx, sdb, agentID, rec.UserID, rec.OrgID) {
+			tuples = append(tuples, relTuple(t))
 		}
 		s.AppendEvent(ctx, agentID, events.Event{
 			Source:  events.SourceRegistry,

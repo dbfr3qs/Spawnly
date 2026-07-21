@@ -191,6 +191,18 @@ func (api *substrateAPI) connect(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		// Node-side rotate hygiene: evict the org's SUPERSEDED x509pop nodes (every
+		// attested node under the org prefix but the one this new leaf will attest
+		// as). Their entries are gone above, so a stale node issues nothing — but it
+		// is live attestation state for a replaced credential, and without this an
+		// org accumulates one attested node per connect. Best-effort: a broker that
+		// cannot enumerate agents, or a transient eviction failure, must not fail a
+		// connect whose security-relevant work (the entry sweep) already succeeded.
+		if n, eerr := api.entries.EvictSupersededOrgNodes(ctx, normOrg, issued.NodeID); eerr != nil {
+			log.Printf("substrate connect %s: evict superseded org nodes: %v (continuing)", normOrg, eerr)
+		} else {
+			log.Printf("substrate connect %s: evicted %d superseded x509pop node(s)", normOrg, n)
+		}
 		selectors := []string{"k8s:ns:" + api.agentNamespace, "k8s:sa:" + api.agentSA}
 		if err := api.entries.ProvisionSubstrateAgentEntry(ctx, normOrg, issued.NodeID, selectors); err != nil {
 			log.Printf("substrate connect %s: provision bootstrap entry: %v", normOrg, err)
@@ -303,6 +315,14 @@ func (api *substrateAPI) disconnect(w http.ResponseWriter, r *http.Request) {
 					log.Printf("substrate disconnect %s: delete bootstrap entry: %v", normOrg, berr)
 				}
 			}
+		}
+		// And evict the org's attested x509pop nodes — ALL of them (no keep): unlike
+		// a rotate, a disconnect revokes the credential outright, so no node of this
+		// org should remain attested. Same best-effort stance as the entry sweep.
+		if n, eerr := api.entries.EvictSupersededOrgNodes(ctx, normOrg, ""); eerr != nil {
+			log.Printf("substrate disconnect %s: evict org nodes: %v", normOrg, eerr)
+		} else {
+			log.Printf("substrate disconnect %s: evicted %d x509pop node(s)", normOrg, n)
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -611,6 +631,56 @@ func (b *execEntryBroker) DeleteEntriesUnderParent(ctx context.Context, parentPr
 		}
 	}
 	return nil
+}
+
+// EvictNodesUnderPrefix implements substrate.NodeEvicter: list the attested
+// agents (nodes) and evict each whose SPIFFE ID begins with prefix, except
+// keepNodeID. Backs the rotate hygiene (EntryService.EvictSupersededOrgNodes) —
+// the org's superseded x509pop nodes are attestation state for a leaf that has
+// been replaced, and would otherwise accumulate one per connect. The prefix is
+// CP-derived from the caller's own org, so this can only reach that org's nodes.
+// An already-absent node is a no-op success (idempotent).
+func (b *execEntryBroker) EvictNodesUnderPrefix(ctx context.Context, prefix, keepNodeID string) (int, error) {
+	if prefix == "" {
+		return 0, fmt.Errorf("empty node prefix")
+	}
+	listArgs := append([]string{"agent", "list"}, b.baseArgs()...)
+	out, err := b.runCmd(ctx, b.bin, listArgs...)
+	if err != nil {
+		return 0, fmt.Errorf("spire-server agent list: %v: %s", err, strings.TrimSpace(out))
+	}
+	evicted := 0
+	for _, id := range parseAgentSpiffeIDs(out) {
+		if id == keepNodeID || !strings.HasPrefix(id, prefix) {
+			continue
+		}
+		evictArgs := append([]string{"agent", "evict"}, b.baseArgs()...)
+		evictArgs = append(evictArgs, "-spiffeID", id)
+		if evictOut, eerr := b.runCmd(ctx, b.bin, evictArgs...); eerr != nil {
+			if strings.Contains(strings.ToLower(evictOut), "not found") {
+				continue
+			}
+			return evicted, fmt.Errorf("spire-server agent evict: %v: %s", eerr, strings.TrimSpace(evictOut))
+		}
+		evicted++
+	}
+	return evicted, nil
+}
+
+// parseAgentSpiffeIDs extracts every "SPIFFE ID : <id>" from
+// `spire-server agent list` output (one block per attested node).
+func parseAgentSpiffeIDs(out string) []string {
+	var ids []string
+	sc := bufio.NewScanner(strings.NewReader(out))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if strings.HasPrefix(line, "SPIFFE ID") {
+			if id := valueAfterColon(line); id != "" {
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids
 }
 
 // parsedEntry is one entry's id + parent id from `spire-server entry show`.

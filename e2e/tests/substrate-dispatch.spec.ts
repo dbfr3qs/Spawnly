@@ -76,6 +76,12 @@ test.describe.serial('remote-substrate dispatch', () => {
   });
 
   test('a member spawn runs on the substrate, not the platform', async () => {
+    // The full dispatch path (channel → CR → SVID propagation → self-register →
+    // mint → child spawn) does not fit the 180s default: see the budget note at
+    // step 5. 720s is deliberately ABOVE the sum of the poll budgets below
+    // (30+30+150+60+30 iterations x 2s = 600s), so a genuine late failure surfaces
+    // as the descriptive assertion rather than a bare timeout mid-loop.
+    test.setTimeout(720_000);
     // 1./2. The substrate-setup project (tests/substrate.setup.ts) owns connecting
     // and bringing the channel online — assert it, don't redo it. Re-connecting
     // here ROTATES the org identity, which invalidates the leaf the substrate agent
@@ -115,8 +121,18 @@ test.describe.serial('remote-substrate dispatch', () => {
 
     // 5. The agent self-registers with its org-scoped SVID and mints a token —
     //    the record reaches active and a mint event lands (AC 3).
+    //
+    //    Budget: generous on purpose. The setup project CONNECTS (= rotates) and
+    //    restarts the substrate's SPIRE agent moments before this spawn, so the
+    //    freshly-authored workload entry can wait on that agent's next FULL sync
+    //    with the hosted server rather than its cheap partial one. Until it lands
+    //    the sidecar's bounded SVID wait (~30s) expires and the init container
+    //    restarts with a growing backoff — it converges, but the first minute or
+    //    two can be spent in "no identity issued". A tighter budget failed here
+    //    intermittently while the agent was still on its way up, which is a
+    //    propagation race, not the routing this test exists to prove.
     let minted = false;
-    for (let i = 0; i < 60 && !minted; i++) {
+    for (let i = 0; i < 150 && !minted; i++) {
       const rec = (await listAgents(viewer)).find((a) => a.agentId === workloadName);
       const events = await getEvents(viewer, workloadName).catch(() => []);
       minted = rec?.status === 'active' || events.some((e) => e.type.includes('mint') || e.type.includes('token'));

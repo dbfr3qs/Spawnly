@@ -194,7 +194,24 @@ func (a *agent) teardown(ctx context.Context, w localWorkload) error {
 // spawns/kills the substrate missed while offline (no durable queue: the records
 // ARE the source of truth). Best-effort per item so one failure doesn't stall the
 // rest; the next reconnect retries.
-func (a *agent) reconcileOnce(ctx context.Context) error {
+// reconcileOnce is the periodic safety-net form: converge CRs only.
+func (a *agent) reconcileOnce(ctx context.Context) error { return a.converge(ctx, false) }
+
+// reconcileOnConnect is the (re)connect form: converge CRs AND re-author the
+// org-scoped SPIRE entry of every workload that already has a local CR.
+//
+// The re-authoring is not redundant. A substrate CONNECT is also a ROTATE: the CP
+// issues a new org identity and sweeps every entry under the org's previous
+// x509pop node (EntryService.InvalidateOrgNodeEntries), which includes the
+// workload entries this substrate authored. Plain CR convergence sees those
+// workloads as already-present and touches nothing, so their identities would stay
+// deleted — every running agent on the substrate silently loses its SVID at its
+// next rotation, permanently, with a healthy-looking CR. Re-asserting the entry
+// (CreateEntry is idempotent) re-parents each live workload under the NEW node,
+// which is exactly what makes a rotate survivable.
+func (a *agent) reconcileOnConnect(ctx context.Context) error { return a.converge(ctx, true) }
+
+func (a *agent) converge(ctx context.Context, ensureEntries bool) error {
 	// Serialize against live spawn/kill (handleDown) so the list-then-act below is
 	// atomic w.r.t. a concurrent dispatch — otherwise the periodic reconcile could
 	// tear down a CR a live handleSpawn just created (see agent.opMu).
@@ -209,6 +226,20 @@ func (a *agent) reconcileOnce(ctx context.Context) error {
 		return err
 	}
 	toCreate, toDelete := reconcile(desired, actual)
+	if ensureEntries {
+		for _, rec := range ensureEntryFor(desired, actual) {
+			spiffeID, serr := workloadSpiffeID(a.trustDomain, a.org, rec.AgentType, rec.AgentID)
+			if serr != nil {
+				log.Printf("substrate-agent: reconcile entry id %s: %v", rec.AgentID, serr)
+				continue
+			}
+			// Best-effort per workload: one refusal (e.g. a record that just went
+			// terminal) must not stall the rest; the next reconnect retries.
+			if cerr := a.entries.CreateEntry(ctx, spiffeID, a.nodeID, workloadSelectors(a.namespace, rec.AgentID, a.serviceAccount)); cerr != nil {
+				log.Printf("substrate-agent: re-author entry for %s: %v", rec.AgentID, cerr)
+			}
+		}
+	}
 	for _, rec := range toCreate {
 		// Task is not persisted on the record, so a reconciled (offline) spawn runs
 		// task-less; the live push carries the task. Consent IS persisted
