@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentv1alpha1 "github.com/spawnly/platform/api/v1alpha1"
@@ -364,6 +365,67 @@ func TestReconcileNew_WithTask_SetsEnvVar(t *testing.T) {
 	}
 	if envMap["TASK"] != "hello world" {
 		t.Errorf("expected TASK='hello world', got %q", envMap["TASK"])
+	}
+}
+
+// A substrate operator configured with SidecarSpiffeFetchRetries passes it
+// through to the sidecar (init container) as SPIFFE_FETCH_RETRIES so substrate
+// pods wait longer for their first SVID; an operator without it (the platform
+// operator) sets no such env — bit-identical to today.
+func TestReconcileNew_SpiffeFetchRetries_PassthroughAndAbsence(t *testing.T) {
+	newReconciler := func(retries string) (*operator.AgentWorkloadReconciler, client.Client) {
+		aw := &agentv1alpha1.AgentWorkload{
+			ObjectMeta: metav1.ObjectMeta{Name: "svid-budget-agent", Namespace: "default"},
+			Spec: agentv1alpha1.AgentWorkloadSpec{
+				AgentType: "worker", UserID: "user-1", TenantID: "tenant-1", Lifecycle: "short-lived",
+			},
+		}
+		s := buildScheme(t)
+		fc := fake.NewClientBuilder().WithScheme(s).WithObjects(aw).WithStatusSubresource(aw).Build()
+		reg := registry.NewMock(map[string]registry.AgentTemplate{"worker": workerTemplate()})
+		return &operator.AgentWorkloadReconciler{
+			Client: fc, Scheme: s, Registry: reg,
+			RegistryURL:               "http://registry:8080",
+			ISTokenURL:                "http://keycloak:8080/realms/spawnly/protocol/openid-connect/token",
+			SampleAPIURL:              "http://sample-api:8080",
+			EventsClient:              events.NewMock(),
+			SidecarSpiffeFetchRetries: retries,
+		}, fc
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: "svid-budget-agent", Namespace: "default"}}
+	sidecarEnv := func(t *testing.T, fc client.Client) map[string]string {
+		t.Helper()
+		var pod corev1.Pod
+		if err := fc.Get(context.Background(), types.NamespacedName{Name: "svid-budget-agent-pod", Namespace: "default"}, &pod); err != nil {
+			t.Fatalf("get pod: %v", err)
+		}
+		env := map[string]string{}
+		for _, e := range pod.Spec.InitContainers[0].Env {
+			env[e.Name] = e.Value
+		}
+		return env
+	}
+
+	// With a budget: SPIFFE_FETCH_RETRIES is present on the sidecar.
+	r, fc := newReconciler("40")
+	for i := 0; i < 2; i++ {
+		if _, err := r.Reconcile(context.Background(), req); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+	if got := sidecarEnv(t, fc)["SPIFFE_FETCH_RETRIES"]; got != "40" {
+		t.Errorf("SPIFFE_FETCH_RETRIES = %q, want 40", got)
+	}
+
+	// Without a budget (platform operator): the env is absent.
+	r2, fc2 := newReconciler("")
+	for i := 0; i < 2; i++ {
+		if _, err := r2.Reconcile(context.Background(), req); err != nil {
+			t.Fatalf("reconcile: %v", err)
+		}
+	}
+	if _, present := sidecarEnv(t, fc2)["SPIFFE_FETCH_RETRIES"]; present {
+		t.Error("platform operator must not set SPIFFE_FETCH_RETRIES on sidecars")
 	}
 }
 

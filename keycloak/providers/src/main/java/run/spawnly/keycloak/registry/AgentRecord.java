@@ -23,6 +23,15 @@ import com.fasterxml.jackson.annotation.JsonProperty;
  *                  spawn and derived SERVER-SIDE by the registry — the IdP treats
  *                  it as the authoritative, registry-bound source of the token's
  *                  {@code organization} claim (never copied from a request token).
+ * @param placement WHERE the agent runs (remote-substrate): empty/{@code "k8s"} =
+ *                  platform-hosted (the default), {@code "remote"} = #47 STS agent,
+ *                  {@code "substrate"} = consumer-hosted substrate. Server-set at
+ *                  preregistration and IMMUTABLE (a self-registering sidecar never
+ *                  sets it from its body). The mint-side reverse org-binding refuses
+ *                  a platform (org-less) SVID against a record ONLY when placement is
+ *                  {@code "substrate"} — a substrate record must be claimed solely by
+ *                  its org-scoped substrate SVID, while an org member's PLATFORM
+ *                  agent (org-less SVID + org-scoped record) stays valid (spec AC 9).
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record AgentRecord(
@@ -31,7 +40,12 @@ public record AgentRecord(
         @JsonProperty("userId") String userId,
         @JsonProperty("agentType") String agentType,
         @JsonProperty("parentId") String parentId,
-        @JsonProperty("orgId") String orgId) {
+        @JsonProperty("orgId") String orgId,
+        @JsonProperty("placement") String placement) {
+
+    /** Placement value marking a consumer-hosted substrate agent (mirrors the Go
+     *  {@code registry.PlacementSubstrate}). */
+    public static final String PLACEMENT_SUBSTRATE = "substrate";
 
     /**
      * Backward-compatible constructor for the org-less case (and the many call
@@ -40,6 +54,15 @@ public record AgentRecord(
      * constructor, so this only affects hand-built records.
      */
     public AgentRecord(String agentId, String status, String userId, String agentType, String parentId) {
-        this(agentId, status, userId, agentType, parentId, null);
+        this(agentId, status, userId, agentType, parentId, null, null);
+    }
+
+    /**
+     * Backward-compatible constructor for call sites that set an org but predate
+     * remote-substrate placement: delegates with {@code placement=null} (== the
+     * platform-hosted default).
+     */
+    public AgentRecord(String agentId, String status, String userId, String agentType, String parentId, String orgId) {
+        this(agentId, status, userId, agentType, parentId, orgId, null);
     }
 }

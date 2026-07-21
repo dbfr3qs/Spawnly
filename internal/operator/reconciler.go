@@ -45,6 +45,15 @@ type AgentWorkloadReconciler struct {
 	// defaults to "agent-sidecar:latest" (kind); on EKS it is the ECR-qualified
 	// reference so agent pods can pull it.
 	SidecarImage string
+	// SidecarSpiffeFetchRetries / SidecarSpiffeFetchRetryDelay bound the SVID
+	// startup wait for the sidecars this operator creates (env passed through to
+	// each agent pod). Empty ⇒ the sidecar's historical default (10 × 3s). The
+	// SUBSTRATE operator sets a longer budget so a spawn issued while the
+	// substrate's SPIRE agent is still doing its first sync is absorbed in-process
+	// rather than via an init-container CrashLoop; the platform operator leaves
+	// them empty (bit-identical to today).
+	SidecarSpiffeFetchRetries    string
+	SidecarSpiffeFetchRetryDelay string
 }
 
 func (r *AgentWorkloadReconciler) sidecarImage() string {
@@ -263,6 +272,16 @@ func (r *AgentWorkloadReconciler) buildPod(aw *agentv1alpha1.AgentWorkload, tpl 
 		{Name: "IS_TOKEN_URL", Value: r.ISTokenURL},
 		{Name: "PARENT_ID", Value: aw.Spec.ParentID},
 		{Name: "ORCHESTRATOR_URL", Value: r.OrchestratorURL},
+	}
+	// Pass through the SVID-fetch budget to the sidecar when this operator was
+	// configured with one (the substrate operator; empty on the platform operator).
+	if r.SidecarSpiffeFetchRetries != "" {
+		sharedEnv = append(sharedEnv,
+			corev1.EnvVar{Name: "SPIFFE_FETCH_RETRIES", Value: r.SidecarSpiffeFetchRetries})
+	}
+	if r.SidecarSpiffeFetchRetryDelay != "" {
+		sharedEnv = append(sharedEnv,
+			corev1.EnvVar{Name: "SPIFFE_FETCH_RETRY_DELAY", Value: r.SidecarSpiffeFetchRetryDelay})
 	}
 	if aw.Spec.ConsentRequired {
 		// The sidecar must complete a CIBA backchannel authentication (approved

@@ -131,11 +131,20 @@ public final class OrgAwareVerifier {
         String org = identity.orgId();
         if (org == null || org.isEmpty()) {
             // Platform-hosted / org-less SVID. REVERSE org-binding (remote-substrate
-            // Phase 3 carry-forward): a genuinely platform SVID must NOT authenticate
-            // an org-SCOPED record that merely shares its agentId — a malicious
-            // platform pod could otherwise label itself with a victim org's agentId,
-            // obtain a platform SVID (path.Base == that agentId), and mint for the
-            // org-scoped record.
+            // carry-forward), now PLACEMENT-AWARE: the refusal exists so a genuinely
+            // platform SVID cannot claim a record that is meant to be authenticated
+            // only by an ORG-SCOPED substrate SVID. But an org-less (platform) SVID is
+            // exactly how an org MEMBER's PLATFORM-hosted agent mints: the platform
+            // ClusterSPIFFEID issues org-LESS paths while that member's spawn
+            // preregisters a record carrying their OrgID. That pairing is the
+            // pre-substrate world and MUST keep working (spec AC 9).
+            //
+            // So refuse ONLY when the record's placement REQUIRES an org-scoped
+            // identity — "substrate". A substrate record must be claimed solely by its
+            // org-scoped substrate SVID; for platform/remote/unset placement the
+            // org-less SVID IS the legitimate platform path and passes through.
+            // Placement is server-set at preregistration and immutable, so a caller
+            // cannot game which branch it lands in.
             //
             // This fires ONLY for identity.platformSvid() — a trust-domain-verified
             // /agent/… path in enforcing mode. In legacy passthrough or for a
@@ -143,14 +152,15 @@ public final class OrgAwareVerifier {
             // bit-identical (no getAgent, no new refusal). A registry outage
             // (getAgent==null, indistinguishable from unknown) PASSES THROUGH,
             // preserving platform-agent availability: the breach can only complete if
-            // the mint then loads the org-scoped record, which needs the registry up.
+            // the mint then loads the substrate record, which needs the registry up.
             if (identity.platformSvid()) {
                 AgentRecord record = registry.getAgent(identity.agentId());
-                if (record != null) {
-                    String recOrg = record.orgId();
-                    if (recOrg != null && !recOrg.isEmpty()) {
-                        return null; // org-scoped record + platform SVID ⇒ refuse
-                    }
+                // Refuse on placement ALONE (not also gated on a non-empty orgId): a
+                // substrate-placed record must be claimed only by its org-scoped
+                // substrate SVID. Strictly more fail-closed, and symmetric with the Go
+                // registry verifier (internal/registrant/orgaware.go).
+                if (record != null && AgentRecord.PLACEMENT_SUBSTRATE.equals(record.placement())) {
+                    return null; // substrate-placed record + platform SVID ⇒ refuse
                 }
             }
             return identity;

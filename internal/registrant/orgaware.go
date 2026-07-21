@@ -139,12 +139,25 @@ func (v *OrgAwareVerifier) Verify(ctx context.Context, r *http.Request) (Identit
 // the pre-substrate behavior — the org store is never touched.
 func (v *OrgAwareVerifier) bindSpireOrg(ctx context.Context, id Identity) (Identity, error) {
 	if id.OrgID == "" {
-		// REVERSE org-binding (remote-substrate Phase 3 carry-forward): a genuinely
-		// platform (org-less) SVID must NOT authenticate an org-SCOPED record that
-		// merely shares its agentId — otherwise a malicious platform pod could label
-		// itself with a victim org's agentId, obtain a platform SVID (path.Base ==
-		// that agentId), and authenticate for the org-scoped record. So look the
-		// record up and refuse if it is org-scoped.
+		// REVERSE org-binding (remote-substrate carry-forward), now PLACEMENT-AWARE:
+		// the refusal exists so a genuinely platform (org-less) SVID cannot claim a
+		// record that is supposed to be authenticated only by an ORG-SCOPED substrate
+		// SVID. But an org-less (platform) SVID is exactly how an org MEMBER's
+		// PLATFORM-hosted agent authenticates: the platform ClusterSPIFFEID mints
+		// org-LESS paths (`/agent/{tenant}/{user}/{type}/{id}`), while that member's
+		// spawn preregisters a record carrying the member's OrgID. That pairing is
+		// the pre-substrate world and MUST keep working (spec AC 9: "orgs without a
+		// substrate behave exactly as today").
+		//
+		// So refuse ONLY when the record's placement REQUIRES an org-scoped identity —
+		// PlacementSubstrate. A substrate-placed record must be claimed solely by its
+		// org-scoped substrate SVID (`…/org/{orgId}/agent/…`); an org-less SVID
+		// authenticating one would be the reverse-binding breach the check guards.
+		// For PlacementK8s / PlacementRemote / unset the org-less SVID IS the
+		// legitimate platform path, so it passes through. Placement is server-set at
+		// preregistration and immutable (a self-registering sidecar never sets it from
+		// its body — enforced in cmd/registry/main.go's self-register handler, which
+		// re-reads existing.Placement), so a caller cannot game which branch it lands in.
 		//
 		// This fires ONLY for id.platformSVID — a trust-domain-verified `/agent/…`
 		// path in enforcing mode. In legacy passthrough (enforcement off) or for a
@@ -154,14 +167,19 @@ func (v *OrgAwareVerifier) bindSpireOrg(ctx context.Context, id Identity) (Ident
 		// A store OUTAGE (err != nil) PASSES THROUGH, preserving today's
 		// platform-agent availability (org-less SVIDs never depended on the store):
 		// the reverse-binding breach can only COMPLETE if the mint then loads the
-		// org-scoped record, which needs the store up — so an outage can never turn
-		// this passthrough into an authenticated org record. Unknown record (found,
-		// org-less) also passes through: an org-less SVID may legitimately name a
-		// record that self-registers later, exactly as before.
+		// substrate record, which needs the store up — so an outage can never turn
+		// this passthrough into an authenticated substrate record. A non-substrate
+		// record (platform-placed, org-scoped or not) also passes through.
 		if id.platformSVID {
 			rec, err := v.store.GetAgent(ctx, id.AgentID)
-			if err == nil && rec.AgentID != "" && rec.OrgID != "" {
-				return Identity{}, errors.New("platform SVID cannot authenticate an org-scoped record")
+			// Refuse on placement ALONE — not also gated on rec.OrgID != "". A
+			// substrate-placed record must be claimed only by its org-scoped substrate
+			// SVID, period; requiring a non-empty org too would (in the theoretical
+			// case of an org-less substrate record, which the orchestrator never
+			// creates) let a platform SVID claim it. Placement-only is strictly more
+			// fail-closed. Keeps the Go and Java sides symmetric.
+			if err == nil && rec.AgentID != "" && rec.Placement == registry.PlacementSubstrate {
+				return Identity{}, errors.New("platform SVID cannot authenticate a substrate-placed record")
 			}
 		}
 		return id, nil

@@ -270,15 +270,35 @@ class OrgAwareVerifierTest {
                         "spiffe-svid", null, true));
     }
 
-    // REVERSE org-binding (Phase 3): a genuinely-platform SVID must NOT
-    // authenticate an org-SCOPED record that merely shares its agentId.
+    // REGRESSION (spec AC 9): a genuinely-platform SVID MUST authenticate an
+    // org-scoped record that is PLATFORM-placed — that is exactly how an org
+    // member's platform-hosted agent mints. The reverse-binding refusal is now
+    // placement-aware and must NOT fire here.
     @Test
-    void spirePlatformSvidVsOrgScopedRecord_refused() {
+    void spirePlatformSvidVsPlatformPlacedOrgRecord_allowed() {
         spirePlatformEnforcedIdentity("agent-a");
+        // 6-arg ctor ⇒ placement=null (== platform-hosted default).
         when(registry.getAgent("agent-a"))
                 .thenReturn(new AgentRecord("agent-a", "active", "alice", "worker", null, "acme"));
 
-        assertNull(orgAware.verify(SPIRE_JWT));
+        AgentIdentity id = orgAware.verify(SPIRE_JWT);
+        assertNotNull(id, "a platform SVID must authenticate a PLATFORM-placed org record (AC 9)");
+        assertEquals("agent-a", id.agentId());
+        assertNull(id.orgId(), "an org-less SVID must stay org-less");
+    }
+
+    // PRESERVED INVARIANT: a genuinely-platform SVID must NOT authenticate a
+    // SUBSTRATE-placed record — that record may be claimed only by its org-scoped
+    // substrate SVID.
+    @Test
+    void spirePlatformSvidVsSubstrateRecord_refused() {
+        spirePlatformEnforcedIdentity("sub-a");
+        when(registry.getAgent("sub-a"))
+                .thenReturn(new AgentRecord("sub-a", "active", "alice", "worker", null, "acme",
+                        AgentRecord.PLACEMENT_SUBSTRATE));
+
+        assertNull(orgAware.verify(SPIRE_JWT),
+                "a platform SVID must not authenticate a substrate-placed record");
     }
 
     // A genuinely-platform SVID naming an ORG-LESS record passes through.

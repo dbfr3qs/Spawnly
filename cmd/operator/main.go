@@ -133,6 +133,11 @@ func main() {
 		Clientset:        clientset,
 		IdentityInjector: identityInjector,
 		SidecarImage:     getenv("SIDECAR_IMAGE", "agent-sidecar:latest"),
+		// Empty on the platform operator (sidecars keep the historical 10×3s
+		// default); the substrate operator sets these so its sidecars wait longer
+		// for their first SVID while the substrate SPIRE agent finishes its sync.
+		SidecarSpiffeFetchRetries:    getenv("SPIFFE_FETCH_RETRIES", ""),
+		SidecarSpiffeFetchRetryDelay: getenv("SPIFFE_FETCH_RETRY_DELAY", ""),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentWorkload")
 		os.Exit(1)

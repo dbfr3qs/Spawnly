@@ -94,6 +94,13 @@ spec:
             # liveness is the Phase-4 channel, not a CR sweep.
             - name: STALE_SWEEP
               value: "off"
+            # Give substrate-hosted agent sidecars a longer SVID-fetch budget than
+            # the platform default (10 x 3s = 30s): a spawn dispatched while the
+            # substrate's SPIRE agent is still doing its first full sync would
+            # otherwise expire the init-container's wait and CrashLoop. Passed
+            # through by the operator onto every sidecar it creates. 40 x 3s = 2m.
+            - name: SPIFFE_FETCH_RETRIES
+              value: "40"
             - name: AGENT_NAMESPACE
               value: "substrate-sim"
             - name: REGISTRY_URL
