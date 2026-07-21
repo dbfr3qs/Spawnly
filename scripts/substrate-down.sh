@@ -18,6 +18,10 @@ ORCH_NS="${ORCH_NAMESPACE:-default}"
 
 echo "==> Removing the substrate overlay..."
 kubectl delete -k "$REPO_ROOT/deploy/substrate" --ignore-not-found >/dev/null 2>&1 || true
+# The sim-only control-plane reach policy lives in the platform namespace, so the
+# overlay delete above does not cover it — remove it explicitly so `substrate-down`
+# leaves the platform's network posture exactly as it found it.
+kubectl delete -f "$REPO_ROOT/deploy/substrate/sim-cp-reach.yaml" --ignore-not-found >/dev/null 2>&1 || true
 
 echo "==> Sweeping per-run proof/forged pods + org-B credential Secret..."
 if kubectl get ns "$SUBSTRATE_NS" >/dev/null 2>&1; then

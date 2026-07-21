@@ -1,0 +1,44 @@
+# LOCAL-SIM ONLY — let substrate-sim pods reach the control plane in `default`.
+#
+# Why this file exists (see also deploy/substrate/networkpolicy.yaml): the platform
+# policies in deploy/manifests/networkpolicy.yaml select registry/orchestrator
+# ingress with BARE podSelectors, which match only SAME-namespace pods. On a CNI
+# that enforces NetworkPolicy (kind's kindnet does), the substrate-agent in
+# substrate-sim is therefore DROPPED when it dials orchestrator:8080 to open its
+# dispatch channel — it fails as an opaque `i/o timeout`, not a 403, which makes it
+# look like the orchestrator is down.
+#
+# NetworkPolicies are ADDITIVE (the union of all matching policies allows), so this
+# grants the sim's reach WITHOUT widening — or even touching — the platform's own
+# policy, which correctly models a platform whose substrate is external.
+#
+# ⚠ NOT part of the platform base and NEVER applied to a real deployment: there the
+# substrate is a SEPARATE cluster reaching the control plane over the public edge,
+# so no intra-cluster policy governs that path at all. Applied by
+# scripts/substrate-setup.sh; removed by scripts/substrate-down.sh.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: substrate-sim-cp-reach
+  namespace: default
+  labels:
+    spawnly.run/e2e-only: "true"
+spec:
+  # Both control-plane services the substrate legitimately calls: the orchestrator
+  # (dispatch channel + CP-mediated Entry API) and the registry (self-register,
+  # status, the reconcile-on-connect agent list).
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [orchestrator, registry]
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: substrate-sim
+      ports:
+        - protocol: TCP
+          port: 8080

@@ -145,7 +145,10 @@ test.describe.serial('remote-substrate two-org isolation matrix', () => {
     }
 
     // Positive diagonal: an org-A member spawn is substrate-placed (no CR in default).
-    const spawn = await viewer.request.post('/api/spawn', { data: { agentType: 'chain-worker' } });
+    // chain-worker is a requiresTenant type — the spawn must carry a tenantId.
+    const spawn = await viewer.request.post('/api/spawn', {
+      data: { agentType: 'chain-worker', tenantId: 'tenant-42' },
+    });
     expect(spawn.ok(), `spawn: ${spawn.status()} ${await spawn.text()}`).toBeTruthy();
     const workloadName: string = (await spawn.json()).workloadName;
     expect(workloadName).toBeTruthy();

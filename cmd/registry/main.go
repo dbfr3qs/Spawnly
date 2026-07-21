@@ -1334,7 +1334,11 @@ func buildMux(s registry.Store, sdb spicedb.Client, verifier registrant.Verifier
 		// Placement (Phase 10) is trusted from this cp-gated body (the orchestrator's
 		// remote-registration path sets it), but constrain it to the known values so
 		// a typo can never yield a record that neither the sweep nor the UI expects.
-		if rec.Placement != "" && rec.Placement != registry.PlacementK8s && rec.Placement != registry.PlacementRemote {
+		// MUST list every registry.Placement* value: omitting one silently 400s that
+		// whole spawn path (remote-substrate: `substrate` was missing, so every
+		// substrate-placed spawn failed with "invalid placement").
+		if rec.Placement != "" && rec.Placement != registry.PlacementK8s &&
+			rec.Placement != registry.PlacementRemote && rec.Placement != registry.PlacementSubstrate {
 			http.Error(w, "invalid placement", http.StatusBadRequest)
 			return
 		}

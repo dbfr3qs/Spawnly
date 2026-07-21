@@ -55,9 +55,17 @@ precreate_hostpath() {
 }
 
 echo "==> [1/3] Ensuring the spire-server admin socket is on a shared hostPath (${HOSTPATH})..."
+# ALWAYS assert the perms, not just when patching the volume. kubelet's
+# DirectoryOrCreate re-creates this dir root:root 0755 (e.g. after a node restart
+# or if it is removed), and the non-root spire-server then cannot create api.sock —
+# it starts, fails to bind, and CrashLoops, taking SPIRE (and with it the registry,
+# which needs the OIDC JWKS) down with it. That failure is LATENT: it only fires on
+# the server's NEXT restart, long after the wiring "succeeded". Re-asserting on
+# every run makes a re-run repair it instead of arming it.
+precreate_hostpath
+
 cur_hostpath="$(kubectl -n "$SPIRE_NS" get statefulset spire-server -o jsonpath='{.spec.template.spec.volumes[?(@.name=="spire-server-socket")].hostPath.path}' 2>/dev/null || true)"
 if [ "$cur_hostpath" != "$HOSTPATH" ]; then
-  precreate_hostpath
   idx="$(kubectl -n "$SPIRE_NS" get statefulset spire-server -o json \
     | jq '.spec.template.spec.volumes | map(.name=="spire-server-socket") | index(true)')"
   [ "$idx" != "null" ] || { echo "ERROR: spire-server has no spire-server-socket volume — is SPIRE installed?" >&2; exit 1; }

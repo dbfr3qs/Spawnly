@@ -94,15 +94,21 @@ test.describe.serial('remote-substrate lifecycle + liveness', () => {
     viewer = await viewerCtx.newPage();
     await Promise.all([alice.goto('/'), viewer.goto('/')]);
 
-    // Connect the substrate and wait for it to activate; otherwise skip the suite.
-    const connect = await alice.request.post('/api/org/substrate');
-    if (connect.status() === 503) test.skip(true, 'orchestrator dev-CA issuer not wired in this cluster');
-    expect(connect.ok(), `connect: ${connect.status()} ${await connect.text()}`).toBeTruthy();
+    // The substrate-setup project (tests/substrate.setup.ts) owns connecting and
+    // bringing the channel online. Do NOT re-connect here: the connect endpoint
+    // ROTATES the org identity, which invalidates the leaf the substrate agent is
+    // currently presenting and would drop the very channel this suite needs.
     const active = await waitUntil(async () => (await substrateRecordStatus(alice)) === 'active', 30);
-    test.skip(!active, 'substrate channel never activated (Entry API/admin socket not wired in this cluster)');
+    test.skip(
+      !active,
+      'substrate channel not active — run `make substrate-e2e-setup` (the substrate-setup project brings it online)',
+    );
 
     // Spawn a long-lived agent onto the substrate to exercise its lifecycle.
-    const spawn = await viewer.request.post('/api/spawn', { data: { agentType: 'chain-worker' } });
+    // chain-worker is a requiresTenant type — the spawn must carry a tenantId.
+    const spawn = await viewer.request.post('/api/spawn', {
+      data: { agentType: 'chain-worker', tenantId: 'tenant-42' },
+    });
     expect(spawn.ok(), `spawn: ${spawn.status()} ${await spawn.text()}`).toBeTruthy();
     workloadName = (await spawn.json()).workloadName;
     expect(await waitUntil(() => Promise.resolve(agentWorkloadIn(NS, workloadName)), 30)).toBeTruthy();
@@ -110,7 +116,10 @@ test.describe.serial('remote-substrate lifecycle + liveness', () => {
 
   test.afterAll(async () => {
     scaleSubstrateAgent(1); // never leave the sim scaled down
-    await alice?.request.delete('/api/org/substrate').catch(() => {});
+    // Deliberately does NOT disconnect the substrate: the channel is shared state
+    // owned by the substrate-setup project and torn down by global.teardown's
+    // sweepSubstrate. Disconnecting here would break whichever substrate suite runs
+    // next (files run alphabetically under a single worker).
     await aliceCtx?.close();
     await viewerCtx?.close();
   });

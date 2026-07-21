@@ -67,32 +67,36 @@ test.describe.serial('remote-substrate dispatch', () => {
   });
 
   test.afterAll(async () => {
-    await alice?.request.delete('/api/org/substrate').catch(() => {});
+    // Deliberately does NOT disconnect the substrate: the channel is shared state
+    // owned by the substrate-setup project and torn down by global.teardown's
+    // sweepSubstrate. Disconnecting here dropped the channel for every substrate
+    // suite that runs after this file (alphabetical order, single worker).
     await aliceCtx?.close();
     await viewerCtx?.close();
   });
 
   test('a member spawn runs on the substrate, not the platform', async () => {
-    // 1. Admin connects the substrate. 503 ⇒ the dev-CA issuer isn't wired.
-    const connect = await alice.request.post('/api/org/substrate');
-    if (connect.status() === 503) {
-      test.skip(true, 'orchestrator dev-CA issuer not wired in this cluster');
-      return;
-    }
-    expect(connect.ok(), `connect: ${connect.status()} ${await connect.text()}`).toBeTruthy();
-
-    // 2. Wait for the substrate-agent's channel to connect ⇒ record flips active.
-    //    If it never activates, the Entry API / delegated-admin socket isn't wired
-    //    in this cluster — skip the live positive path (documented in the plan).
+    // 1./2. The substrate-setup project (tests/substrate.setup.ts) owns connecting
+    // and bringing the channel online — assert it, don't redo it. Re-connecting
+    // here ROTATES the org identity, which invalidates the leaf the substrate agent
+    // is currently presenting and drops the very channel this test needs (it then
+    // never re-activates, so the test silently skipped).
     let active = false;
     for (let i = 0; i < 30 && !active; i++) {
       active = (await substrateStatus(alice)) === 'active';
       if (!active) await new Promise((r) => setTimeout(r, 2_000));
     }
-    test.skip(!active, 'substrate channel never activated (Entry API/admin socket not wired in this cluster)');
+    test.skip(
+      !active,
+      'substrate channel not active — run `make substrate-e2e-setup` (the substrate-setup project brings it online)',
+    );
 
     // 3. Member spawns. The spawn must be substrate-placed (no CR in default).
-    const spawn = await viewer.request.post('/api/spawn', { data: { agentType: 'chain-worker' } });
+    // chain-worker is a requiresTenant type, so the spawn must carry a tenantId
+    // (the API 400s otherwise) — same convention as spawn-tenant-field.spec.ts.
+    const spawn = await viewer.request.post('/api/spawn', {
+      data: { agentType: 'chain-worker', tenantId: 'tenant-42' },
+    });
     expect(spawn.ok(), `spawn: ${spawn.status()} ${await spawn.text()}`).toBeTruthy();
     const workloadName: string = (await spawn.json()).workloadName;
     expect(workloadName).toBeTruthy();

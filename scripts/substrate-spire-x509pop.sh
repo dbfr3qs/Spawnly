@@ -91,6 +91,19 @@ fi
 
 # 4. Roll the server only if we changed something, then wait for it back.
 if [ "$changed" = "1" ]; then
+  # If the admin socket has been wired onto a hostPath (substrate-wire-entry-api.sh),
+  # re-assert that dir world-writable BEFORE rolling: the non-root spire-server
+  # cannot create api.sock in a root:root 0755 dir (kubelet's DirectoryOrCreate
+  # default) and would CrashLoop on restart, taking SPIRE — and the registry, which
+  # needs its OIDC JWKS — down. Cheap and idempotent; a no-op when unwired.
+  SOCK_HOSTPATH="$(kubectl -n "$NS" get statefulset spire-server \
+    -o jsonpath='{.spec.template.spec.volumes[?(@.name=="spire-server-socket")].hostPath.path}' 2>/dev/null || true)"
+  if [ -n "$SOCK_HOSTPATH" ] && command -v kind >/dev/null 2>&1 && command -v docker >/dev/null 2>&1; then
+    for n in $(kind get nodes --name "${KIND_CLUSTER:-agent-platform}" 2>/dev/null || true); do
+      docker exec "$n" mkdir -p -m 1777 "$SOCK_HOSTPATH" 2>/dev/null || true
+      docker exec "$n" chmod 1777 "$SOCK_HOSTPATH" 2>/dev/null || true
+    done
+  fi
   echo "==> Rolling spire-server to load x509pop + the CA mount..."
   kubectl -n "$NS" rollout restart statefulset/spire-server
   kubectl -n "$NS" rollout status statefulset/spire-server --timeout=180s

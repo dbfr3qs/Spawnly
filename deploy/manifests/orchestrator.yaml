@@ -98,8 +98,14 @@ spec:
             # OIDC discovery provider Service (reachable in-cluster).
             - name: SPIRE_SERVER_BIN
               value: "/spire-server"
+            # https/443: the OIDC discovery provider Service exposes ONLY 443/TCP, so
+            # an http:// (port 80) URL fails with "no route to host" — the validator
+            # then never initialises and, because that init is one-shot, the Entry API
+            # and dispatch channel stay permanently 503. Matches registry.yaml. The
+            # cert is the in-cluster self-signed one, which internal/spiffe's validator
+            # deliberately does not verify (same rationale as the registry).
             - name: SPIRE_JWKS_URL
-              value: "http://spire-spiffe-oidc-discovery-provider.spire-system/keys"
+              value: "https://spire-spiffe-oidc-discovery-provider.spire-system/keys"
             # SPIRE_SERVER_SOCKET stays UNSET here: the Entry API is enabled ONLY when
             # it points at a WORKING server admin socket, else the broker is nil and
             # the Entry API + channel return 503 (never a misleading 502). Making it

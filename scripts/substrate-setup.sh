@@ -61,6 +61,14 @@ if kubectl -n default get secret control-plane-auth >/dev/null 2>&1; then
 fi
 kubectl apply -k "$REPO_ROOT/deploy/substrate"
 
+# LOCAL-SIM reach: the platform's registry/orchestrator ingress policies use bare
+# podSelectors (same-namespace only), so on an enforcing CNI (kindnet) the
+# substrate-agent's dispatch-channel dial is silently DROPPED as an i/o timeout.
+# This additive policy grants just that reach without touching the platform's own.
+# Applied separately (not via the overlay) because the overlay is namespaced to
+# substrate-sim and this policy must live in the control plane's namespace.
+kubectl apply -f "$REPO_ROOT/deploy/substrate/sim-cp-reach.yaml" >/dev/null
+
 # A re-run (e.g. a different ORG, or a re-issued leaf) rewrites the identity Secret
 # but leaves the agent pod spec unchanged — so the agent would keep presenting its
 # OLD leaf and stay attested under the stale org/fingerprint. Restart it so it
