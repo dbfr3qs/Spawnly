@@ -104,19 +104,36 @@ func (a *agent) handleSpawn(ctx context.Context, cmd channel.SpawnCommand) {
 	a.report(channel.NewStatus(cmd.AgentID, channel.PhaseCreated, ""))
 }
 
-// materialize creates the CR then authors the entry. Order matters: the CR (hence
-// the pod) can exist before the entry, and SPIRE will issue the SVID once the
-// entry lands; authoring the entry first would risk a dangling entry if CR create
-// fails.
+// materialize authors the org-scoped SPIRE entry FIRST, then creates the CR.
+//
+// Order matters, and the obvious order is wrong: creating the CR first starts the
+// pod immediately, and its sidecar begins asking the workload API for an SVID
+// straight away — but the entry does not exist yet, and even once written it has
+// to propagate to the substrate's SPIRE agent. The sidecar gives up after a bounded
+// wait (~30s) and exits, so the pod lands in Init:Error and the agent never
+// registers. Registering the entry first closes that race: by the time the pod
+// exists, its identity is already authorized and only has to propagate.
+//
+// The trade-off is a dangling entry if CR creation then fails, so we best-effort
+// remove it on that path. A leftover entry is harmless anyway — it matches
+// selectors (ns + pod-name + SA) that no pod satisfies — and reconcile/teardown
+// sweeps it; a pod that can never obtain an identity is not harmless.
 func (a *agent) materialize(ctx context.Context, rec registry.AgentRecord, task string) error {
-	if err := a.store.Create(ctx, rec, task); err != nil {
-		return err
-	}
 	spiffeID, err := workloadSpiffeID(a.trustDomain, a.org, rec.AgentType, rec.AgentID)
 	if err != nil {
 		return err
 	}
-	return a.entries.CreateEntry(ctx, spiffeID, a.nodeID, workloadSelectors(a.namespace, rec.AgentID, a.serviceAccount))
+	if err := a.entries.CreateEntry(ctx, spiffeID, a.nodeID, workloadSelectors(a.namespace, rec.AgentID, a.serviceAccount)); err != nil {
+		return err
+	}
+	if err := a.store.Create(ctx, rec, task); err != nil {
+		// Roll the entry back so a failed spawn leaves no residue behind.
+		if derr := a.entries.DeleteEntry(ctx, spiffeID); derr != nil {
+			log.Printf("substrate-agent: rollback entry %s after CR create failure: %v", spiffeID, derr)
+		}
+		return err
+	}
+	return nil
 }
 
 // handleKill tears down a dispatched agent: delete the org-scoped entry, then the
