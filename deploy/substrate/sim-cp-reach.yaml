@@ -35,6 +35,14 @@ spec:
   policyTypes:
     - Ingress
   ingress:
+    # DELIBERATELY namespace-wide, not `podSelector: app=substrate-agent`. Least
+    # privilege would suggest naming just the substrate-agent, but that would break
+    # the feature: every AGENT pod the substrate runs also talks to the registry
+    # DIRECTLY (self-register + status, exactly like a platform-hosted agent — the
+    # substrate-agent is only the dispatch channel, not a proxy). Narrowing this to
+    # the substrate-agent leaves those pods unable to register, which surfaces as an
+    # opaque timeout. Both endpoints are independently authenticated (control-plane
+    # bearer / dual-verifier SVID), so the namespace grant is reach, not authority.
     - from:
         - namespaceSelector:
             matchLabels:

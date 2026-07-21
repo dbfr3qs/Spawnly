@@ -125,10 +125,12 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 if [ -z "$TOKEN" ]; then
-  echo "--- last fetch attempt (stderr) ---" >&2
+  echo "--- last fetch attempt (stderr only) ---" >&2
+  # `2>&1 >/dev/null` keeps STDERR (the diagnosis) and DISCARDS stdout — stdout is
+  # the SVID itself, which must never be echoed into a terminal or CI log.
   kubectl -n "$SUBSTRATE_NS" exec "$POD" -c probe -- \
     /opt/spire/bin/spire-agent api fetch jwt -audience registry \
-    -socketPath /spiffe-workload-api/spire-agent.sock >&2 2>&1 || true
+    -socketPath /spiffe-workload-api/spire-agent.sock 2>&1 >/dev/null | head -20 >&2 || true
   fail "could not fetch a JWT-SVID from the org-A proof pod (entry ${AGENT_PATH} may not have propagated)"
 fi
 

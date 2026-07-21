@@ -132,14 +132,23 @@ fi
 # unreadable — connect disabled", leaving every substrate connect (and therefore the
 # whole dispatch path) dead with no obvious cause. Copy it across.
 CA_SECRET="${SUBSTRATE_CA_SECRET:-substrate-dev-ca}"
-if ! kubectl -n "$ORCH_NS" get secret "$CA_SECRET" >/dev/null 2>&1; then
+# Compare CONTENT, not mere presence: if the dev CA is ever regenerated (the Secret
+# deleted and re-created by substrate-ca.sh), a name-only check would leave the
+# orchestrator issuing identities off the STALE CA while the SPIRE server trusts the
+# new one — connects then fail x509pop attestation with nothing pointing at the
+# cause. Re-copying on any difference keeps issuer and verifier on one CA.
+src_ca="$(kubectl -n "$SPIRE_NS" get secret "$CA_SECRET" -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)"
+dst_ca="$(kubectl -n "$ORCH_NS" get secret "$CA_SECRET" -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)"
+if [ -z "$src_ca" ]; then
+  echo "    WARN: no dev CA Secret ${SPIRE_NS}/${CA_SECRET} — run scripts/substrate-ca.sh; connect will stay disabled." >&2
+elif [ "$src_ca" != "$dst_ca" ]; then
   echo "    copying dev CA Secret ${SPIRE_NS}/${CA_SECRET} into ${ORCH_NS} (connect needs it)..."
   kubectl -n "$SPIRE_NS" get secret "$CA_SECRET" -o json \
     | jq '{apiVersion,kind,type,metadata:{name:"'"$CA_SECRET"'",namespace:"'"$ORCH_NS"'"},data}' \
     | kubectl apply -f - >/dev/null
   changed_orch=1
 else
-  echo "    dev CA Secret already present in ${ORCH_NS} — skipping."
+  echo "    dev CA Secret already current in ${ORCH_NS} — skipping."
 fi
 
 if [ "$changed_orch" = "1" ]; then

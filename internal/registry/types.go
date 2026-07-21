@@ -49,6 +49,22 @@ const (
 	PlacementSubstrate = "substrate"
 )
 
+// ValidPlacement reports whether p is a known placement ("" means unset ⇒ k8s).
+//
+// Callers that validate an incoming placement MUST use this rather than
+// open-coding the comparison: an open-coded allow-list silently 400s any newly
+// added placement, which is exactly how every substrate-placed spawn came to be
+// rejected after PlacementSubstrate was introduced. Keeping the set here means a
+// future value cannot drift out of a validator.
+func ValidPlacement(p string) bool {
+	switch p {
+	case "", PlacementK8s, PlacementRemote, PlacementSubstrate:
+		return true
+	default:
+		return false
+	}
+}
+
 // Substrate registration status values (remote-substrate Phase 3). A substrate
 // registers `pending` the moment the org admin requests an identity; it flips to
 // `active` when its channel first connects (Phase 4). Phase 3 only persists the

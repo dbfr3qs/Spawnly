@@ -115,9 +115,13 @@ func (a *agent) handleSpawn(ctx context.Context, cmd channel.SpawnCommand) {
 // exists, its identity is already authorized and only has to propagate.
 //
 // The trade-off is a dangling entry if CR creation then fails, so we best-effort
-// remove it on that path. A leftover entry is harmless anyway — it matches
-// selectors (ns + pod-name + SA) that no pod satisfies — and reconcile/teardown
-// sweeps it; a pod that can never obtain an identity is not harmless.
+// remove it on that path. If that rollback ALSO fails the entry is inert but does
+// genuinely linger: reconcile only tears down CR-backed workloads, and handleKill
+// early-returns on a record with no local CR, so NEITHER reclaims it — it is
+// reclaimed only by the org-prefix sweep on substrate rotate/disconnect
+// (internal/substrate.EntryService). That is an acceptable residue: its selectors
+// (ns + per-spawn pod-name + SA) match no pod, and CreateEntry is idempotent so a
+// retry reuses it. A pod that can never obtain an identity is NOT acceptable.
 func (a *agent) materialize(ctx context.Context, rec registry.AgentRecord, task string) error {
 	spiffeID, err := workloadSpiffeID(a.trustDomain, a.org, rec.AgentType, rec.AgentID)
 	if err != nil {

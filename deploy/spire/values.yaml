@@ -12,7 +12,11 @@ global:
 #   NodeAttestor "x509pop" {
 #     plugin_data {
 #       ca_bundle_path      = "/run/spire/x509pop/ca.pem"   # dev CA cert (Secret)
-#       agent_path_template = "/spire/agent/x509pop/org/{{ .Subject.CommonName }}/{{ .Fingerprint }}"
+#       # MUST NOT begin with "/spire/agent" — SPIRE already roots attested node
+#       # ids there and APPENDS this template, so including it yields a DOUBLED id
+#       # (…/spire/agent/spire/agent/x509pop/…) that matches nothing the code looks
+#       # up, silently breaking entry parenting. See devca.NodeAttestorPathTemplate.
+#       agent_path_template = "/x509pop/org/{{ .Subject.CommonName }}/{{ .Fingerprint }}"
 #     }
 #   }
 #

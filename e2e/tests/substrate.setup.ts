@@ -1,4 +1,4 @@
-import { test as setup, expect, type Page } from '@playwright/test';
+import { test as setup, type Page } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -32,10 +32,17 @@ import { contextFor } from '../helpers/auth';
 const NS = process.env.SUBSTRATE_NAMESPACE ?? 'substrate-sim';
 const LEAF_SECRET = 'substrate-identity';
 
+// kubectl runs a command and returns stdout, or '' on failure. The timeout sits
+// ABOVE the longest `--timeout=` we pass to kubectl itself (180s rollout waits), so
+// this wrapper never truncates a wait it is supposed to be observing. Failures are
+// logged rather than swallowed silently — a failed identity install would otherwise
+// degrade into an unexplained wait-then-warn.
 function kubectl(args: string[], input?: string): string {
   try {
-    return execFileSync('kubectl', args, { encoding: 'utf8', input, timeout: 120_000 });
-  } catch {
+    return execFileSync('kubectl', args, { encoding: 'utf8', input, timeout: 240_000 });
+  } catch (e: unknown) {
+    const err = e as { stderr?: string; message?: string };
+    console.warn(`substrate.setup: kubectl ${args.join(' ')} failed: ${err.stderr ?? err.message ?? 'unknown'}`);
     return '';
   }
 }
@@ -64,7 +71,7 @@ async function waitUntil(cond: () => Promise<boolean>, tries = 60, delayMs = 2_0
 // substrate SPIRE agent mounts (svid.crt / svid.key / bundle.crt — the same
 // mapping scripts/connect-substrate.sh uses), via a 0700 temp dir that is removed
 // immediately. Key material never touches the repo.
-function installIdentity(certPem: string, keyPem: string, bundlePem: string): void {
+function installIdentity(certPem: string, keyPem: string, bundlePem: string): boolean {
   const dir = mkdtempSync(join(tmpdir(), 'substrate-identity-'));
   try {
     writeFileSync(join(dir, 'svid.crt'), certPem, { mode: 0o600 });
@@ -77,8 +84,15 @@ function installIdentity(certPem: string, keyPem: string, bundlePem: string): vo
       `--from-file=bundle.crt=${join(dir, 'bundle.crt')}`,
       '--dry-run=client', '-o', 'yaml',
     ]);
-    expect(manifest, 'rendering the identity Secret').toContain('svid.crt');
-    kubectl(['apply', '-f', '-'], manifest);
+    // Deliberately no assertion on the manifest body: it embeds the private key, so
+    // it must never reach an assertion message or test artifact. Warn-and-return
+    // keeps a broken sim from failing this dependency project (which would skip the
+    // whole suite).
+    if (!manifest.includes('svid.crt')) {
+      console.warn('substrate.setup: could not render the identity Secret manifest');
+      return false;
+    }
+    return kubectl(['apply', '-f', '-'], manifest) !== '';
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -102,16 +116,30 @@ setup('connect the acme substrate and bring its dispatch channel online', async 
       setup.skip(true, 'orchestrator dev-CA issuer not wired — run `make substrate-e2e-setup`');
       return;
     }
-    expect(r.ok(), `connect: ${r.status()} ${await r.text()}`).toBeTruthy();
+    // WARN-and-return rather than hard-fail from here on. `chromium` depends on this
+    // project, so a thrown expect would fail the dependency and Playwright would skip
+    // the ENTIRE suite — a degraded substrate sim must not zero out the ~60 tests that
+    // have nothing to do with it. The substrate specs skip cleanly on their own
+    // channel-not-active guard, which is the correct blast radius.
+    if (!r.ok()) {
+      console.warn(`substrate.setup: connect failed: ${r.status()} ${await r.text()}`);
+      return;
+    }
     const resp = await r.json();
     const cert = resp.identity?.certPem;
     const key = resp.identity?.keyPem;
     const bundle = resp.identity?.trustBundlePem;
-    expect(cert, 'connect must return the cert').toContain('BEGIN CERTIFICATE');
-    expect(key, 'connect must return the key once').toContain('PRIVATE KEY');
-    expect(bundle, 'connect must return the bootstrap trust bundle').toContain('BEGIN CERTIFICATE');
+    if (
+      !cert?.includes('BEGIN CERTIFICATE') ||
+      !key?.includes('PRIVATE KEY') ||
+      !bundle?.includes('BEGIN CERTIFICATE')
+    ) {
+      // Never log the payload itself — it carries the one-time private key.
+      console.warn('substrate.setup: connect response missing identity material (cert/key/bundle)');
+      return;
+    }
 
-    installIdentity(cert, key, bundle);
+    if (!installIdentity(cert, key, bundle)) return;
 
     // Restart both: the SPIRE agent must present the NEW leaf (a changed Secret
     // does not roll the pod), and the substrate-agent must re-fetch its bootstrap
