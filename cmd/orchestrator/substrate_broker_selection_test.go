@@ -19,7 +19,7 @@ func (sentinelBroker) DeleteEntry(context.Context, string) error              { 
 // regardless of ordering.
 func clearBrokerEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"SPIRE_ENTRY_API_ADDR", "SPIRE_SERVER_SOCKET", "SPIRE_WORKLOAD_API_SOCKET", "SPIRE_JWKS_URL", "SUBSTRATE_KMS_KEY_ARN", "SUBSTRATE_CA_CERT_FILE", "SUBSTRATE_CA_KEY_FILE"} {
+	for _, k := range []string{"SPIRE_ENTRY_API_ADDR", "SPIRE_SERVER_SOCKET", "SPIRE_WORKLOAD_API_SOCKET", "SPIRE_JWKS_URL", "SUBSTRATE_KMS_KEY_ARN", "SUBSTRATE_CA_CERT_FILE", "SUBSTRATE_CA_KEY_FILE", "SUBSTRATE_PUBLIC_ADDR"} {
 		t.Setenv(k, "")
 	}
 }

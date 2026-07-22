@@ -467,3 +467,31 @@ func TestNew_WorkloadAPIUnavailableFailsClosed(t *testing.T) {
 		t.Fatalf("expected fail-closed error, got broker %v", b)
 	}
 }
+
+// TestBroker_DeleteEntry_MultipleParents proves DeleteEntry sweeps ALL entries for
+// a SPIFFE id, not just one — the rotation case its doc comment motivates (a stale
+// parent left behind when a node re-attests under a new fingerprint).
+func TestBroker_DeleteEntry_MultipleParents(t *testing.T) {
+	es := newFakeEntryServer()
+	b := newTestBroker(t, es, nil)
+	ctx := context.Background()
+
+	spec := workloadSpec("acme", "agent-1")
+	spec.ParentID = nodePrefix(t, "acme") + "OLDFP"
+	if err := b.CreateEntry(ctx, spec); err != nil {
+		t.Fatalf("create old-parent: %v", err)
+	}
+	spec.ParentID = nodePrefix(t, "acme") + "NEWFP"
+	if err := b.CreateEntry(ctx, spec); err != nil {
+		t.Fatalf("create new-parent: %v", err)
+	}
+	if es.count() != 2 {
+		t.Fatalf("want 2 entries for one SPIFFE id under two parents, got %d", es.count())
+	}
+	if err := b.DeleteEntry(ctx, spec.SPIFFEID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if es.count() != 0 {
+		t.Fatalf("DeleteEntry left %d entries; must sweep ALL parents for the id", es.count())
+	}
+}

@@ -31,6 +31,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 
@@ -40,7 +41,6 @@ import (
 	agentv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/server/agent/v1"
 	entryv1 "github.com/spiffe/spire-api-sdk/proto/spire/api/server/entry/v1"
 	"github.com/spiffe/spire-api-sdk/proto/spire/api/types"
-	"google.golang.org/grpc/credentials"
 
 	"github.com/spawnly/platform/internal/substrate"
 )
@@ -257,7 +257,7 @@ func (b *Broker) EvictNodesUnderPrefix(ctx context.Context, prefix, keepNodeID s
 	var pageToken string
 	evicted := 0
 	for {
-		resp, err := b.agents.ListAgents(ctx, &agentv1.ListAgentsRequest{PageToken: pageToken})
+		resp, err := b.agents.ListAgents(ctx, &agentv1.ListAgentsRequest{PageSize: listPageSize, PageToken: pageToken})
 		if err != nil {
 			return evicted, fmt.Errorf("spire ListAgents: %w", err)
 		}
@@ -281,13 +281,27 @@ func (b *Broker) EvictNodesUnderPrefix(ctx context.Context, prefix, keepNodeID s
 	}
 }
 
+// listPageSize is the explicit page size for the paged ListEntries/ListAgents
+// loops. Without it (PageSize=0) SPIRE returns the ENTIRE result set in one
+// response — and DeleteEntriesUnderParent has no server-side prefix filter, so it
+// lists the whole trust domain (all orgs + platform agents). At scale that can
+// exceed the gRPC client's default 4 MB MaxRecvMsgSize → ResourceExhausted → the
+// rotate/disconnect entry sweep silently degrades. An explicit page size makes the
+// already-written paging loop actually engage.
+const listPageSize = 500
+
 // listEntryIDs pages through ListEntries applying an optional server-side filter
 // and an optional client-side keep predicate, returning the matched entry ids.
+//
+// TODO(substrate-edge scale): DeleteEntriesUnderParent currently scans the whole
+// trust domain client-side (SPIRE has no ByParentId-prefix filter). A cheaper shape
+// is ListAgents under the org node prefix (small set) then a server-side ByParentId
+// exact query per node — worth doing before very large deployments.
 func (b *Broker) listEntryIDs(ctx context.Context, filter *entryv1.ListEntriesRequest_Filter, keep func(*types.Entry) bool) ([]string, error) {
 	var ids []string
 	var pageToken string
 	for {
-		resp, err := b.entries.ListEntries(ctx, &entryv1.ListEntriesRequest{Filter: filter, PageToken: pageToken})
+		resp, err := b.entries.ListEntries(ctx, &entryv1.ListEntriesRequest{Filter: filter, PageSize: listPageSize, PageToken: pageToken})
 		if err != nil {
 			return nil, fmt.Errorf("spire ListEntries: %w", err)
 		}
