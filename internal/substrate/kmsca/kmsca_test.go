@@ -7,6 +7,9 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -277,5 +280,107 @@ func TestSigner_RejectsNonSHA256(t *testing.T) {
 	signer, _ := NewSigner(context.Background(), newFakeKMS(t), "k")
 	if _, err := signer.Sign(rand.Reader, make([]byte, 20), crypto.SHA1); err == nil {
 		t.Fatal("expected Sign to reject a non-SHA-256 digest")
+	}
+}
+
+// --- Phase-1 review-hardening tests -----------------------------------------
+
+// makeCACert builds a CA certificate carrying pub as its SubjectPublicKeyInfo,
+// signed by signKey, with the given validity — the raw material for crafting the
+// negative cases NewIssuer must refuse.
+func makeCACert(t *testing.T, pub crypto.PublicKey, signKey crypto.Signer, notBefore, notAfter time.Time) []byte {
+	t.Helper()
+	tmpl := &x509.Certificate{
+		SerialNumber:          bigOne(),
+		Subject:               pkix.Name{CommonName: "spawnly-substrate-ca"},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, signKey)
+	if err != nil {
+		t.Fatalf("CreateCertificate: %v", err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+func bigOne() *big.Int { return big.NewInt(1) }
+
+// TestNewIssuer_RefusesExpiredCACert: a CA cert past its NotAfter is refused at
+// startup, not silently used to issue leaves that only fail downstream at SPIRE.
+func TestNewIssuer_RefusesExpiredCACert(t *testing.T) {
+	f := newFakeKMS(t)
+	signer, err := NewSigner(context.Background(), f, "k")
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+	past := time.Now().Add(-48 * time.Hour)
+	expired := makeCACert(t, signer.Public(), signer, past, past.Add(time.Hour))
+	if _, err := NewIssuer(context.Background(), f, "k", expired, testTD, time.Hour); err == nil {
+		t.Fatal("NewIssuer accepted an expired CA cert, want refusal")
+	}
+}
+
+// TestNewIssuer_RefusesForeignSignedCACert: a cert embedding the KMS public key as
+// its SPKI (so the SPKI check passes) but signed by a DIFFERENT key must be refused
+// by the self-signature check — SPKI equality alone is not proof of provenance.
+func TestNewIssuer_RefusesForeignSignedCACert(t *testing.T) {
+	f := newFakeKMS(t)
+	signer, err := NewSigner(context.Background(), f, "k")
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+	foreign, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("gen foreign: %v", err)
+	}
+	now := time.Now()
+	// SPKI = the KMS public key; signature = the foreign key.
+	crafted := makeCACert(t, signer.Public(), foreign, now.Add(-time.Minute), now.Add(time.Hour))
+	if _, err := NewIssuer(context.Background(), f, "k", crafted, testTD, time.Hour); err == nil {
+		t.Fatal("NewIssuer accepted a foreign-signed CA cert with matching SPKI, want refusal")
+	}
+}
+
+// TestNewIssuer_TrustBundleIsSingleCert: a trailing appended cert block in the CA
+// file must NOT ride into the trust bundle — TrustBundlePEM returns exactly the one
+// validated CA cert.
+func TestNewIssuer_TrustBundleIsSingleCert(t *testing.T) {
+	f := newFakeKMS(t)
+	signer, err := NewSigner(context.Background(), f, "k")
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+	caPEM, err := BootstrapCACert(signer, nil, time.Hour)
+	if err != nil {
+		t.Fatalf("BootstrapCACert: %v", err)
+	}
+	// Append a second, unrelated self-signed cert.
+	other, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("gen other: %v", err)
+	}
+	now := time.Now()
+	extra := makeCACert(t, &other.PublicKey, other, now.Add(-time.Minute), now.Add(time.Hour))
+	multi := append(append([]byte{}, caPEM...), extra...)
+
+	iss, err := NewIssuer(context.Background(), f, "k", multi, testTD, time.Hour)
+	if err != nil {
+		t.Fatalf("NewIssuer (multi-block, first is the CA): %v", err)
+	}
+	n := 0
+	rest := iss.TrustBundlePEM()
+	for {
+		var blk *pem.Block
+		blk, rest = pem.Decode(rest)
+		if blk == nil {
+			break
+		}
+		n++
+	}
+	if n != 1 {
+		t.Fatalf("TrustBundlePEM has %d cert blocks, want exactly 1 (no trailing cert leaked)", n)
 	}
 }

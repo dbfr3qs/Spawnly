@@ -30,6 +30,7 @@ import (
 	"crypto/elliptic"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -73,7 +74,15 @@ type Signer struct {
 	api   SigningAPI
 	keyID string
 	pub   *ecdsa.PublicKey
+	// callTimeout bounds each kms:Sign. crypto.Signer.Sign can't carry a context,
+	// so the timeout lives on the struct: without it a stalled KMS response would
+	// hang the user-facing connect handler indefinitely (the default AWS client
+	// sets no total request deadline).
+	callTimeout time.Duration
 }
+
+// DefaultKMSCallTimeout bounds a single kms:Sign / kms:GetPublicKey call.
+const DefaultKMSCallTimeout = 10 * time.Second
 
 // NewSigner fetches and caches the KMS key's public half and verifies it is an
 // ECDSA P-256 key usable for ECDSA_SHA_256 signing. Fails closed on any other key
@@ -109,7 +118,7 @@ func NewSigner(ctx context.Context, api SigningAPI, keyID string) (*Signer, erro
 	if !hasSigningAlgorithm(out.SigningAlgorithms, kmstypes.SigningAlgorithmSpecEcdsaSha256) {
 		return nil, fmt.Errorf("kms key does not support ECDSA_SHA_256")
 	}
-	return &Signer{api: api, keyID: keyID, pub: pub}, nil
+	return &Signer{api: api, keyID: keyID, pub: pub, callTimeout: DefaultKMSCallTimeout}, nil
 }
 
 func hasSigningAlgorithm(algs []kmstypes.SigningAlgorithmSpec, want kmstypes.SigningAlgorithmSpec) bool {
@@ -136,9 +145,11 @@ func (s *Signer) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]byt
 	if len(digest) != crypto.SHA256.Size() {
 		return nil, fmt.Errorf("digest length %d != SHA-256 size", len(digest))
 	}
-	// crypto.Signer.Sign cannot carry a context; the KMS client's own
-	// retry/timeout config bounds the call.
-	out, err := s.api.Sign(context.Background(), &kms.SignInput{
+	// crypto.Signer.Sign cannot carry a context; bound the call with the Signer's
+	// own timeout so a stalled KMS never hangs the connect handler.
+	ctx, cancel := context.WithTimeout(context.Background(), s.callTimeout)
+	defer cancel()
+	out, err := s.api.Sign(ctx, &kms.SignInput{
 		KeyId:            aws.String(s.keyID),
 		Message:          digest,
 		MessageType:      kmstypes.MessageTypeDigest,
@@ -251,13 +262,28 @@ func NewIssuer(ctx context.Context, api SigningAPI, keyID string, caCertPEM []by
 	if !match {
 		return nil, errors.New("CA certificate public key does not match the KMS key")
 	}
+	// SPKI-equality proves the cert carries the KMS key, but not that the cert was
+	// actually signed by it. Verify the self-signature so a cert embedding the KMS
+	// public key but signed by a foreign key (crafted metadata) is refused.
+	if err := caCert.CheckSignatureFrom(caCert); err != nil {
+		return nil, fmt.Errorf("CA certificate is not validly self-signed by the KMS key: %w", err)
+	}
+	// Refuse an expired / not-yet-valid CA cert here (fail at startup) rather than
+	// silently issuing leaves that only fail downstream at SPIRE attestation.
+	now := time.Now()
+	if now.Before(caCert.NotBefore) || now.After(caCert.NotAfter) {
+		return nil, fmt.Errorf("CA certificate is outside its validity window (%s..%s)", caCert.NotBefore, caCert.NotAfter)
+	}
 	if leafTTL <= 0 {
 		leafTTL = 90 * 24 * time.Hour
 	}
 	return &Issuer{
-		signer:      signer,
-		caCert:      caCert,
-		caCertPEM:   caCertPEM,
+		signer: signer,
+		caCert: caCert,
+		// Store the RE-ENCODED single validated certificate, not the raw input: a
+		// trailing appended PEM block in the mounted cert file would otherwise ride
+		// into TrustBundlePEM() and become an extra trusted root for substrate agents.
+		caCertPEM:   pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCert.Raw}),
 		trustDomain: trustDomain,
 		leafTTL:     leafTTL,
 	}, nil

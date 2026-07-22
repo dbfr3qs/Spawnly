@@ -15,6 +15,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/pem"
 	"flag"
@@ -81,7 +82,9 @@ func run(ctx context.Context, stdout *os.File) error {
 }
 
 func ttlNote(existingPEM []byte, ttl time.Duration) string {
-	if len(existingPEM) > 0 {
+	// Match BootstrapCACert's own TrimSpace test: a whitespace-only -existing file
+	// mints a fresh cert, so it must not report "reused".
+	if len(bytes.TrimSpace(existingPEM)) > 0 {
 		return "reused existing"
 	}
 	return ttl.String()

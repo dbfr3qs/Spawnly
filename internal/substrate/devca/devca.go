@@ -285,9 +285,15 @@ func BuildOrgLeaf(caSigner crypto.Signer, caCert *x509.Certificate, trustDomain,
 	if caCert == nil {
 		return nil, errors.New("nil CA certificate")
 	}
-	if err := ValidateOrgID(orgID); err != nil {
+	// NORMALIZE at the core (not just validate): the CN + SAN below carry this
+	// value, so lowercasing here means the invariant "org == lowercase Keycloak
+	// slug" holds even for a future direct caller that forgets to normalize first.
+	// Current callers already normalize, so this is idempotent for them.
+	norm, err := NormalizeOrgID(orgID)
+	if err != nil {
 		return nil, err
 	}
+	orgID = norm
 	if trustDomain == "" {
 		return nil, errors.New("empty trust domain")
 	}
