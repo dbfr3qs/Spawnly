@@ -109,6 +109,20 @@ spec:
               value: "http://keycloak.default:8080/realms/spawnly/protocol/openid-connect/token"
             - name: ORCHESTRATOR_URL
               value: "http://orchestrator.default:8080"
+            # Sample-API endpoints the operator injects into every agent pod it
+            # builds. These MUST be namespace-qualified to `.default` (like the
+            # URLs above): the sample APIs live in `default`, but agent pods run in
+            # `substrate-sim`, where a bare `sample-api-a` resolves namespace-local
+            # (→ sample-api-a.substrate-sim, NXDOMAIN) and every doWork() call
+            # fails — so a substrate agent could mint a token yet never reach the
+            # API, emitting work_error instead of work_ok. Without this a
+            # substrate-hosted chain-worker/weather-monitor can't do real work.
+            - name: SAMPLE_API_URL
+              value: "http://sample-api-a.default:8080"
+            - name: API_A_URL
+              value: "http://sample-api-a.default:8080"
+            - name: API_B_URL
+              value: "http://sample-api-b.default:8080"
             - name: CONTROL_PLANE_AUTH
               valueFrom:
                 secretKeyRef:

@@ -19,6 +19,18 @@ spec:
           image: agent-operator:latest
           imagePullPolicy: Never
           env:
+            # Scope the platform operator's controller-runtime cache+watch to the
+            # `default` namespace — the ONLY namespace platform agents run in
+            # (orchestrator hard-codes AgentWorkload namespace `default`, and the
+            # stale-sweep's AGENT_NAMESPACE defaults to `default`). Without this
+            # the manager watches ALL namespaces and would RACE the substrate
+            # operator to reconcile `substrate-sim` AgentWorkloads, building those
+            # pods with the WRONG (platform) SPIRE socket and without the substrate
+            # SVID-fetch retry budget → the substrate agent never gets its
+            # org-scoped SVID. Substrate CRs must be owned solely by the substrate
+            # operator (WATCH_NAMESPACE=substrate-sim).
+            - name: WATCH_NAMESPACE
+              value: "default"
             - name: REGISTRY_URL
               value: "http://registry:8080"
             - name: IS_TOKEN_URL

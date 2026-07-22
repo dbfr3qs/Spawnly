@@ -87,12 +87,7 @@ func main() {
 		HealthProbeBindAddress: probeAddr,
 	}
 	// WATCH_NAMESPACE scopes the reconciler's cache+watch to a single namespace.
-	// Unset (the platform default) keeps today's cluster-wide behavior verbatim.
-	// The remote-substrate overlay sets it to `substrate-sim` so a SECOND operator
-	// can run there without racing the platform operator over `default` pods.
-	if ns := os.Getenv("WATCH_NAMESPACE"); ns != "" {
-		mgrOpts.Cache = cache.Options{DefaultNamespaces: map[string]cache.Config{ns: {}}}
-	}
+	mgrOpts.Cache = cacheOptionsForNamespace(os.Getenv("WATCH_NAMESPACE"))
 
 	mgr, err := ctrl.NewManager(cfg, mgrOpts)
 	if err != nil {
@@ -248,6 +243,25 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// cacheOptionsForNamespace maps the WATCH_NAMESPACE env value to the manager's
+// cache scoping. A non-empty namespace restricts the controller-runtime cache
+// (and therefore every watch/List the reconciler and stale-sweep perform) to
+// that single namespace; an empty value keeps the historical cluster-wide
+// behavior verbatim (an empty DefaultNamespaces map means "all namespaces").
+//
+// This is the isolation boundary between the two operators: the platform
+// operator runs with WATCH_NAMESPACE=default (its agents only ever land in
+// `default`) so it never reconciles the substrate operator's `substrate-sim`
+// AgentWorkloads — which must be built with the substrate SPIRE socket + the
+// longer SVID-fetch budget, not the platform operator's defaults. The substrate
+// operator runs with WATCH_NAMESPACE=substrate-sim for the mirror-image reason.
+func cacheOptionsForNamespace(ns string) cache.Options {
+	if ns == "" {
+		return cache.Options{}
+	}
+	return cache.Options{DefaultNamespaces: map[string]cache.Config{ns: {}}}
 }
 
 func getenv(key, fallback string) string {
