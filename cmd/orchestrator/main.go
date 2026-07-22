@@ -2011,6 +2011,17 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	}
 	registerSubstrateRoutes(mux, substrateAPI, validator, audience, readScope, writeScope, sdb)
 
+	// Dedicated public substrate listener (Phase 2, edge): when SUBSTRATE_PUBLIC_ADDR
+	// is set (AWS overlay), serve the substrate surface ALSO on a second port that
+	// the ALB host-rule (substrate.spawnly.run) targets — exposing ONLY the substrate
+	// routes to the internet, not the whole orchestrator mux (mobile-gateway
+	// two-port-split precedent). Unset on local kind ⇒ not started (single :8080
+	// listener, unchanged). The listener shares this substrateAPI instance (same
+	// dispatch hub), so a /spawn on :8080 still reaches a substrate's channel here.
+	if publicAddr := os.Getenv("SUBSTRATE_PUBLIC_ADDR"); publicAddr != "" {
+		startSubstratePublicListener(publicAddr, substratePublicMux(substrateAPI, validator, audience, readScope, writeScope, sdb))
+	}
+
 	return mux
 }
 

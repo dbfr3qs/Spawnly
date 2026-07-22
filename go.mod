@@ -17,8 +17,10 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/lestrrat-go/jwx/v2 v2.1.6
 	github.com/spiffe/go-spiffe/v2 v2.6.0
+	github.com/spiffe/spire-api-sdk v1.15.2
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/grpc v1.75.0
+	google.golang.org/protobuf v1.36.7
 	k8s.io/api v0.29.6
 	k8s.io/apimachinery v0.29.6
 	k8s.io/client-go v0.29.6
@@ -104,8 +106,7 @@ require (
 	golang.org/x/time v0.3.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.4.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250707201910-8d1bb00bc6a7 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250707201910-8d1bb00bc6a7 // indirect
-	google.golang.org/protobuf v1.36.7 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250811230008-5f3141c8851a // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
