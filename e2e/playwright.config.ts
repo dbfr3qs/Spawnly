@@ -32,6 +32,20 @@ export default defineConfig({
     // teardown (cleanup) runs after setup and all its dependents finish.
     { name: 'setup', testMatch: /auth\.setup\.ts/, teardown: 'cleanup' },
     {
+      // remote-substrate: connect org A's substrate and wait for its dispatch
+      // channel to come online, BEFORE any spec runs. Connecting is two-sided (the
+      // CP issues a one-time identity; it must then be installed into the substrate
+      // cluster and the agent restarted) and neither the harness nor a single spec
+      // could do both — so substrate-dispatch/-lifecycle used to skip for want of a
+      // live channel, while the only spec that connected ran LAST alphabetically.
+      // Skips cleanly when the sim isn't installed, so plain `make e2e` is
+      // unaffected. See tests/substrate.setup.ts.
+      name: 'substrate-setup',
+      testMatch: /substrate\.setup\.ts/,
+      dependencies: ['setup'],
+      use: { ...devices['Desktop Chrome'], headless: true },
+    },
+    {
       // Sweeps all agents + per-run org/anchor residue at the very end so the
       // cluster is left at its seed. Runs as the default alice@acme session, which
       // OWNS the bare-suite agent residue (the agent sweep is owner-scoped). The
@@ -54,7 +68,7 @@ export default defineConfig({
         headless: true,
         storageState: 'playwright/.auth/user.json',
       },
-      dependencies: ['setup'],
+      dependencies: ['setup', 'substrate-setup'],
     },
     // org-subdomains (Phase 4): proves the six subdomain e2e cases over the Phase-3
     // local TLS mimic (make tls-mimic → https://<slug>.localtest.me). GATED behind

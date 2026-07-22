@@ -101,8 +101,84 @@ public final class OrgAwareVerifier {
         if (looksLikeStsCredential(credential)) {
             return verifyStsOrgBound(credential);
         }
-        // Non-STS (JWT-SVID / SPIRE) → the platform default verifier, unchanged.
-        return defaultVerifier.verify(credential);
+        // Non-STS (JWT-SVID / SPIRE) → the platform default verifier, then the
+        // SPIRE org-bound binding (remote-substrate Phase 1) beside the STS one.
+        return verifySpireOrgBound(credential);
+    }
+
+    /**
+     * The SPIRE org-bound path (remote-substrate Phase 1), the mirror of
+     * {@link #verifyStsOrgBound} with the SAME fail-closed discipline. The
+     * default verifier (SpireCredentialVerifier, in trust-domain-enforcing mode)
+     * surfaces the signed-path org on {@link AgentIdentity#orgId()}:
+     * <ul>
+     *   <li>org-LESS identity (orgId null/empty) ⇒ platform-hosted (or a
+     *       non-SPIFFE default that never sets orgId) ⇒ passthrough,
+     *       bit-identical, the org store is never touched;</li>
+     *   <li>org-SCOPED identity ⇒ authenticates ONLY against a record whose org
+     *       equals the SVID's org. A mismatch, an org-less record, an unknown
+     *       record, or a registry outage is an oracle-free {@code null} — never a
+     *       fallback.</li>
+     * </ul>
+     * Enforced identically on BOTH callers (client-credentials mint and
+     * token-exchange), since both route through {@code verify()}.
+     */
+    private AgentIdentity verifySpireOrgBound(String credential) {
+        AgentIdentity identity = defaultVerifier.verify(credential);
+        if (identity == null) {
+            return null;
+        }
+        String org = identity.orgId();
+        if (org == null || org.isEmpty()) {
+            // Platform-hosted / org-less SVID. REVERSE org-binding (remote-substrate
+            // carry-forward), now PLACEMENT-AWARE: the refusal exists so a genuinely
+            // platform SVID cannot claim a record that is meant to be authenticated
+            // only by an ORG-SCOPED substrate SVID. But an org-less (platform) SVID is
+            // exactly how an org MEMBER's PLATFORM-hosted agent mints: the platform
+            // ClusterSPIFFEID issues org-LESS paths while that member's spawn
+            // preregisters a record carrying their OrgID. That pairing is the
+            // pre-substrate world and MUST keep working (spec AC 9).
+            //
+            // So refuse ONLY when the record's placement REQUIRES an org-scoped
+            // identity — "substrate". A substrate record must be claimed solely by its
+            // org-scoped substrate SVID; for platform/remote/unset placement the
+            // org-less SVID IS the legitimate platform path and passes through.
+            // Placement is server-set at preregistration and immutable, so a caller
+            // cannot game which branch it lands in.
+            //
+            // This fires ONLY for identity.platformSvid() — a trust-domain-verified
+            // /agent/… path in enforcing mode. In legacy passthrough or for a
+            // non-SPIFFE default verifier the flag is false, so behaviour is
+            // bit-identical (no getAgent, no new refusal). A registry outage
+            // (getAgent==null, indistinguishable from unknown) PASSES THROUGH,
+            // preserving platform-agent availability: the breach can only complete if
+            // the mint then loads the substrate record, which needs the registry up.
+            if (identity.platformSvid()) {
+                AgentRecord record = registry.getAgent(identity.agentId());
+                // Refuse on placement ALONE (not also gated on a non-empty orgId): a
+                // substrate-placed record must be claimed only by its org-scoped
+                // substrate SVID. Strictly more fail-closed, and symmetric with the Go
+                // registry verifier (internal/registrant/orgaware.go).
+                if (record != null && AgentRecord.PLACEMENT_SUBSTRATE.equals(record.placement())) {
+                    return null; // substrate-placed record + platform SVID ⇒ refuse
+                }
+            }
+            return identity;
+        }
+        // Org-scoped SVID: bind the signed-path org to the record's org. The
+        // agentId is SVID-attested, so requiring the record it names to carry the
+        // SAME org is exactly the isolation check.
+        AgentRecord record = registry.getAgent(identity.agentId());
+        if (record == null) {
+            // Unknown record OR registry outage ⇒ fail closed.
+            return null;
+        }
+        String recordOrg = record.orgId();
+        if (recordOrg == null || recordOrg.isEmpty() || !recordOrg.equals(org)) {
+            // Org-less record (no org to match a scoped SVID) or cross-org ⇒ refuse.
+            return null;
+        }
+        return identity;
     }
 
     /**

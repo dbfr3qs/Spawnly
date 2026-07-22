@@ -551,6 +551,15 @@ func buildMux(auth *Authenticator, orchestratorURL, identityInternalURL, docsURL
 	mux.Handle("DELETE /api/org/anchor", orgProxy("DELETE", "/anchor"))
 	mux.Handle("POST /api/org/anchor/activate", orgProxy("POST", "/anchor/activate"))
 
+	// Per-org substrate (remote-substrate Phase 3): connect (POST) issues the
+	// org-bound identity ONCE, status (GET) rides the substrate record, disconnect
+	// (DELETE). Connect/disconnect are org-admin — the orchestrator's
+	// requireOrgAdmin is the real gate (a non-admin session 404s there); status is
+	// requireOrgMember. All ride the session's active org (never a client id).
+	mux.Handle("POST /api/org/substrate", orgProxy("POST", "/substrate"))
+	mux.Handle("GET /api/org/substrate", orgProxy("GET", "/substrate"))
+	mux.Handle("DELETE /api/org/substrate", orgProxy("DELETE", "/substrate"))
+
 	// Register a consumer-hosted (remote) agent into the session's active org
 	// (multi-tenancy Phase 10). Any member may register (the orchestrator's
 	// requireOrgMember is the real gate); the registering member owns the agent.

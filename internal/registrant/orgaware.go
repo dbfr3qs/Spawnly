@@ -69,8 +69,12 @@ func NewOrgAwareVerifier(def Verifier, store orgStore, httpClient *http.Client) 
 func (v *OrgAwareVerifier) Verify(ctx context.Context, r *http.Request) (Identity, error) {
 	cred := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !looksLikeStsCredential(cred) {
-		// Not an STS presentation → the default (SPIRE/OIDC/mTLS) path, unchanged.
-		return v.def.Verify(ctx, r)
+		// Not an STS presentation → the default (SPIRE/OIDC/mTLS) verifier.
+		id, err := v.def.Verify(ctx, r)
+		if err != nil {
+			return Identity{}, err
+		}
+		return v.bindSpireOrg(ctx, id)
 	}
 
 	// STS presentation: replay against the trusted STS endpoint (org-independent —
@@ -121,6 +125,81 @@ func (v *OrgAwareVerifier) Verify(ctx context.Context, r *http.Request) (Identit
 		return Identity{}, errors.New("STS role ARN does not match the org anchor pattern")
 	}
 	return Identity{AgentID: agentID, Subject: id.Arn, Issuer: "aws-sts"}, nil
+}
+
+// bindSpireOrg is the SPIRE-side mirror of the STS org-binding: it sits beside
+// verifyStsOrgBound with the SAME fail-closed discipline. An org-scoped SVID
+// (Identity.OrgID != "", set by the trust-domain-enforcing SpiffeVerifier from
+// the signed path) authenticates ONLY against a record whose OrgID equals the
+// SVID's org — mismatch, an org-less record, an unknown record, or a store
+// outage is a generic rejection, never a fallback.
+//
+// An org-LESS identity (OrgID == "") is platform-hosted (or a non-SPIFFE
+// default verifier that never sets OrgID) and passes through bit-identical to
+// the pre-substrate behavior — the org store is never touched.
+func (v *OrgAwareVerifier) bindSpireOrg(ctx context.Context, id Identity) (Identity, error) {
+	if id.OrgID == "" {
+		// REVERSE org-binding (remote-substrate carry-forward), now PLACEMENT-AWARE:
+		// the refusal exists so a genuinely platform (org-less) SVID cannot claim a
+		// record that is supposed to be authenticated only by an ORG-SCOPED substrate
+		// SVID. But an org-less (platform) SVID is exactly how an org MEMBER's
+		// PLATFORM-hosted agent authenticates: the platform ClusterSPIFFEID mints
+		// org-LESS paths (`/agent/{tenant}/{user}/{type}/{id}`), while that member's
+		// spawn preregisters a record carrying the member's OrgID. That pairing is
+		// the pre-substrate world and MUST keep working (spec AC 9: "orgs without a
+		// substrate behave exactly as today").
+		//
+		// So refuse ONLY when the record's placement REQUIRES an org-scoped identity —
+		// PlacementSubstrate. A substrate-placed record must be claimed solely by its
+		// org-scoped substrate SVID (`…/org/{orgId}/agent/…`); an org-less SVID
+		// authenticating one would be the reverse-binding breach the check guards.
+		// For PlacementK8s / PlacementRemote / unset the org-less SVID IS the
+		// legitimate platform path, so it passes through. Placement is server-set at
+		// preregistration and immutable (a self-registering sidecar never sets it from
+		// its body — enforced in cmd/registry/main.go's self-register handler, which
+		// re-reads existing.Placement), so a caller cannot game which branch it lands in.
+		//
+		// This fires ONLY for id.platformSVID — a trust-domain-verified `/agent/…`
+		// path in enforcing mode. In legacy passthrough (enforcement off) or for a
+		// non-SPIFFE default verifier the flag is unset, so behaviour is
+		// bit-identical to before (no store lookup, no new refusal).
+		//
+		// A store OUTAGE (err != nil) PASSES THROUGH, preserving today's
+		// platform-agent availability (org-less SVIDs never depended on the store):
+		// the reverse-binding breach can only COMPLETE if the mint then loads the
+		// substrate record, which needs the store up — so an outage can never turn
+		// this passthrough into an authenticated substrate record. A non-substrate
+		// record (platform-placed, org-scoped or not) also passes through.
+		if id.platformSVID {
+			rec, err := v.store.GetAgent(ctx, id.AgentID)
+			// Refuse on placement ALONE — not also gated on rec.OrgID != "". A
+			// substrate-placed record must be claimed only by its org-scoped substrate
+			// SVID, period; requiring a non-empty org too would (in the theoretical
+			// case of an org-less substrate record, which the orchestrator never
+			// creates) let a platform SVID claim it. Placement-only is strictly more
+			// fail-closed. Keeps the Go and Java sides symmetric.
+			if err == nil && rec.AgentID != "" && rec.Placement == registry.PlacementSubstrate {
+				return Identity{}, errors.New("platform SVID cannot authenticate a substrate-placed record")
+			}
+		}
+		return id, nil
+	}
+	// Org-scoped SVID: bind the signed-path org to the record's org. The
+	// agentID is SVID-attested (path.Base of the signed path), so requiring the
+	// record it names to carry the SAME org is exactly the isolation check — an
+	// org-A SVID can never authenticate an agent recorded under org B.
+	rec, err := v.store.GetAgent(ctx, id.AgentID)
+	if err != nil {
+		// Store error ⇒ fail CLOSED (the handler renders the same oracle-free
+		// 401 as any other failure).
+		return Identity{}, err
+	}
+	if rec.AgentID == "" || rec.OrgID == "" || rec.OrgID != id.OrgID {
+		// Unknown record, org-less record (no org to match a scoped SVID), or a
+		// cross-org record ⇒ generic reject.
+		return Identity{}, errors.New("SVID org does not match the agent record's org")
+	}
+	return id, nil
 }
 
 // looksLikeStsCredential reports whether cred is a base64-encoded presigned

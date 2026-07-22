@@ -34,6 +34,7 @@ import (
 	"github.com/spawnly/platform/internal/events"
 	"github.com/spawnly/platform/internal/registry"
 	"github.com/spawnly/platform/internal/spicedb"
+	"github.com/spawnly/platform/internal/substrate/channel"
 	"github.com/spawnly/platform/internal/tokenvalidator"
 )
 
@@ -604,6 +605,18 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	// under auth=none, exactly like its registry client).
 	evtClient := events.NewWithToken(registryURL, controlPlaneBearer)
 
+	// Remote-substrate dispatch hub (Phase 4): in-memory, one live channel per
+	// org. Constructed here so the /spawn path can push a spawn command to a
+	// connected substrate, and the channel endpoint (registered below) can hold
+	// the connections. Consistent with the dashboard-session in-memory precedent.
+	substrateHub := newSubstrateHub()
+
+	// Remote-substrate reaper (Phase 5): drives CP→substrate teardown of
+	// substrate-placed agents on DELETE/dismiss — mark the record terminal
+	// (reconcile-on-connect backstop) AND push a live kill down the org's channel.
+	// Shares the settle cadence with the platform DELETE cascade.
+	substrateReaper := &substrateReaper{reg: regClient, hub: substrateHub, settle: cascadeSettleDelay}
+
 	mux.HandleFunc("POST /spawn", func(w http.ResponseWriter, r *http.Request) {
 		var req SpawnRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -829,6 +842,73 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		// The workload name becomes the pod name and the agent-id label, which SPIRE
 		// uses to issue the SVID. The agent's identity is the SVID, not this name.
 		workloadName := "agent-" + shortID()
+
+		// Remote-substrate targeting (Phase 4): if the spawn's org has an ACTIVE
+		// substrate, the agent runs on the CONSUMER'S compute, not ours — so we
+		// SKIP the local AgentWorkload CR and instead preregister the record as
+		// substrate-placed, then push a spawn command down the org's channel. An
+		// offline substrate (record active but no live channel) leaves the record
+		// `pending`; the substrate's reconcile-on-connect delivers it. All spawns
+		// for the org — top-level AND child (a child inherits its parent's org) —
+		// take this path (spec: one substrate takes ALL the org's spawns). Orgs
+		// WITHOUT a substrate skip this entirely (req.OrgID == "" ⇒ never fetch),
+		// so they are bit-identical to today. Server-authoritative: the org is
+		// req.OrgID (token/lineage-derived), never a body field, and the channel is
+		// bound to the substrate's own SVID org — a substrate can never receive
+		// another org's work.
+		if req.OrgID != "" {
+			org, ferr := fetchOrg(r.Context(), registryURL, controlPlaneBearer, req.OrgID)
+			if ferr != nil {
+				// Fail OPEN to the platform path: substrate placement is an
+				// optimization/routing choice, not an authorization gate, and
+				// platform hosting is the safe default (the agent gets an org-less
+				// platform SVID that authenticates exactly as today). A registry blip
+				// on the org read must NOT break the org's spawns — it just means this
+				// spawn runs on the platform this time; a substrate org keeps routing
+				// to its substrate on the next spawn once the read succeeds. Orgs
+				// without a substrate are unaffected either way.
+				log.Printf("spawn: resolve org %s for substrate placement (falling through to platform): %v", req.OrgID, ferr)
+			} else if org.Substrate != nil && org.Substrate.Status == registry.SubstrateActive {
+				if err := regClient.PreRegisterAgent(r.Context(), registry.AgentRecord{
+					AgentID:      workloadName,
+					AgentType:    req.AgentType,
+					TenantID:     req.TenantID,
+					UserID:       req.UserID,
+					Lifecycle:    lifecycle,
+					SupportsChat: tpl.Runtime.SupportsChat,
+					ParentID:     req.ParentID,
+					OrgID:        req.OrgID,
+					// Server-set placement — immutable thereafter; excludes the record
+					// from the platform stale-sweep (its CR is on the substrate, not here).
+					Placement: registry.PlacementSubstrate,
+					// Persist the consent gate so an offline-then-reconciled child keeps
+					// its CIBA requirement (no consent bypass on reconcile-on-connect).
+					ConsentRequired: consentRequired,
+				}); err != nil {
+					log.Printf("pre-register substrate agent: %v", err)
+					http.Error(w, "failed to spawn agent", http.StatusInternalServerError)
+					return
+				}
+				pushed := substrateHub.push(req.OrgID, channel.NewSpawn(channel.SpawnCommand{
+					AgentID:         workloadName,
+					AgentType:       req.AgentType,
+					UserID:          req.UserID,
+					TenantID:        req.TenantID,
+					OrgID:           req.OrgID,
+					Task:            req.Task,
+					ParentID:        req.ParentID,
+					Lifecycle:       lifecycle,
+					ConsentRequired: consentRequired,
+					SupportsChat:    tpl.Runtime.SupportsChat,
+				}))
+				log.Printf("spawned substrate workload %s for org %s (pushed=%v)", workloadName, req.OrgID, pushed)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusAccepted)
+				json.NewEncoder(w).Encode(SpawnResponse{WorkloadName: workloadName})
+				return
+			}
+		}
+
 		aw := &agentv1alpha1.AgentWorkload{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      workloadName,
@@ -1150,6 +1230,40 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 		// enumeration — the manage-backstop parity the mutation forwards use. A
 		// normal caller forwards their own already-authorized sub.
 		subtreeUserID := manageUserID(ctx, regClient, id)
+
+		// Remote-substrate teardown (Phase 5, fixes B2): a substrate-placed agent has
+		// NO AgentWorkload CR in our `default` namespace, so the CR-delete loop below
+		// would be a silent no-op that returns 204 while the agent keeps running on the
+		// consumer cluster. Route it to the reaper instead: mark every subtree record
+		// terminal (dismiss ⇒ reconcile-on-connect backstop for an offline substrate)
+		// AND push a live kill down the org's channel (immediate teardown when
+		// connected). The org comes from the server-authoritative record, so teardown
+		// is own-org only. Homogeneous subtree: a child inherits its parent's org and
+		// an active substrate takes all of the org's spawns, so a substrate root's
+		// whole subtree is substrate-placed in the same org.
+		rootRec, gerr := regClient.GetAgent(ctx, id)
+		if gerr != nil {
+			// Placement is undecidable — FAIL CLOSED rather than fall through to the
+			// platform CR-delete loop below, which for a substrate agent would be a
+			// silent 204 no-op that leaves the record non-terminal (re-opening B2). This
+			// mirrors the platform path's own first-pass 502 on a registry outage;
+			// canManage already required a successful GetAgent moments ago, so a fresh
+			// error here is a rare transient blip.
+			http.Error(w, "registry unavailable", http.StatusBadGateway)
+			return
+		}
+		if isSubstratePlaced(rootRec) {
+			dismissed, failed := substrateReaper.reapSubtree(ctx, id, rootRec.OrgID, subtreeUserID)
+			if len(failed) > 0 {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusMultiStatus) // 207
+				json.NewEncoder(w).Encode(map[string]any{"deleted": dismissed, "failed": failed})
+				return
+			}
+			w.WriteHeader(http.StatusNoContent) // 204
+			return
+		}
+
 		const maxPasses = 8
 		deleted := 0
 		failedSet := map[string]bool{} // node ids whose delete errored (non-NotFound)
@@ -1272,6 +1386,12 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 
 	mux.HandleFunc("POST /v1/agents/{id}/dismiss", requireToken(validator, audience, writeScope, requireCanManage(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
+		// Capture placement/org BEFORE the dismiss so a substrate agent's live pod is
+		// also torn down over the channel (Phase 5, B1). The registry dismiss below
+		// marks the record terminal — which is itself the reconcile-on-connect
+		// backstop for an OFFLINE substrate — and the push handles a CONNECTED one.
+		// A read miss falls through harmlessly (no push; the dismiss still lands).
+		rec, recErr := regClient.GetAgent(r.Context(), id)
 		// Ownership is enforced above by requireOwnedAgent (token sub); the
 		// forwarded userId keeps the registry's own agentOwnedBy check as a
 		// backstop.
@@ -1287,6 +1407,12 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 			return
 		}
 		defer resp.Body.Close()
+		// Push the live kill only after the registry confirmed the dismiss (terminal
+		// marking is the durable backstop; the push is the live-teardown optimization).
+		// Own-org: the org comes from the server-authoritative record, never a body.
+		if recErr == nil && isSubstratePlaced(rec) && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			substrateReaper.pushKill(rec.OrgID, id)
+		}
 		w.WriteHeader(resp.StatusCode)
 	})))
 
@@ -1872,6 +1998,12 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+
+	// Remote-substrate connect surface + CP-mediated Entry API (Phase 3). Built
+	// from env; unconfigured components (no dev CA / no entry broker) leave the
+	// routes returning 503 rather than behaving insecurely.
+	substrateAPI := newSubstrateAPI(regClient, registryURL, controlPlaneBearer, substrateHub)
+	registerSubstrateRoutes(mux, substrateAPI, validator, audience, readScope, writeScope, sdb)
 
 	return mux
 }

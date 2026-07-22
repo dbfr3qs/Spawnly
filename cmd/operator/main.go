@@ -13,6 +13,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -59,7 +60,10 @@ func main() {
 	var identityInjector operator.IdentityInjector
 	switch v := getenv("ATTESTOR", "spiffe"); v {
 	case "spiffe":
-		identityInjector = operator.SpiffeInjector{}
+		// SPIFFE_CSI_DRIVER lets the substrate overlay point at its own CSI driver
+		// (csi.substrate.spiffe.io) so substrate pods mount the substrate SPIRE
+		// agent's socket on a shared node; empty ⇒ the platform default.
+		identityInjector = operator.SpiffeInjector{Driver: getenv("SPIFFE_CSI_DRIVER", "")}
 	case "aws-sts":
 		identityInjector = operator.AwsInjector{
 			ServiceAccount: getenv("AWS_AGENT_SERVICE_ACCOUNT", "spawnly-agent"),
@@ -78,10 +82,14 @@ func main() {
 
 	cfg := ctrl.GetConfigOrDie()
 
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+	mgrOpts := ctrl.Options{
 		Scheme:                 scheme,
 		HealthProbeBindAddress: probeAddr,
-	})
+	}
+	// WATCH_NAMESPACE scopes the reconciler's cache+watch to a single namespace.
+	mgrOpts.Cache = cacheOptionsForNamespace(os.Getenv("WATCH_NAMESPACE"))
+
+	mgr, err := ctrl.NewManager(cfg, mgrOpts)
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
@@ -120,6 +128,11 @@ func main() {
 		Clientset:        clientset,
 		IdentityInjector: identityInjector,
 		SidecarImage:     getenv("SIDECAR_IMAGE", "agent-sidecar:latest"),
+		// Empty on the platform operator (sidecars keep the historical 10×3s
+		// default); the substrate operator sets these so its sidecars wait longer
+		// for their first SVID while the substrate SPIRE agent finishes its sync.
+		SidecarSpiffeFetchRetries:    getenv("SPIFFE_FETCH_RETRIES", ""),
+		SidecarSpiffeFetchRetryDelay: getenv("SPIFFE_FETCH_RETRY_DELAY", ""),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "AgentWorkload")
 		os.Exit(1)
@@ -230,6 +243,25 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// cacheOptionsForNamespace maps the WATCH_NAMESPACE env value to the manager's
+// cache scoping. A non-empty namespace restricts the controller-runtime cache
+// (and therefore every watch/List the reconciler and stale-sweep perform) to
+// that single namespace; an empty value keeps the historical cluster-wide
+// behavior verbatim (an empty DefaultNamespaces map means "all namespaces").
+//
+// This is the isolation boundary between the two operators: the platform
+// operator runs with WATCH_NAMESPACE=default (its agents only ever land in
+// `default`) so it never reconciles the substrate operator's `substrate-sim`
+// AgentWorkloads — which must be built with the substrate SPIRE socket + the
+// longer SVID-fetch budget, not the platform operator's defaults. The substrate
+// operator runs with WATCH_NAMESPACE=substrate-sim for the mirror-image reason.
+func cacheOptionsForNamespace(ns string) cache.Options {
+	if ns == "" {
+		return cache.Options{}
+	}
+	return cache.Options{DefaultNamespaces: map[string]cache.Config{ns: {}}}
 }
 
 func getenv(key, fallback string) string {

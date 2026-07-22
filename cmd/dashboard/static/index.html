@@ -390,6 +390,10 @@
       border-color: var(--accent-hi);
       box-shadow: 0 4px 12px rgba(0,0,0,.12);
     }
+    /* Substrate-placed agent whose channel is down (remote-substrate Phase 5):
+       dim + dashed border so it reads as "unreachable", record untouched. */
+    .agent-offline { opacity: .6; border-style: dashed; }
+    .offline-note { margin-left: .35rem; }
 
     :root[data-theme="light"] .agent-card {
       box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 1px 4px rgba(0,0,0,.08);
@@ -1428,6 +1432,32 @@
         </div>
       </div>
     </div>
+
+    <!-- Connect substrate (remote-substrate Phase 3). An org admin connects one
+         bring-your-own-compute Kubernetes substrate: the control plane issues an
+         org-bound x509 identity ONCE (downloaded here), and the substrate reaches
+         active/online once its channel connects (Phase 4/5). Members see status
+         read-only; the server gates every mutation regardless. -->
+    <div class="setting-row" data-testid="substrate-setting">
+      <div class="setting-label">Substrate
+        <span class="hint">bring-your-own-compute Kubernetes cluster (optional)</span></div>
+      <div class="setting-control">
+        <div id="substrate-status" data-testid="substrate-status">Loading…</div>
+        <div id="substrate-editor" hidden>
+          <div class="row-actions">
+            <button class="btn btn-primary" id="substrate-connect-btn" data-testid="substrate-connect">Connect substrate</button>
+            <button class="btn btn-ghost" id="substrate-disconnect-btn" data-testid="substrate-disconnect" hidden>Disconnect</button>
+          </div>
+          <div class="caveat-note">
+            Connecting issues a one-time org-bound identity — it is shown for
+            download <strong>once</strong>, then Spawnly keeps only its fingerprint.
+            Install it with the <code>deploy/substrate</code> bundle (or
+            <code>ORCHESTRATOR_URL=… ACCESS_TOKEN=… ./scripts/connect-substrate.sh &lt;org&gt;</code>);
+            the substrate shows <strong>online</strong> once its channel connects.
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -1712,6 +1742,12 @@
   let agentStatus = {};          // agentId -> latest known status string
   let logPollers  = {};          // agentId -> intervalId
   let logState    = {};          // agentId -> { container, lastTs, open }
+  // SUBSTRATE_ONLINE (remote-substrate Phase 5): the active org's substrate
+  // liveness — true = channel connected, false = connected-but-offline, null =
+  // no substrate. Drives the "unable to connect" overlay on substrate-placed
+  // agent cards. Refreshed by the main poll loop only when the org has substrate
+  // agents (so orgs without a substrate pay nothing).
+  let SUBSTRATE_ONLINE = null;
 
   let lastEventAt = {};          // agentId -> ms epoch of newest known event
   const STALE_MS  = 30000;       // threshold after which a non-terminal agent is flagged stale
@@ -2341,6 +2377,8 @@
     if (saveBtn) saveBtn.style.display = admin ? '' : 'none';
     const editor = document.getElementById('anchor-editor');
     if (editor) editor.hidden = !admin;
+    const subEditor = document.getElementById('substrate-editor');
+    if (subEditor) subEditor.hidden = !admin;
     try {
       const r = await fetch('/api/org');
       if (!r.ok) return;
@@ -2349,7 +2387,85 @@
       const el = document.querySelector(`input[name="removal-disposition"][value="${disp}"]`);
       if (el) el.checked = true;
       renderAnchor(org.anchor, admin);
+      // Liveness (remote-substrate Phase 5) is in-memory channel state on the
+      // orchestrator — fetch it separately so the card shows online/offline, not
+      // just the persisted pending/active record. Best-effort: a failure leaves the
+      // liveness unknown (rendered as offline) without breaking the settings view.
+      let subOnline = false, subLastSeen = null;
+      if (org.substrate) {
+        try {
+          const sr = await fetch('/api/org/substrate');
+          if (sr.ok) { const s = await sr.json(); subOnline = !!s.online; subLastSeen = s.lastSeen || null; }
+        } catch (_) {}
+      }
+      SUBSTRATE_ONLINE = org.substrate ? subOnline : null;
+      renderSubstrate(org.substrate, admin, subOnline, subLastSeen);
     } catch (_) {}
+  }
+
+  // renderSubstrate paints the substrate status (none / pending / active). For an
+  // admin the Connect button is offered when none is connected, Disconnect when
+  // one is.
+  function renderSubstrate(substrate, admin, online, lastSeen) {
+    const status = document.getElementById('substrate-status');
+    if (!status) return;
+    if (!substrate) {
+      status.innerHTML = '<span class="badge">No substrate</span> agents run platform-hosted.';
+    } else {
+      const st = (substrate.status || 'pending').toLowerCase();
+      const cls = st === 'active' ? 'badge-role-admin' : 'badge-role-member';
+      // Liveness badge (Phase 5): online = a live dispatch channel right now;
+      // offline = the substrate (and its agents) are unreachable — the record is
+      // untouched (no terminal sweep), it just can't be dispatched to until it
+      // reconnects. Only meaningful once the substrate has activated.
+      const live = online
+        ? '<span class="badge badge-active" data-testid="substrate-liveness">online</span>'
+        : `<span class="badge badge-failed" data-testid="substrate-liveness" title="the substrate channel is not connected — its agents are unreachable">offline</span>`;
+      const seen = (!online && lastSeen) ? ` <span class="agent-meta">last seen ${escHtml(fmtTime(lastSeen))}</span>` : '';
+      status.innerHTML =
+        `<span class="badge ${cls}" data-testid="substrate-state">${escHtml(st)}</span> ` +
+        `${live}${seen} ` +
+        `fingerprint <code>${escHtml((substrate.certFingerprint || '').slice(0, 16))}…</code>`;
+    }
+    const connectBtn = document.getElementById('substrate-connect-btn');
+    const disconnectBtn = document.getElementById('substrate-disconnect-btn');
+    if (admin && connectBtn && disconnectBtn) {
+      connectBtn.hidden = !!substrate;
+      disconnectBtn.hidden = !substrate;
+    }
+  }
+
+  // connectSubstrate requests the one-time org-bound identity and immediately
+  // triggers a browser download of it (it is never retrievable again), then
+  // refreshes status to pending.
+  async function connectSubstrate() {
+    try {
+      const r = await fetch('/api/org/substrate', { method: 'POST' });
+      if (!r.ok) throw new Error(`connect substrate: ${r.status}`);
+      const resp = await r.json();
+      // One-time download of the issued identity bundle (cert + key + CA bundle).
+      const blob = new Blob([JSON.stringify(resp.identity || {}, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `substrate-identity-${resp.orgId || 'org'}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      showToast('Substrate connected. Identity downloaded — it is shown only once.');
+      loadOrgSettings();
+    } catch (e) { showToast(`Connect substrate failed: ${e.message || e}`, true); }
+  }
+
+  async function disconnectSubstrate() {
+    if (!window.confirm('Disconnect the org’s substrate? Its agents fall back to platform-hosted.')) return;
+    try {
+      const r = await fetch('/api/org/substrate', { method: 'DELETE' });
+      if (!r.ok) throw new Error(`disconnect substrate: ${r.status}`);
+      showToast('Substrate disconnected.');
+      loadOrgSettings();
+    } catch (e) { showToast(`Disconnect substrate failed: ${e.message || e}`, true); }
   }
 
   // renderAnchor paints the anchor status (none / pending / active) and, for an
@@ -2431,6 +2547,44 @@
   function sourceBadge(source) {
     const s = (source || '').toUpperCase();
     return `<span class="src-badge src-${s}">${s}</span>`;
+  }
+
+  // placementBadge shows WHERE an agent runs (remote-substrate Phase 5): a
+  // substrate-placed agent runs on the org's own bring-your-own-compute cluster;
+  // everything else is platform-hosted. Rendered once on card build (Placement is
+  // server-set and immutable).
+  function placementBadge(placement) {
+    if ((placement || '').toLowerCase() === 'substrate') {
+      return `<span class="badge badge-role-member" data-testid="placement" title="runs on your organization's connected substrate">substrate</span>`;
+    }
+    return `<span class="badge" data-testid="placement" title="runs on the Spawnly platform">platform</span>`;
+  }
+
+  // applyOfflineOverlay marks a substrate-placed card offline when the org's
+  // substrate channel is down (SUBSTRATE_ONLINE === false): its pod is unreachable,
+  // so it (and its live status) can't be trusted as current. Purely a display
+  // overlay — the RECORD is untouched (spec AC 8), and it clears on reconnect.
+  function applyOfflineOverlay(a) {
+    if ((a.placement || '').toLowerCase() !== 'substrate') return;
+    const card = document.getElementById(`card-${a.agentId}`);
+    if (!card) return;
+    const offline = SUBSTRATE_ONLINE === false;
+    card.classList.toggle('agent-offline', offline);
+    // Look up by getElementById (ids are unique, no CSS-escaping mismatch with the
+    // raw id set below).
+    let note = document.getElementById(`offline-${a.agentId}`);
+    if (offline && !note) {
+      note = document.createElement('span');
+      note.id = `offline-${a.agentId}`;
+      note.className = 'badge badge-failed offline-note';
+      note.setAttribute('data-testid', 'agent-offline');
+      note.title = 'the substrate is not connected — this agent is unreachable';
+      note.textContent = 'unable to connect';
+      const sw = card.querySelector('.status-wrap');
+      if (sw) sw.after(note); else card.querySelector('.agent-row')?.appendChild(note);
+    } else if (!offline && note) {
+      note.remove();
+    }
   }
 
   function fmtTime(ts) {
@@ -2578,6 +2732,7 @@
         <span class="agent-id">${escHtml(a.agentId)}</span>
         <span class="agent-meta">${escHtml(a.agentType || '—')}</span>
         <span class="status-wrap">${statusBadge(a.status)}</span>
+        ${placementBadge(a.placement)}
         <span class="agent-meta">${escHtml(a.tenantId || '—')}</span>
         <span class="agent-meta agent-owner" title="owner">${escHtml(a.userId || '—')}</span>
         <div class="agent-actions">
@@ -2631,6 +2786,7 @@
         <span class="agent-id">${escHtml(a.agentId)}</span>
         <span class="agent-meta">${escHtml(a.agentType || '—')}</span>
         <span class="status-wrap">${statusBadge(a.status)}</span>
+        ${placementBadge(a.placement)}
         <span class="agent-meta">${escHtml(a.tenantId || '—')}</span>
         <span class="agent-meta agent-owner" title="owner">${escHtml(a.userId || '—')}</span>
         <div class="agent-actions">
@@ -2682,6 +2838,26 @@
       }
       renderSubtree(a.agentId, childMap);
     }
+
+    // Overlay substrate-placed cards offline when the org's channel is down
+    // (Phase 5). Applied to EVERY agent (top-level + nested) each poll so it clears
+    // on reconnect; a no-op for platform agents.
+    for (const a of agents) applyOfflineOverlay(a);
+  }
+
+  // fetchSubstrateLiveness refreshes SUBSTRATE_ONLINE from the orchestrator's
+  // in-memory channel state, but only when the org actually has substrate-placed
+  // agents (so orgs without a substrate never make the call). null when there are
+  // none — no overlay is applied.
+  async function fetchSubstrateLiveness(agents) {
+    if (!agents.some(a => (a.placement || '').toLowerCase() === 'substrate')) {
+      SUBSTRATE_ONLINE = null;
+      return;
+    }
+    try {
+      const r = await fetch('/api/org/substrate');
+      SUBSTRATE_ONLINE = r.ok ? !!(await r.json()).online : false;
+    } catch (_) { SUBSTRATE_ONLINE = false; }
   }
 
   // ── Append-only event update — never touches already-rendered rows ────────
@@ -3220,6 +3396,8 @@
   document.getElementById('save-disposition-btn').addEventListener('click', saveDisposition);
   document.getElementById('anchor-register-btn').addEventListener('click', registerAnchor);
   document.getElementById('anchor-clear-btn').addEventListener('click', clearAnchor);
+  document.getElementById('substrate-connect-btn').addEventListener('click', connectSubstrate);
+  document.getElementById('substrate-disconnect-btn').addEventListener('click', disconnectSubstrate);
   document.getElementById('agent-types-table-wrap').addEventListener('click', handleTableAction);
   document.getElementById('tmpl-form-cancel').addEventListener('click', closeTemplateForm);
   document.getElementById('tmpl-form-save').addEventListener('click', saveTemplateForm);
@@ -3408,7 +3586,13 @@
     // The master-admin Global landing has NO agent list — don't fetch/render agents
     // (root owns none anyway) or the spawn-consent banner for the platform view.
     if (GLOBAL_DIRECTORY) return;
-    try { updateAgentList(await fetchAgents()); } catch (_) {}
+    try {
+      const agents = await fetchAgents();
+      // Resolve substrate liveness BEFORE rendering so the offline overlay is
+      // consistent with the cards drawn this pass.
+      await fetchSubstrateLiveness(agents);
+      updateAgentList(agents);
+    } catch (_) {}
     try { updateConsentBanner(await fetchPendingConsents()); } catch (_) {}
   }
 

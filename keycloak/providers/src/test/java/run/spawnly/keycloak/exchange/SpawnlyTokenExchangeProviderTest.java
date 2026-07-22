@@ -292,6 +292,49 @@ class SpawnlyTokenExchangeProviderTest {
         assertEquals(List.of("acme"), minted.getOtherClaims().get("organization"));
     }
 
+    // ── SPIRE org binding on the token-exchange (actor) path (Phase 1) ───────────
+    // Both mint paths route their credential through OrgAwareVerifier.verify; here
+    // the ACTOR SVID carries an org-scoped identity that must equal the child
+    // record's org, mirroring the client-credentials matrix in OrgAwareVerifierTest.
+
+    /** An actor verifier whose SPIRE identity is org-scoped (orgId from the signed path). */
+    private AgentCredentialVerifier actorVerifierOrg(String spiffe, String agentId, String org) {
+        AgentCredentialVerifier v = mock(AgentCredentialVerifier.class);
+        when(v.verify(anyString())).thenReturn(new AgentIdentity(agentId, spiffe, "spiffe-svid", org));
+        return v;
+    }
+
+    private static final String CHILD_ORG_SPIFFE =
+            "spiffe://cluster.local/org/acme/agent/t/alice/flight-search/child-1";
+
+    @Test
+    void orgScopedActor_matchesChildOrg_verified() throws Exception {
+        // Actor SVID org == child record org (acme) ⇒ the org-bound actor verifies
+        // and the exchange proceeds (same-org delegation).
+        allowedEdgeChildOrg(List.of("flights:read"), 0, "acme");
+        String subject = tf.subjectTokenWithOrg("user:alice", "flights:read",
+                ExchangeTestFactory.act(PARENT_SPIFFE, null), List.of("acme"));
+        TokenExchangeContext c = ctx(subject, "flights:read", null, ACCESS, "actor-svid", JWT);
+
+        Response resp = provider(actorVerifierOrg(CHILD_ORG_SPIFFE, "child-1", "acme")).exchange(c);
+        assertEquals(200, resp.getStatus());
+        assertEquals(List.of("acme"), minted.getOtherClaims().get("organization"));
+    }
+
+    @Test
+    void orgScopedActor_mismatchChildOrg_invalidActorToken() throws Exception {
+        // Actor SVID claims org globex but its agentId names child-1, an acme
+        // record ⇒ OrgAwareVerifier fails the actor closed ⇒ invalid actor_token.
+        allowedEdgeChildOrg(List.of("flights:read"), 0, "acme");
+        String subject = tf.subjectTokenWithOrg("user:alice", "flights:read",
+                ExchangeTestFactory.act(PARENT_SPIFFE, null), List.of("acme"));
+        TokenExchangeContext c = ctx(subject, "flights:read", null, ACCESS, "actor-svid", JWT);
+
+        String globexActor = "spiffe://cluster.local/org/globex/agent/t/alice/flight-search/child-1";
+        assertError(c, actorVerifierOrg(globexActor, "child-1", "globex"),
+                OAuthErrorException.INVALID_REQUEST);
+    }
+
     // ── policy rejections ───────────────────────────────────────────────────────
 
     @Test

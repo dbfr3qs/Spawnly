@@ -188,6 +188,144 @@ class OrgAwareVerifierTest {
         verify(registry, never()).getOrg(anyString());
     }
 
+    // ── SPIRE org-bound matrix (remote-substrate Phase 1, spec AC 4/5) ───────────
+    // The default (SPIRE) verifier surfaces the signed-path org on the identity;
+    // OrgAwareVerifier binds it to the record's org with the same fail-closed
+    // discipline as the STS branch. Mirrors internal/registrant/orgaware_spire_test.go.
+
+    // A JWT-shaped credential ⇒ routed to the SPIRE (default) branch, not STS.
+    private static final String SPIRE_JWT = "header.payload.signature";
+
+    private void spireIdentity(String agentId, String org) {
+        String spiffe = org == null
+                ? "spiffe://cluster.local/agent/weather/" + agentId
+                : "spiffe://cluster.local/org/" + org + "/agent/t/alice/worker/" + agentId;
+        when(defaultVerifier.verify(SPIRE_JWT))
+                .thenReturn(new AgentIdentity(agentId, spiffe, "spiffe-svid", org));
+    }
+
+    // org-scoped SVID × matching record ⇒ verified; STS replay never consulted.
+    @Test
+    void spireOrgMatchesOwnOrg_verified() {
+        spireIdentity("agent-a", "acme");
+        when(registry.getAgent("agent-a"))
+                .thenReturn(new AgentRecord("agent-a", "active", "alice", "worker", null, "acme"));
+
+        AgentIdentity id = orgAware.verify(SPIRE_JWT);
+
+        assertNotNull(id);
+        assertEquals("agent-a", id.agentId());
+        assertEquals("acme", id.orgId());
+        verify(stsVerifier, never()).verify(anyString());
+    }
+
+    // org-A SVID × org-B record ⇒ refused (the named record is owned by globex).
+    @Test
+    void spireOrgCrossOrgRecord_refused() {
+        spireIdentity("agent-b", "acme"); // SVID claims acme, names an org-B record
+        when(registry.getAgent("agent-b"))
+                .thenReturn(new AgentRecord("agent-b", "active", "alice", "worker", null, "globex"));
+
+        assertNull(orgAware.verify(SPIRE_JWT));
+    }
+
+    // org-scoped SVID × org-less record ⇒ refused (no org on the record to match).
+    @Test
+    void spireOrgScopedAgainstOrgLessRecord_refused() {
+        spireIdentity("agent-a", "acme");
+        when(registry.getAgent("agent-a"))
+                .thenReturn(new AgentRecord("agent-a", "active", "alice", "worker", null, null));
+
+        assertNull(orgAware.verify(SPIRE_JWT));
+    }
+
+    // org-scoped SVID × unknown record ⇒ refused (fail closed).
+    @Test
+    void spireOrgUnknownRecord_refused() {
+        spireIdentity("ghost", "acme");
+        when(registry.getAgent("ghost")).thenReturn(null);
+
+        assertNull(orgAware.verify(SPIRE_JWT));
+    }
+
+    // REGRESSION: an org-less (platform) SVID from a LEGACY (non-enforcing)
+    // verifier — platformSvid=false — passes through, org store untouched.
+    @Test
+    void spirePlatformSvid_passesThrough_noStoreTouch() {
+        spireIdentity("agent-x", null); // org-less platform path, platformSvid=false
+
+        AgentIdentity id = orgAware.verify(SPIRE_JWT);
+
+        assertNotNull(id);
+        assertEquals("agent-x", id.agentId());
+        assertNull(id.orgId());
+        verify(registry, never()).getAgent(anyString());
+        verify(stsVerifier, never()).verify(anyString());
+    }
+
+    // A genuinely-platform SVID (enforcing verifier ⇒ platformSvid=true).
+    private void spirePlatformEnforcedIdentity(String agentId) {
+        when(defaultVerifier.verify(SPIRE_JWT))
+                .thenReturn(new AgentIdentity(agentId, "spiffe://cluster.local/agent/weather/" + agentId,
+                        "spiffe-svid", null, true));
+    }
+
+    // REGRESSION (spec AC 9): a genuinely-platform SVID MUST authenticate an
+    // org-scoped record that is PLATFORM-placed — that is exactly how an org
+    // member's platform-hosted agent mints. The reverse-binding refusal is now
+    // placement-aware and must NOT fire here.
+    @Test
+    void spirePlatformSvidVsPlatformPlacedOrgRecord_allowed() {
+        spirePlatformEnforcedIdentity("agent-a");
+        // 6-arg ctor ⇒ placement=null (== platform-hosted default).
+        when(registry.getAgent("agent-a"))
+                .thenReturn(new AgentRecord("agent-a", "active", "alice", "worker", null, "acme"));
+
+        AgentIdentity id = orgAware.verify(SPIRE_JWT);
+        assertNotNull(id, "a platform SVID must authenticate a PLATFORM-placed org record (AC 9)");
+        assertEquals("agent-a", id.agentId());
+        assertNull(id.orgId(), "an org-less SVID must stay org-less");
+    }
+
+    // PRESERVED INVARIANT: a genuinely-platform SVID must NOT authenticate a
+    // SUBSTRATE-placed record — that record may be claimed only by its org-scoped
+    // substrate SVID.
+    @Test
+    void spirePlatformSvidVsSubstrateRecord_refused() {
+        spirePlatformEnforcedIdentity("sub-a");
+        when(registry.getAgent("sub-a"))
+                .thenReturn(new AgentRecord("sub-a", "active", "alice", "worker", null, "acme",
+                        AgentRecord.PLACEMENT_SUBSTRATE));
+
+        assertNull(orgAware.verify(SPIRE_JWT),
+                "a platform SVID must not authenticate a substrate-placed record");
+    }
+
+    // A genuinely-platform SVID naming an ORG-LESS record passes through.
+    @Test
+    void spirePlatformSvidVsOrgLessRecord_passesThrough() {
+        spirePlatformEnforcedIdentity("agent-x");
+        when(registry.getAgent("agent-x"))
+                .thenReturn(new AgentRecord("agent-x", "active", "alice", "worker", null, null));
+
+        AgentIdentity id = orgAware.verify(SPIRE_JWT);
+        assertNotNull(id);
+        assertNull(id.orgId());
+    }
+
+    // A genuinely-platform SVID naming an UNKNOWN record passes through (may
+    // self-register later) — and a registry outage is indistinguishable here, so
+    // it too passes through, preserving platform-agent availability.
+    @Test
+    void spirePlatformSvidUnknownRecord_passesThrough() {
+        spirePlatformEnforcedIdentity("ghost");
+        when(registry.getAgent("ghost")).thenReturn(null);
+
+        AgentIdentity id = orgAware.verify(SPIRE_JWT);
+        assertNotNull(id);
+        assertEquals("ghost", id.agentId());
+    }
+
     @Test
     void looksLikeStsCredential_detection() {
         assertTrue(OrgAwareVerifier.looksLikeStsCredential(STS_CRED));

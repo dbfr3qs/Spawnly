@@ -1,0 +1,38 @@
+# Substrate-sim NetworkPolicy (remote-substrate Phase 4).
+#
+# Threat model note: in the REAL design the substrate is a SEPARATE cluster that
+# reaches the control plane over the PUBLIC EDGE (orchestrator/registry/Keycloak
+# behind an LB) — never pod-to-pod — so intra-cluster NetworkPolicy does not
+# govern that path at all. This file exists for the SINGLE-cluster LOCAL SIM,
+# where the substrate is a namespace beside the platform.
+#
+# Cross-namespace caveat (why we do NOT touch the platform policy):
+# deploy/manifests/networkpolicy.yaml selects registry/orchestrator ingress with
+# BARE podSelectors, which match only SAME-namespace pods. On a CNI that enforces
+# policy (recent kindnet, Calico, the AWS VPC CNI addon), that means substrate-sim
+# pods calling registry:8080 / orchestrator:8080 in `default` would be dropped.
+# We deliberately DO NOT widen the platform policy for the sim (it correctly
+# models a real single-cluster platform whose substrate is external). Instead, on
+# an enforcing CNI the sim operator adds a namespaceSelector for `substrate-sim`
+# to the default-ns registry/orchestrator ingress as a documented LOCAL-SIM step
+# (the substrate-verify / e2e harness notes this, and the e2e skips the live
+# positive path when the reach isn't wired — see plans/remote-substrate). Keycloak
+# is unpoliced, so token minting works regardless.
+#
+# This policy itself governs INGRESS to the substrate-agent within substrate-sim:
+# it holds only an OUTBOUND channel and self-registers agents; nothing legitimately
+# connects INTO it. Deny all ingress (defense-in-depth within the sim namespace).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: substrate-agent-ingress
+  namespace: substrate-sim
+spec:
+  podSelector:
+    matchLabels:
+      app: substrate-agent
+  policyTypes:
+    - Ingress
+  # No ingress rules ⇒ deny all ingress to the substrate-agent. It is a pure
+  # client (outbound WebSocket + Entry API + registry); no peer dials it.
+  ingress: []

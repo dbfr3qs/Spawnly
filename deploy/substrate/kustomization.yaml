@@ -1,0 +1,21 @@
+# deploy/substrate — the LOCAL-SIM substrate bundle (remote-substrate feature,
+# Phase 2). A dedicated namespace with a SPIRE agent (x509pop, pointed at the
+# in-cluster hosted server), a SPIFFE CSI driver, and the reused operator. NO
+# SPIRE server, NO AWS creds. Not a helm chart — a kustomize overlay + scripts
+# (locked decision). Apply with `make substrate-setup` (which also stands up the
+# dev CA, enables x509pop on the server, and issues an org leaf).
+#
+# Prereqs applied by scripts/substrate-setup.sh (NOT part of this kustomization,
+# since they carry generated material or copy cross-namespace state):
+#   - Secret substrate-sim/substrate-identity  (org-bound leaf; substrate-dev-cert.sh)
+#   - ConfigMap substrate-sim/spire-bundle      (server trust bundle; copied from spire-system)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - spire-agent.yaml
+  - spiffe-csi-driver.yaml
+  - operator.yaml
+  - substrate-agent.yaml
+  - networkpolicy.yaml

@@ -23,6 +23,18 @@ public final class AttestorFactory {
     public static final String DEFAULT_SPIRE_JWKS_URL =
             "http://spire-spiffe-oidc-discovery-provider.spire-system/.well-known/jwks.json";
 
+    /**
+     * Default expected SPIFFE trust domain (remote-substrate Phase 1), matching
+     * the Go registry ({@code SPIRE_TRUST_DOMAIN}, default "cluster.local") and
+     * the platform SPIRE deployment. A cluster deployed without the env behaves
+     * exactly as today for platform (org-less) SVIDs, while org-scoped substrate
+     * SVIDs get trust-domain-pinned + org-parsed. Enforcement is NOT disablable
+     * via env: an empty {@code SPIRE_TRUST_DOMAIN} falls back to this default
+     * (see {@link #resolve}); the fail-closed legacy passthrough is reachable
+     * only via the bare {@link SpireCredentialVerifier} constructor (tests).
+     */
+    public static final String DEFAULT_SPIRE_TRUST_DOMAIN = "cluster.local";
+
     private AttestorFactory() {
     }
 
@@ -34,11 +46,15 @@ public final class AttestorFactory {
     public static AgentCredentialVerifier build(Config.Scope config) {
         String attestor = resolve(config, "attestor", "ATTESTOR", "spiffe");
         String spireJwksUrl = resolve(config, "spireJwksUrl", "SPIRE_JWKS_URL", DEFAULT_SPIRE_JWKS_URL);
+        String spireTrustDomain =
+                resolve(config, "spireTrustDomain", "SPIRE_TRUST_DOMAIN", DEFAULT_SPIRE_TRUST_DOMAIN);
 
         switch (attestor) {
             case "":
             case "spiffe":
-                return new SpireCredentialVerifier(new SpireSvidValidator(spireJwksUrl));
+                // Trust-domain enforcement + org-scoped path parsing (Phase 1).
+                return new SpireCredentialVerifier(
+                        new SpireSvidValidator(spireJwksUrl), spireTrustDomain);
             // AWS attestors plug in behind the same seam — no authenticator
             // change. Mirrors identityserver/Program.cs's ATTESTOR switch.
             case "aws-sts":

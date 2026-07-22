@@ -68,8 +68,78 @@ spec:
             #   value: "orchestrator-secret"
             # - name: CONTROL_PLANE_SCOPE
             #   value: "registry.consent"
+            # --- remote-substrate (Phase 3) ---
+            # SPIRE trust domain the substrate connect/Entry API pin (must match
+            # deploy/spire/values.yaml). Default is cluster.local when unset.
+            - name: SPIRE_TRUST_DOMAIN
+              value: "cluster.local"
+            # The bundle namespace + service account the substrate-agent bootstrap
+            # entry binds to (deploy/substrate).
+            - name: SUBSTRATE_AGENT_NAMESPACE
+              value: "substrate-sim"
+            - name: SUBSTRATE_AGENT_SA
+              value: "substrate-agent"
+            # Substrate CONNECT (org-bound x509 issuance) is enabled ONLY when the
+            # dev CA is mounted below. Absent ⇒ POST /v1/orgs/{id}/substrate returns
+            # 503 (never insecure). The dev CA is generated at bootstrap into a
+            # Secret (scripts/substrate-ca.sh) — NEVER committed or baked into an
+            # image. This is the LOCAL-SIM stub; the real Spawnly CA is the
+            # spawnly-infra track.
+            - name: SUBSTRATE_CA_CERT_FILE
+              value: "/run/substrate-ca/ca.crt"
+            - name: SUBSTRATE_CA_KEY_FILE
+              value: "/run/substrate-ca/ca.key"
+            # --- Entry API delegated-admin broker (Phase 4) ---
+            # The CP-mediated Entry API + substrate-agent bootstrap-entry
+            # provisioning drive SPIRE registration entries via the local-sim broker
+            # (execEntryBroker → the `spire-server entry` CLI baked into this image at
+            # /spire-server, over the server's ADMIN socket). SPIRE_JWKS_URL backs the
+            # substrate-SVID authenticator on the Entry API + channel; it is the SPIRE
+            # OIDC discovery provider Service (reachable in-cluster).
+            - name: SPIRE_SERVER_BIN
+              value: "/spire-server"
+            # https/443: the OIDC discovery provider Service exposes ONLY 443/TCP, so
+            # an http:// (port 80) URL fails with "no route to host" — the validator
+            # then never initialises and, because that init is one-shot, the Entry API
+            # and dispatch channel stay permanently 503. Matches registry.yaml. The
+            # cert is the in-cluster self-signed one, which internal/spiffe's validator
+            # deliberately does not verify (same rationale as the registry).
+            - name: SPIRE_JWKS_URL
+              value: "https://spire-spiffe-oidc-discovery-provider.spire-system/keys"
+            # SPIRE_SERVER_SOCKET stays UNSET here: the Entry API is enabled ONLY when
+            # it points at a WORKING server admin socket, else the broker is nil and
+            # the Entry API + channel return 503 (never a misleading 502). Making it
+            # live in-cluster requires the SPIRE server to expose its admin API socket
+            # on a hostPath both the server and this pod mount — a local-sim/infra step
+            # (the real edge uses the SPIRE server entry gRPC admin API, the
+            # infra-track upgrade behind the same substrate.EntryBroker seam). When you
+            # wire that shared socket, set it here and add the matching hostPath
+            # volume/mount below:
+            #   - name: SPIRE_SERVER_SOCKET
+            #     value: "/run/spire-server-socket/api.sock"
           ports:
             - containerPort: 8080
+          volumeMounts:
+            # Dev CA for substrate identity issuance (see SUBSTRATE_CA_*_FILE). The
+            # Secret is optional: without it the volume is empty and connect stays
+            # disabled (503).
+            - name: substrate-ca
+              mountPath: /run/substrate-ca
+              readOnly: true
+            # When wiring the live delegated-admin socket, add here:
+            #   - name: spire-server-socket
+            #     mountPath: /run/spire-server-socket
+      volumes:
+        - name: substrate-ca
+          secret:
+            secretName: substrate-dev-ca
+            optional: true
+        # When wiring the live delegated-admin socket, add here (and repoint the
+        # SPIRE server's socket_path to the same hostPath):
+        #   - name: spire-server-socket
+        #     hostPath:
+        #       path: /run/spire-server-socket
+        #       type: DirectoryOrCreate
 ---
 apiVersion: v1
 kind: Service

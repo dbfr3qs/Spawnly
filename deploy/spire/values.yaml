@@ -3,6 +3,50 @@ global:
     trustDomain: "cluster.local"
     clusterName: "agent-platform"
 
+# ── Node attestors ────────────────────────────────────────────────────────────
+# Platform nodes attest via k8s_psat (the chart default, nodeAttestor.k8sPSAT).
+# The remote-substrate feature ADDS an x509pop node attestor ALONGSIDE k8s_psat
+# so a customer's substrate SPIRE agent can attest to this same hosted server
+# with a CP-issued, org-bound leaf (external_pki mode, CA in a cluster Secret):
+#
+#   NodeAttestor "x509pop" {
+#     plugin_data {
+#       ca_bundle_path      = "/run/spire/x509pop/ca.pem"   # dev CA cert (Secret)
+#       # MUST NOT begin with "/spire/agent" — SPIRE already roots attested node
+#       # ids there and APPENDS this template, so including it yields a DOUBLED id
+#       # (…/spire/agent/spire/agent/x509pop/…) that matches nothing the code looks
+#       # up, silently breaking entry parenting. See devca.NodeAttestorPathTemplate.
+#       agent_path_template = "/x509pop/org/{{ .Subject.CommonName }}/{{ .Fingerprint }}"
+#     }
+#   }
+#
+# The org is embedded from the leaf's CommonName by the template, so node→org is
+# cryptographic (not a lookup) — see internal/substrate/devca.NodeAttestorPathTemplate.
+#
+# WHY THIS ISN'T EXPRESSED HERE AS chart values: the spire-server chart 0.29.0's
+# native nodeAttestor.x509POP only supports "spiffe" mode (a nested-SPIRE upstream
+# socket) and never emits ca_bundle_path — it cannot do external_pki with a dev
+# CA. So scripts/substrate-spire-x509pop.sh injects the block above into the
+# rendered spire-server ConfigMap after `helm ... spire` and mounts the CA Secret,
+# idempotently (re-applied every `make spire`/bootstrap). k8s_psat and every
+# platform pod are untouched. This is the LOCAL-SIM design stub the spawnly-infra
+# track's real CA/edge replaces.
+#
+# ── CP-mediated Entry API delegated admin (remote-substrate Phase 3/4) ─────────
+# The orchestrator's entry broker creates/deletes org-scoped registration entries
+# on behalf of substrates (the consumer never reaches the SPIRE server API). It
+# does so as a DELEGATED ADMIN: the server must trust the orchestrator's identity
+# in its `admin_ids`, e.g.
+#
+#   server { admin_ids = ["spiffe://cluster.local/agent/orchestrator"] }
+#
+# so `spire-server entry create/delete` from the orchestrator is authorized while
+# no substrate/workload identity ever is. The AUTHORIZATION of every entry against
+# the caller's org lives in the orchestrator (internal/substrate.EntryService),
+# NOT here — admin_ids only gates who may call the raw API. Wiring the live socket
+# + admin_ids is Phase 4; Phase 3 lands the authz + broker seam. The gRPC entry
+# admin API is the infra-track upgrade of the local-sim spire-server CLI broker.
+
 spire-server:
   replicaCount: 1
   caSubject:

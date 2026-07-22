@@ -57,6 +57,26 @@ deploy/local-tls/config/
 deploy/local-tls/certs/
 deploy/local-tls/.port-forward.pid
 
+# remote-substrate: throwaway x509pop dev CA / leaf material. The scripts write
+# these only into mktemp dirs + cluster Secrets, never the repo — this is a
+# defensive belt so no CA/key/cert PEM can ever be committed if an output path is
+# pointed at the tree.
+deploy/substrate/.ca/
+deploy/substrate/**/*.pem
+deploy/substrate/**/*.key
+deploy/substrate/**/*.crt
+substrate-*.pem
+substrate-*.key
+substrate-*.crt
+# Stray compiled service binaries from a bare `go build -o <name>` at the repo root
+# (the real artifacts are built into images / kind). Never commit these.
+/substrate-agent
+/orchestrator
+/registry
+/operator
+/dashboard
+/mobile-gateway
+
 # Local secrets / env (keep .env.example tracked)
 .env
 .env.local

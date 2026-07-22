@@ -1,0 +1,137 @@
+# Substrate operator — the SAME agent-operator image, watching ONLY the
+# substrate-sim namespace (WATCH_NAMESPACE), so it materializes substrate
+# AgentWorkloads into local pods without racing the platform operator over
+# `default`. Inert in Phase 2 (no AgentWorkloads are created here yet — the
+# proof uses a script-created SPIRE entry + a plain test pod); it is wired now so
+# the bundle is complete for Phase 4's dispatch path.
+#
+# RBAC (Phase 4): a namespaced Role/RoleBinding scoped to substrate-sim — a
+# lower-trust remote cluster component gets NO cluster-wide authority
+# (carry-forward from the Phase-2 RBAC-narrowing review). The reconciler is
+# already namespace-scoped via WATCH_NAMESPACE; the Role matches that blast radius.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: substrate-agent-operator
+  namespace: substrate-sim
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: substrate-agent-operator
+  namespace: substrate-sim
+rules:
+  - apiGroups: ["agent-platform.io"]
+    resources: ["agentworkloads"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["agent-platform.io"]
+    resources: ["agentworkloads/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["agent-platform.io"]
+    resources: ["agentworkloads/finalizers"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: substrate-agent-operator
+  namespace: substrate-sim
+subjects:
+  - kind: ServiceAccount
+    name: substrate-agent-operator
+    namespace: substrate-sim
+roleRef:
+  kind: Role
+  name: substrate-agent-operator
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: substrate-agent-operator
+  namespace: substrate-sim
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: substrate-agent-operator
+  template:
+    metadata:
+      labels:
+        app: substrate-agent-operator
+    spec:
+      serviceAccountName: substrate-agent-operator
+      containers:
+        - name: operator
+          image: agent-operator:latest
+          imagePullPolicy: Never
+          env:
+            # Scope the reconciler to the substrate namespace (see cmd/operator).
+            - name: WATCH_NAMESPACE
+              value: "substrate-sim"
+            # Substrate pods get identity from the local SPIRE agent (SPIFFE).
+            - name: ATTESTOR
+              value: "spiffe"
+            # Single-cluster sim: substrate pods must mount the SUBSTRATE CSI driver
+            # (distinct from the platform's csi.spiffe.io) so they reach the
+            # substrate SPIRE agent's socket on a shared node. On a real separate
+            # substrate cluster, unset this to use the stock csi.spiffe.io.
+            - name: SPIFFE_CSI_DRIVER
+              value: "csi.substrate.spiffe.io"
+            # The stale-sweep is a platform-cluster concern; the substrate's
+            # liveness is the Phase-4 channel, not a CR sweep.
+            - name: STALE_SWEEP
+              value: "off"
+            # Give substrate-hosted agent sidecars a longer SVID-fetch budget than
+            # the platform default (10 x 3s = 30s): a spawn dispatched while the
+            # substrate's SPIRE agent is still doing its first full sync would
+            # otherwise expire the init-container's wait and CrashLoop. Passed
+            # through by the operator onto every sidecar it creates. 40 x 3s = 2m.
+            - name: SPIFFE_FETCH_RETRIES
+              value: "40"
+            - name: AGENT_NAMESPACE
+              value: "substrate-sim"
+            - name: REGISTRY_URL
+              value: "http://registry.default:8080"
+            - name: IS_TOKEN_URL
+              value: "http://keycloak.default:8080/realms/spawnly/protocol/openid-connect/token"
+            - name: ORCHESTRATOR_URL
+              value: "http://orchestrator.default:8080"
+            # Sample-API endpoints the operator injects into every agent pod it
+            # builds. These MUST be namespace-qualified to `.default` (like the
+            # URLs above): the sample APIs live in `default`, but agent pods run in
+            # `substrate-sim`, where a bare `sample-api-a` resolves namespace-local
+            # (→ sample-api-a.substrate-sim, NXDOMAIN) and every doWork() call
+            # fails — so a substrate agent could mint a token yet never reach the
+            # API, emitting work_error instead of work_ok. Without this a
+            # substrate-hosted chain-worker/weather-monitor can't do real work.
+            - name: SAMPLE_API_URL
+              value: "http://sample-api-a.default:8080"
+            - name: API_A_URL
+              value: "http://sample-api-a.default:8080"
+            - name: API_B_URL
+              value: "http://sample-api-b.default:8080"
+            - name: CONTROL_PLANE_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-auth
+                  key: auth
+                  optional: true
+            - name: CONTROL_PLANE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: control-plane-auth
+                  key: token
+                  optional: true

@@ -18,6 +18,27 @@ import { revokeAllConsents, resolveConsentPrompt } from '../helpers/consent';
 
 const sortedIds = (xs: Iterable<string>) => [...xs].sort();
 
+// Assert a live cascade result is race-tolerant yet fully load-bearing:
+//   (a) it is a SUPERSET of the snapshot subtree — every id we expected to be
+//       cascaded actually was (the whole subtree, nothing escaped); and
+//   (b) it is DISJOINT from the survivors — no node outside the victim's subtree
+//       was cascaded (the cascade stayed scoped).
+// Together these prove the cascade was neither too small nor too large; any
+// extra id (a child born under the victim after the snapshot) is admissible
+// precisely because it is not a survivor.
+function expectSupersetDisjoint(
+  actual: Set<string>,
+  expectedSubtree: Set<string>,
+  survivors: AgentSummary[],
+  label: string,
+) {
+  const missing = [...expectedSubtree].filter((id) => !actual.has(id));
+  expect(missing, `${label}: whole snapshot subtree must be cascaded; missing ${missing.join(', ')}`).toEqual([]);
+
+  const leaked = survivors.map((a) => a.agentId).filter((id) => actual.has(id));
+  expect(leaked, `${label}: no survivor may be cascaded; leaked ${leaked.join(', ')}`).toEqual([]);
+}
+
 test.describe('chain-worker', () => {
   const spawned: string[] = [];
 
@@ -97,7 +118,17 @@ test.describe('chain-worker', () => {
     ]);
     const revoked: string[] = (await revokeResp.json()).revoked ?? [];
     // Cross-check the system's reported cascade against the tree we computed.
-    expect(sortedIds(revoked)).toEqual(sortedIds(victimIds));
+    // chain-worker keeps self-spawning, so a child can be born under the victim
+    // between our settled snapshot and this revoke; the AC 7/8 change also makes a
+    // just-born `pending` child cascade-eligible (correct). An exact-equality
+    // assertion therefore flakes. Prove the two invariants that actually matter
+    // instead: (a) the ENTIRE snapshot subtree was cascaded (nothing under the
+    // victim escaped), and (b) NO survivor was cascaded (the cascade stayed
+    // scoped to the victim's subtree). Any extra id must be a post-snapshot
+    // descendant of the victim — subset + disjoint-from-survivors proves the
+    // cascade was neither too small nor too large.
+    const revokedSet = new Set(revoked);
+    expectSupersetDisjoint(revokedSet, victimIds, survivors, 'revoked');
 
     // Behavioural proof: subtree flips to work_denied…
     for (const node of victimSubtree) {
@@ -128,7 +159,9 @@ test.describe('chain-worker', () => {
       resumeBtn.click(),
     ]);
     const resumed: string[] = (await resumeResp.json()).resumed ?? [];
-    expect(sortedIds(resumed)).toEqual(sortedIds(victimIds));
+    // Same race-tolerant invariants as the revoke cascade: the whole snapshot
+    // subtree resumed, and no survivor was swept into the resume.
+    expectSupersetDisjoint(new Set(resumed), victimIds, survivors, 'resumed');
 
     for (const node of victimSubtree) {
       await waitForEventType(page, node.agentId, 'work_ok', {

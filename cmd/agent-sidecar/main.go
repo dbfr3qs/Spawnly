@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -693,7 +694,16 @@ func main() {
 	// here behind the ATTESTOR selector.
 	switch v := os.Getenv("ATTESTOR"); v {
 	case "", "spiffe":
-		cfg.source = &attestor.SpiffeSource{SocketPath: cfg.socketPath}
+		// Retries/RetryDelay bound the startup wait for the workload's SVID. Zero
+		// values keep the historical default (10 attempts, 3s apart). Substrate-
+		// hosted sidecars get a longer budget via env (SPIFFE_FETCH_RETRIES) so a
+		// spawn issued while the substrate's SPIRE agent is still doing its first
+		// sync is absorbed in-process instead of via init-container CrashLoop.
+		cfg.source = &attestor.SpiffeSource{
+			SocketPath: cfg.socketPath,
+			Retries:    envInt("SPIFFE_FETCH_RETRIES", 0),
+			RetryDelay: envDuration("SPIFFE_FETCH_RETRY_DELAY", 0),
+		}
 	case "aws-sts":
 		src, err := attestor.NewAwsSource(ctx)
 		if err != nil {
@@ -714,4 +724,35 @@ func main() {
 		log.Fatalf("sidecar error: %v", err)
 	}
 	log.Println("sidecar exiting")
+}
+
+// envInt returns the integer value of env var key, or def when unset, empty, or
+// unparseable/non-positive (fail-safe: a bad value can only fall back to the
+// caller's default, never to zero or a negative budget).
+func envInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		log.Printf("ignoring invalid %s=%q: %v", key, v, err)
+		return def
+	}
+	return n
+}
+
+// envDuration returns the duration value of env var key, or def when unset,
+// empty, or unparseable/non-positive (same fail-safe discipline as envInt).
+func envDuration(key string, def time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(strings.TrimSpace(v))
+	if err != nil || d <= 0 {
+		log.Printf("ignoring invalid %s=%q: %v", key, v, err)
+		return def
+	}
+	return d
 }

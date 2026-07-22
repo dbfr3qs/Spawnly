@@ -2,7 +2,7 @@
 MODULE        := github.com/spawnly/platform
 KIND_CLUSTER  := agent-platform
 IMAGE_TAG     := latest
-GO_SERVICES   := operator orchestrator registry sample-api agent-sidecar dashboard mobile-gateway
+GO_SERVICES   := operator orchestrator registry sample-api agent-sidecar dashboard mobile-gateway substrate-agent
 # Separate-module Go agents: their own go.mod (not the root module), so they
 # build via `cd agents/<name> && go build .` and map to image agent-<name>.
 # (None at present — listed here so the build/Docker plumbing stays in place.)
@@ -18,7 +18,7 @@ EXTRA_AGENTS  := keycloak weather-monitor
 MCP_SERVERS   := travel-tools
 SERVICES      := $(GO_SERVICES) $(GO_MODULE_AGENTS) $(NODE_AGENTS) $(EXTRA_AGENTS) $(MCP_SERVERS)
 
-.PHONY: build test test-provider test-dynamodb docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward mailpit kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed reseed-orgs print-% e2e-setup e2e-anchor-setup e2e e2e-subdomains mobile-dev tls-mimic tls-mimic-down
+.PHONY: build test test-provider test-dynamodb docker-build kind-up kind-down kind-load spire deploy bootstrap demo port-forward mailpit kubeconfig dash redeploy-% reload-% reload-sidecar logs-% reseed reseed-orgs print-% e2e-setup e2e-anchor-setup e2e e2e-subdomains mobile-dev tls-mimic tls-mimic-down substrate-ca substrate-setup substrate-verify substrate-down substrate-e2e-setup substrate-wire-entry-api substrate-isolation
 
 # print-<VAR> — echo a make variable so shell scripts can read the authoritative
 # lists instead of re-declaring them. e.g. `make -s print-SERVICES`.
@@ -95,6 +95,9 @@ spire:
 	kubectl -n spire-system wait --for=condition=available \
 		deployment/spire-spiffe-oidc-discovery-provider --timeout=120s
 	kubectl apply -f deploy/spire/clusterspiffeid.yaml
+	# remote-substrate (Phase 2): ensure the throwaway dev CA Secret and enable the
+	# x509pop node attestor ALONGSIDE k8s_psat (idempotent; platform pods untouched).
+	./scripts/substrate-spire-x509pop.sh
 
 deploy: spire
 	kubectl apply -k deploy/crds/
@@ -254,3 +257,77 @@ e2e-subdomains: tls-mimic
 	@echo ""
 	@echo "==> subdomains suite done. The TLS mimic is STILL UP (apex=localtest.me)."
 	@echo "    Return to the default localhost:8090 mode with:  make tls-mimic-down"
+
+# ── remote-substrate local sim (feature: remote-substrate, Phase 2) ───────────
+# substrate-ca — ensure ONLY the throwaway x509pop dev CA Secret exists (no server
+# changes). `make spire`/bootstrap already do this + enable x509pop; this is here
+# for standalone use.
+substrate-ca:
+	./scripts/substrate-ca.sh
+
+# substrate-setup — stand up the simulated substrate (deploy/substrate overlay:
+# SPIRE agent w/ x509pop, SPIFFE CSI driver, operator) for one org (default acme)
+# on a bootstrapped cluster: enables x509pop on the server, issues the org leaf,
+# copies the trust bundle, applies the overlay. Idempotent.
+#   make substrate-setup            # org=acme
+#   make substrate-setup ORG=globex
+substrate-setup:
+	./scripts/substrate-setup.sh $(ORG)
+
+# substrate-verify — prove the Phase-2 identity loop live (node under org path,
+# pod gets org-scoped SVID verified by the Phase-1 Go verifier, forged-CA
+# rejected). Run after substrate-setup. Wired for the Phase-6 harness / e2e.
+substrate-verify:
+	./scripts/substrate-verify.sh $(ORG)
+
+# substrate-e2e-setup — the FIRST-CLASS Phase-6 harness: stand up a LIVE two-org
+# substrate sim so the substrate Playwright specs run end-to-end instead of
+# skipping. org A (default acme) is a fully-live substrate (dev CA + x509pop +
+# overlay + the Entry API delegated-admin socket wired for dispatch/channel); org B
+# (default globex) gets credentials only, for the isolation-matrix negatives. e2e
+# only, idempotent, reversible with `make substrate-down`. Assumes a bootstrapped
+# cluster + demo orgs (make bootstrap + make e2e-anchor-setup).
+#   make substrate-e2e-setup                              # A=acme, B=globex
+#   make substrate-e2e-setup SUBSTRATE_ORG_A=acme SUBSTRATE_ORG_B=globex
+substrate-e2e-setup:
+	./scripts/substrate-e2e-setup.sh
+
+# substrate-wire-entry-api — wire ONLY the Entry API delegated-admin socket (shared
+# hostPath between spire-server + orchestrator) so connect activates the dispatch
+# channel. Folded into substrate-e2e-setup; here for standalone use / re-wiring.
+substrate-wire-entry-api:
+	./scripts/substrate-wire-entry-api.sh
+
+# substrate-isolation — run the LIVE two-org isolation matrix (AC 1/4/5/6) after
+# substrate-e2e-setup: real SVIDs through the real verifier, node→org binding,
+# forged-CA rejection. The shell half of substrate-isolation.spec.ts.
+#   make substrate-isolation                                   # A=acme, B=globex
+#   make substrate-isolation SUBSTRATE_ORG_A=acme SUBSTRATE_ORG_B=globex
+substrate-isolation:
+	./scripts/substrate-isolation.sh
+
+# substrate-down — remove the substrate sim overlay + per-run pods + org-B creds
+# (leaves the dev CA Secret, the server's x509pop attestor, and the Entry API
+# socket in place; re-run substrate-e2e-setup to bring back). SUBSTRATE_UNWIRE=1
+# also unwires the Entry API socket back to seed.
+substrate-down:
+	./scripts/substrate-down.sh
+
+# e2e-substrate — run ONLY the remote-substrate Playwright specs (substrate,
+# dispatch, lifecycle, isolation: 9 tests) instead of the full ~60-test gate, for
+# a fast feature loop. Stands up the live two-org sim first (substrate-e2e-setup,
+# idempotent) so the specs run END-TO-END rather than skipping — without it they
+# all `test.skip` on the "sim not installed" guard and prove nothing.
+#
+# A file filter does NOT drop the auth `setup` project (Playwright keeps
+# dependency projects), so the session is authenticated exactly as in `make e2e`,
+# and the `cleanup` teardown still sweeps residue at the end.
+#
+# Assumes a bootstrapped cluster (make bootstrap). Tear the sim down with
+# `make substrate-down`.
+#
+# Faster inner loop once the sim is already up (skips re-running setup):
+#   cd e2e && npx playwright test tests/substrate-isolation.spec.ts
+#   cd e2e && npx playwright test tests/substrate*.spec.ts --grep "AC 7"
+e2e-substrate: substrate-e2e-setup
+	cd e2e && npx playwright test tests/substrate*.spec.ts

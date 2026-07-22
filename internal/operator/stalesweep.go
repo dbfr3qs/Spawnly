@@ -104,14 +104,18 @@ func (s *StaleSweeper) Sweep(ctx context.Context, trigger string) error {
 
 	var swept int
 	for _, a := range agents {
-		if a.Placement == registry.PlacementRemote {
-			// Remote (consumer-hosted) agents have NO AgentWorkload CR by design —
-			// they run on the consumer's own compute, not in this cluster (Phase 10).
+		if a.Placement == registry.PlacementRemote || a.Placement == registry.PlacementSubstrate {
+			// Remote (consumer-hosted) AND substrate (consumer-Kubernetes, remote-
+			// substrate Phase 3) agents have NO AgentWorkload CR in THIS cluster by
+			// design — a substrate agent's CR lives in the customer's own cluster,
+			// materialized there by the substrate agent over the dispatch channel.
 			// The sweep reaps records with no backing workload, so without this skip
-			// EVERY remote agent would look orphaned and be terminally killed on the
-			// operator's first startup sweep. Exclude them BEFORE the live/CR check.
-			// Placement is server-set at preregistration and immutable, so a sidecar
-			// cannot forge it to make a k8s agent immortal.
+			// EVERY such agent would look orphaned and be terminally killed on the
+			// operator's first startup sweep (and, for substrate, on every disconnect —
+			// spec AC 8: disconnect must never terminally sweep substrate records).
+			// Exclude them BEFORE the live/CR check. Placement is server-set at
+			// preregistration and immutable, so a sidecar cannot forge it to make a
+			// k8s agent immortal.
 			continue
 		}
 		if !staleSweepStatuses[a.Status] {

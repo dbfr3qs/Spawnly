@@ -136,7 +136,7 @@ func TestSweep_RemoteAgentsExcluded(t *testing.T) {
 	remote := agent("a-remote", "active")
 	remote.Placement = registry.PlacementRemote
 	reg.Agents = []registry.AgentRecord{
-		remote,               // remote, no workload — must be left alone
+		remote,                   // remote, no workload — must be left alone
 		agent("a-k8s", "active"), // platform orphan, no workload — must be swept
 	}
 	ev := events.NewMock()
@@ -152,6 +152,70 @@ func TestSweep_RemoteAgentsExcluded(t *testing.T) {
 	}
 	if len(ev.Events["a-remote"]) != 0 {
 		t.Errorf("remote agent got sweep events %v, want none", ev.Events["a-remote"])
+	}
+}
+
+// Substrate-placed agents (remote-substrate Phase 3) have NO local AgentWorkload
+// — their CR lives in the customer cluster — so like remote agents they must be
+// excluded from the sweep (spec AC 8: a disconnect must never terminally sweep a
+// substrate record).
+func TestSweep_SubstrateAgentsExcluded(t *testing.T) {
+	reg := registry.NewMock(nil)
+	sub := agent("a-substrate", "active")
+	sub.Placement = registry.PlacementSubstrate
+	reg.Agents = []registry.AgentRecord{
+		sub,                      // substrate, no local workload — must be left alone
+		agent("a-k8s", "active"), // platform orphan, no workload — must be swept
+	}
+	ev := events.NewMock()
+
+	sweeper := newSweeper(t, reg, ev)
+	if err := sweeper.Sweep(context.Background(), "startup"); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	if len(reg.Failed) != 1 || reg.Failed[0] != "a-k8s" {
+		t.Fatalf("Failed = %v, want [a-k8s] only (substrate agent must be excluded)", reg.Failed)
+	}
+	if len(ev.Events["a-substrate"]) != 0 {
+		t.Errorf("substrate agent got sweep events %v, want none", ev.Events["a-substrate"])
+	}
+}
+
+// AC 8 (disconnect semantics): a DISCONNECTED substrate must never have its
+// records terminally swept. The sweep keys ONLY on Placement — it has no view of
+// (and never consults) channel connection state — so a substrate record is
+// excluded whether the substrate is online or offline. This encodes that
+// invariant: several substrate records in the very statuses the sweep would
+// otherwise fail (active/pending) are all left untouched, standing in for agents
+// whose substrate channel is down. Liveness is a pure in-memory display concern
+// (orchestrator hub); it NEVER drives a record mutation here.
+func TestSweep_SubstrateExcludedRegardlessOfConnectionState(t *testing.T) {
+	reg := registry.NewMock(nil)
+	mk := func(id, status string) registry.AgentRecord {
+		a := agent(id, status)
+		a.Placement = registry.PlacementSubstrate
+		return a
+	}
+	reg.Agents = []registry.AgentRecord{
+		mk("sub-active", "active"),   // running on a (possibly disconnected) substrate
+		mk("sub-pending", "pending"), // dispatched, materializing on the substrate
+		agent("a-k8s", "active"),     // platform orphan — the ONE that must be swept
+	}
+	ev := events.NewMock()
+
+	sweeper := newSweeper(t, reg, ev)
+	if err := sweeper.Sweep(context.Background(), "startup"); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	if len(reg.Failed) != 1 || reg.Failed[0] != "a-k8s" {
+		t.Fatalf("Failed = %v, want [a-k8s] only — no substrate record may be swept on disconnect (AC 8)", reg.Failed)
+	}
+	for _, id := range []string{"sub-active", "sub-pending"} {
+		if len(ev.Events[id]) != 0 {
+			t.Errorf("substrate agent %s got sweep events %v, want none", id, ev.Events[id])
+		}
 	}
 }
 
