@@ -2002,7 +2002,13 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	// Remote-substrate connect surface + CP-mediated Entry API (Phase 3). Built
 	// from env; unconfigured components (no dev CA / no entry broker) leave the
 	// routes returning 503 rather than behaving insecurely.
-	substrateAPI := newSubstrateAPI(regClient, registryURL, controlPlaneBearer, substrateHub)
+	substrateAPI, serr := newSubstrateAPI(regClient, registryURL, controlPlaneBearer, substrateHub)
+	if serr != nil {
+		// A CA misconfiguration (e.g. both CAs configured at once) is a hard startup
+		// error — the operator must resolve the ambiguity rather than the process
+		// guessing which CA is live.
+		log.Fatalf("substrate API init: %v", serr)
+	}
 	registerSubstrateRoutes(mux, substrateAPI, validator, audience, readScope, writeScope, sdb)
 
 	return mux

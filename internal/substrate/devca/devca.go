@@ -32,6 +32,7 @@
 package devca
 
 import (
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1" //nolint:gosec // SHA-1 is the SPIRE x509pop node fingerprint algorithm, matched here by design.
@@ -163,6 +164,38 @@ func GenerateCA(ttl time.Duration) (*CA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("generate ca key: %w", err)
 	}
+	subject := pkix.Name{CommonName: "spawnly-substrate-dev-ca", Organization: []string{"spawnly-substrate-dev"}}
+	certPEM, err := BuildSelfSignedCACert(key, subject, ttl)
+	if err != nil {
+		return nil, err
+	}
+	cert, err := parseCert(certPEM)
+	if err != nil {
+		return nil, fmt.Errorf("parse ca: %w", err)
+	}
+	return &CA{
+		Cert:    cert,
+		CertPEM: certPEM,
+		Key:     key,
+	}, nil
+}
+
+// BuildSelfSignedCACert is the signer-agnostic self-signed CA-CERTIFICATE builder
+// shared by BOTH CA implementations (the dev CA above and the edge KMS CA). It is
+// the SINGLE source of the CA cert SHAPE (IsCA, path-len 0, cert/CRL signing), so
+// the dev-sim and KMS CAs are structurally identical and interchangeable behind the
+// x509pop trust bundle. signer is the CA private key as a crypto.Signer (an RSA key
+// in-process, or the KMS `kms:Sign` shim on the edge); its public key is embedded as
+// the CA's SubjectPublicKeyInfo and it signs the certificate itself. This produces
+// PUBLIC material only — no private key is ever emitted (the KMS key never leaves
+// KMS). Fails closed on a nil signer.
+func BuildSelfSignedCACert(signer crypto.Signer, subject pkix.Name, ttl time.Duration) ([]byte, error) {
+	if signer == nil {
+		return nil, errors.New("nil CA signer")
+	}
+	if signer.Public() == nil {
+		return nil, errors.New("CA signer has no public key")
+	}
 	serial, err := randSerial()
 	if err != nil {
 		return nil, err
@@ -170,7 +203,7 @@ func GenerateCA(ttl time.Duration) (*CA, error) {
 	now := time.Now()
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "spawnly-substrate-dev-ca", Organization: []string{"spawnly-substrate-dev"}},
+		Subject:               subject,
 		NotBefore:             now.Add(-time.Minute),
 		NotAfter:              now.Add(ttl),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
@@ -178,19 +211,11 @@ func GenerateCA(ttl time.Duration) (*CA, error) {
 		IsCA:                  true,
 		MaxPathLenZero:        true,
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, signer.Public(), signer)
 	if err != nil {
 		return nil, fmt.Errorf("self-sign ca: %w", err)
 	}
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		return nil, fmt.Errorf("parse ca: %w", err)
-	}
-	return &CA{
-		Cert:    cert,
-		CertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		Key:     key,
-	}, nil
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
 }
 
 // LoadCA parses a CA from PEM-encoded cert + key (as stored in the cluster
@@ -228,11 +253,38 @@ type Leaf struct {
 	KeyPEM  []byte
 }
 
-// IssueOrgLeaf signs an org-bound leaf off the CA for the given trust domain +
-// org id. The org is stamped into the CommonName (which the server template
-// reads) AND a matching org-scoped URI SAN, so the binding is explicit and
-// self-describing. Fails closed on an invalid org id.
+// IssueOrgLeaf signs an org-bound leaf off the dev CA for the given trust domain
+// + org id. It is a thin wrapper over BuildOrgLeaf using the dev CA's in-process
+// RSA key as the signer — the LOCAL-SIM path. The real edge uses the identical
+// BuildOrgLeaf core with a KMS-backed crypto.Signer (internal/substrate/kmsca),
+// so both CAs produce byte-identical org-binding semantics (same CommonName, same
+// SAN, same fingerprint derivation) and node→org attestation is provably unchanged
+// across the two issuers.
 func IssueOrgLeaf(ca *CA, trustDomain, orgID string, ttl time.Duration) (*Leaf, error) {
+	if ca == nil {
+		return nil, errors.New("nil CA")
+	}
+	return BuildOrgLeaf(ca.Key, ca.Cert, trustDomain, orgID, ttl)
+}
+
+// BuildOrgLeaf is the signer-agnostic leaf-construction core shared by BOTH CA
+// implementations (the LOCAL-SIM dev CA and the edge's KMS-backed CA). It is the
+// SINGLE source of the org-binding semantics: the org is stamped into the leaf's
+// Subject CommonName (which the SPIRE x509pop server template reads) AND a matching
+// org-scoped URI SAN, so the binding is explicit and self-describing regardless of
+// which CA signed it. caSigner is the CA's private key as a crypto.Signer (an RSA
+// key in-process for the dev CA, or a KMS `kms:Sign` shim on the edge); caCert is
+// the CA CERTIFICATE (its public key must correspond to caSigner). The leaf's OWN
+// keypair is always freshly generated here and returned as one-time material — it
+// is never the CA key. Fails closed on a nil signer/cert, empty trust domain, or
+// an invalid org id, so no CA can ever emit an unbound or wrong-domain leaf.
+func BuildOrgLeaf(caSigner crypto.Signer, caCert *x509.Certificate, trustDomain, orgID string, ttl time.Duration) (*Leaf, error) {
+	if caSigner == nil {
+		return nil, errors.New("nil CA signer")
+	}
+	if caCert == nil {
+		return nil, errors.New("nil CA certificate")
+	}
 	if err := ValidateOrgID(orgID); err != nil {
 		return nil, err
 	}
@@ -260,7 +312,7 @@ func IssueOrgLeaf(ca *CA, trustDomain, orgID string, ttl time.Duration) (*Leaf, 
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 		URIs:         []*url.URL{sanURI},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, &key.PublicKey, ca.Key)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caSigner)
 	if err != nil {
 		return nil, fmt.Errorf("sign leaf: %w", err)
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/spawnly/platform/internal/spiffe"
 	"github.com/spawnly/platform/internal/substrate"
 	"github.com/spawnly/platform/internal/substrate/devca"
+	"github.com/spawnly/platform/internal/substrate/kmsca"
 	"github.com/spawnly/platform/internal/tokenvalidator"
 )
 
@@ -44,9 +45,10 @@ type substrateAPI struct {
 	// treating it as dead (0 ⇒ the 90s default). Overridable in tests.
 	readTimeout time.Duration
 
-	// issuer mints the org-bound x509 identity off the dev CA. nil when the CA is
-	// not mounted (feature not configured) ⇒ connect returns 503.
-	issuer *substrate.Issuer
+	// issuer mints the org-bound x509 identity behind the CA-agnostic LeafIssuer
+	// seam — the dev CA locally, or the KMS-backed CA on the edge. nil when no CA
+	// is configured (feature off) ⇒ connect returns 503, never insecure.
+	issuer substrate.LeafIssuer
 	// entries authorizes+brokers CP-mediated SPIRE entries and provisions the
 	// substrate-agent bootstrap entry. nil when no entry broker is configured ⇒
 	// the Entry API returns 503 and connect provisions no bootstrap entry (Phase 4
@@ -744,7 +746,7 @@ func parseEntryIDs(out string) []string {
 // component that is not configured (no dev CA mounted, no entry broker) is left
 // nil and its routes return 503 rather than behaving insecurely. Wiring the real
 // broker + JWKS auth lands with the dispatch channel (Phase 4).
-func newSubstrateAPI(reg registry.Client, registryURL string, cpBearer func() string, hub *substrateHub) *substrateAPI {
+func newSubstrateAPI(reg registry.Client, registryURL string, cpBearer func() string, hub *substrateHub) (*substrateAPI, error) {
 	td := getEnv("SPIRE_TRUST_DOMAIN", "cluster.local")
 	api := &substrateAPI{
 		registryURL:    registryURL,
@@ -757,9 +759,33 @@ func newSubstrateAPI(reg registry.Client, registryURL string, cpBearer func() st
 		leafTTL:        90 * 24 * time.Hour,
 	}
 
-	// Dev CA (mounted from the substrate-dev-ca Secret) → issuer. Absent ⇒ connect
-	// is unavailable (503), never insecure.
-	if caCertFile, caKeyFile := os.Getenv("SUBSTRATE_CA_CERT_FILE"), os.Getenv("SUBSTRATE_CA_KEY_FILE"); caCertFile != "" && caKeyFile != "" {
+	// Select the CA behind the LeafIssuer seam. Exactly one CA may be configured:
+	//   - SUBSTRATE_KMS_KEY_ARN  ⇒ the edge KMS CA (CA cert-only, no key file), or
+	//   - SUBSTRATE_CA_KEY_FILE  ⇒ the LOCAL-SIM dev CA (cert + key), unchanged.
+	// Setting BOTH is a HARD startup error (no ambiguity about which CA is live).
+	// Any misconfig within a selected path leaves issuer nil ⇒ connect 503
+	// (fail-safe), never a weaker/insecure CA.
+	kmsARN := os.Getenv("SUBSTRATE_KMS_KEY_ARN")
+	caCertFile := os.Getenv("SUBSTRATE_CA_CERT_FILE")
+	caKeyFile := os.Getenv("SUBSTRATE_CA_KEY_FILE")
+	switch {
+	case kmsARN != "" && caKeyFile != "":
+		return nil, fmt.Errorf("substrate: both SUBSTRATE_KMS_KEY_ARN and SUBSTRATE_CA_KEY_FILE are set — configure exactly one CA")
+	case kmsARN != "":
+		// Edge KMS CA: the CA cert is public (cert-only mount); the private key is
+		// in KMS. A missing/unreadable cert or a mismatched key leaves issuer nil.
+		if caCertFile == "" {
+			log.Printf("substrate: SUBSTRATE_KMS_KEY_ARN set but no SUBSTRATE_CA_CERT_FILE — connect disabled")
+		} else if certPEM, cerr := os.ReadFile(caCertFile); cerr != nil {
+			log.Printf("substrate: KMS CA cert unreadable (%v) — connect disabled", cerr)
+		} else if issuer, ierr := kmsIssuerFromEnv(context.Background(), kmsARN, certPEM, td, api.leafTTL); ierr != nil {
+			log.Printf("substrate: KMS issuer init failed (%v) — connect disabled", ierr)
+		} else {
+			api.issuer = issuer
+			log.Printf("substrate: KMS CA loaded — connect enabled (trust domain %s)", td)
+		}
+	case caCertFile != "" && caKeyFile != "":
+		// Dev CA (mounted from the substrate-dev-ca Secret) → issuer. Unchanged.
 		certPEM, cerr := os.ReadFile(caCertFile)
 		keyPEM, kerr := os.ReadFile(caKeyFile)
 		if cerr != nil || kerr != nil {
@@ -772,8 +798,8 @@ func newSubstrateAPI(reg registry.Client, registryURL string, cpBearer func() st
 			api.issuer = issuer
 			log.Printf("substrate: dev CA loaded — connect enabled (trust domain %s)", td)
 		}
-	} else {
-		log.Printf("substrate: no dev CA configured (SUBSTRATE_CA_CERT_FILE/KEY_FILE) — connect disabled")
+	default:
+		log.Printf("substrate: no CA configured (SUBSTRATE_KMS_KEY_ARN or SUBSTRATE_CA_CERT_FILE/KEY_FILE) — connect disabled")
 	}
 
 	// Entry broker (spire-server CLI delegated admin) → EntryService + SVID auth.
@@ -801,5 +827,19 @@ func newSubstrateAPI(reg registry.Client, registryURL string, cpBearer func() st
 		log.Printf("substrate: no entry broker configured (SPIRE_SERVER_SOCKET) — Entry API disabled")
 	}
 
-	return api
+	return api, nil
+}
+
+// kmsIssuerFromEnv builds the edge KMS-backed LeafIssuer. It is a package var so
+// the issuer-selection unit test can exercise the env matrix with a fake — the
+// real body constructs a KMS client from the default credential chain (EKS Pod
+// Identity) and hands it to the AWS-blind seam. Any error (unreachable KMS, a CA
+// cert whose SPKI doesn't match the KMS key) is returned so the selector fails
+// closed (nil issuer ⇒ connect 503), never falling back to a weaker CA.
+var kmsIssuerFromEnv = func(ctx context.Context, keyARN string, caCertPEM []byte, trustDomain string, leafTTL time.Duration) (substrate.LeafIssuer, error) {
+	api, err := kmsca.NewSigningClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return kmsca.NewIssuer(ctx, api, keyARN, caCertPEM, trustDomain, leafTTL)
 }
