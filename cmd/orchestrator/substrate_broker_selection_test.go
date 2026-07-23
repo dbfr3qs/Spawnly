@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/spawnly/platform/internal/registry"
 	"github.com/spawnly/platform/internal/substrate"
@@ -26,7 +29,14 @@ func clearBrokerEnv(t *testing.T) {
 
 func newBrokerAPIForTest(t *testing.T) (*substrateAPI, error) {
 	t.Helper()
-	return newSubstrateAPI(registry.NewMock(nil), "http://registry.invalid", func() string { return "" }, nil)
+	api, err := newSubstrateAPI(registry.NewMock(nil), "http://registry.invalid", func() string { return "" }, nil)
+	if api != nil {
+		// Registered AFTER the caller's seam-restoring cleanups, so LIFO ordering
+		// stops the background initializers FIRST — otherwise they keep reading the
+		// package-level seams as the cleanups restore them (a real data race).
+		t.Cleanup(api.stopInit)
+	}
+	return api, err
 }
 
 // TestBrokerSelection_GRPC: SPIRE_ENTRY_API_ADDR set ⇒ the gRPC broker is wired via
@@ -47,11 +57,12 @@ func TestBrokerSelection_GRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if api.entries == nil {
-		t.Fatal("gRPC path: EntryService must be wired")
-	}
-	if _, ok := api.entries.Broker.(sentinelBroker); !ok {
-		t.Fatalf("expected the gRPC (sentinel) broker, got %T", api.entries.Broker)
+	// The EDGE path wires the broker ASYNCHRONOUSLY (the orchestrator's own SVID is
+	// often not deliverable in the first seconds after a rollout), so wait for the
+	// late publish rather than asserting it is already there.
+	es := waitForEntrySvc(t, api)
+	if _, ok := es.Broker.(sentinelBroker); !ok {
+		t.Fatalf("expected the gRPC (sentinel) broker, got %T", es.Broker)
 	}
 	if gotAddr != "spire-server:8081" {
 		t.Fatalf("broker seam got addr %q", gotAddr)
@@ -139,5 +150,63 @@ func TestBrokerSelection_NoneConfigured(t *testing.T) {
 	}
 	if api.entries != nil {
 		t.Fatal("no broker configured must leave the Entry API disabled")
+	}
+}
+
+// waitForEntrySvc blocks until the (asynchronously published) EntryService appears.
+func waitForEntrySvc(t *testing.T, api *substrateAPI) *substrate.EntryService {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if es := api.entrySvc(); es != nil {
+			return es
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("EntryService was never published")
+	return nil
+}
+
+// TestBrokerSelection_GRPC_RetriesUntilSVIDArrives is the regression test for the
+// startup race that repeatedly disabled the edge Entry API: the orchestrator's SVID
+// is not deliverable for the first N attempts (the spire-controller-manager mints
+// its entry per-POD, so every rollout re-runs the race). The broker MUST keep
+// retrying and enable itself with no restart — a one-shot init latched the Entry
+// API off at 503 until a human intervened.
+func TestBrokerSelection_GRPC_RetriesUntilSVIDArrives(t *testing.T) {
+	clearBrokerEnv(t)
+	t.Setenv("SPIRE_ENTRY_API_ADDR", "spire-server:8081")
+
+	origInterval := entryAPIRetryInterval
+	entryAPIRetryInterval = time.Millisecond
+	t.Cleanup(func() { entryAPIRetryInterval = origInterval })
+
+	var mu sync.Mutex
+	attempts := 0
+	orig := spireBrokerFromEnv
+	t.Cleanup(func() { spireBrokerFromEnv = orig })
+	spireBrokerFromEnv = func(context.Context, string, string, string) (substrate.EntryBroker, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		attempts++
+		if attempts < 3 {
+			// What the real failure looks like: no SVID inside the init window.
+			return nil, errors.New("obtain orchestrator SVID from workload API: context deadline exceeded")
+		}
+		return sentinelBroker{}, nil
+	}
+
+	api, err := newBrokerAPIForTest(t)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	es := waitForEntrySvc(t, api)
+	if _, ok := es.Broker.(sentinelBroker); !ok {
+		t.Fatalf("expected the sentinel broker after retry, got %T", es.Broker)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if attempts < 3 {
+		t.Fatalf("expected the broker seam to be retried, got %d attempt(s)", attempts)
 	}
 }

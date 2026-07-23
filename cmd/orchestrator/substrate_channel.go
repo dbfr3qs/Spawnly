@@ -150,7 +150,7 @@ func (api *substrateAPI) channelHandler(w http.ResponseWriter, r *http.Request) 
 	// substrate-agent identity, and the org still has a CONNECTED substrate record.
 	// Reusing it keeps the channel and the Entry API on exactly one authorization
 	// path (own-org-only, fail-closed on a registry outage).
-	org, ok := api.authEntryCaller(w, r)
+	org, _, ok := api.authEntryCaller(w, r)
 	if !ok {
 		return
 	}
@@ -257,7 +257,7 @@ func (api *substrateAPI) channelReadTimeout() time.Duration {
 // this desired set to its local CRs on (re)connect: pending records with no CR ⇒
 // create; local CRs whose record is gone/terminal ⇒ tear down.
 func (api *substrateAPI) listAgents(w http.ResponseWriter, r *http.Request) {
-	callerOrg, ok := api.authEntryCaller(w, r)
+	callerOrg, _, ok := api.authEntryCaller(w, r)
 	if !ok {
 		return
 	}
