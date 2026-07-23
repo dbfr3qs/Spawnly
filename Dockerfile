@@ -47,6 +47,20 @@ FROM gcr.io/distroless/static-debian12 AS substrate-agent
 COPY --from=build-substrate-agent /bin/substrate-agent /
 ENTRYPOINT ["/substrate-agent"]
 
+# substrate-ca-init bootstraps the PRODUCTION-EDGE substrate CA CERTIFICATE for
+# the AWS KMS signing key (public material only — the private key never leaves
+# KMS; the CLI refuses to emit anything but CERTIFICATE PEM blocks). The
+# spawnly-infra deploy runs it as a one-shot in-cluster Job (under the
+# orchestrator's Pod-Identity-bound ServiceAccount, which carries kms:Sign +
+# kms:GetPublicKey on the one CA key) and stores the emitted cert in the
+# substrate-ca-cert ConfigMap. See cmd/substrate-ca-init/main.go.
+FROM builder AS build-substrate-ca-init
+RUN CGO_ENABLED=0 GOOS=linux go build -o /bin/substrate-ca-init ./cmd/substrate-ca-init
+
+FROM gcr.io/distroless/static-debian12 AS substrate-ca-init
+COPY --from=build-substrate-ca-init /bin/substrate-ca-init /
+ENTRYPOINT ["/substrate-ca-init"]
+
 FROM gcr.io/distroless/static-debian12 AS registry
 COPY --from=build-registry /bin/registry /
 ENTRYPOINT ["/registry"]

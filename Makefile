@@ -2,7 +2,11 @@
 MODULE        := github.com/spawnly/platform
 KIND_CLUSTER  := agent-platform
 IMAGE_TAG     := latest
-GO_SERVICES   := operator orchestrator registry sample-api agent-sidecar dashboard mobile-gateway substrate-agent
+# substrate-ca-init is the one-shot edge CA bootstrap CLI (public CA cert from
+# the KMS key) — listed so the image pipeline (docker-build / push-images.sh via
+# print-SERVICES) builds+pushes agent-substrate-ca-init for the spawnly-infra
+# deploy's CA-bootstrap Job. Inert locally (kind uses the dev CA, never this).
+GO_SERVICES   := operator orchestrator registry sample-api agent-sidecar dashboard mobile-gateway substrate-agent substrate-ca-init
 # Separate-module Go agents: their own go.mod (not the root module), so they
 # build via `cd agents/<name> && go build .` and map to image agent-<name>.
 # (None at present — listed here so the build/Docker plumbing stays in place.)
