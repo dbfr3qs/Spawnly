@@ -58,6 +58,19 @@ Entry-API delegated-admin socket). Individual pieces: `make substrate-ca`,
 `make substrate-setup ORG=<org>`, `make substrate-wire-entry-api`,
 `make substrate-isolation`.
 
+## Pointing the bundle at a real edge
+
+Against the real `spawnly.run` edge, the connect response's `install` map carries
+the two public endpoints (`spireServerEndpoint`, e.g. `spire.spawnly.run:443`,
+and `substrateURL`, e.g. `https://substrate.spawnly.run`). Substitute them into
+this bundle before applying: in `spire-agent.yaml`, set the agent config's
+`server_address`/`server_port` to the `spireServerEndpoint` host/port (and
+`trust_domain` to the connect response's `trustDomain`, e.g. `spawnly.run`); in
+`substrate-agent.yaml`, set `ORCHESTRATOR_URL` to the `substrateURL` (plus
+`SPIRE_TRUST_DOMAIN` to the same trust domain). Everything else — namespace,
+service accounts, the one-time identity Secret — is unchanged; the in-cluster
+defaults above are the local-sim values.
+
 ## Security posture (local sim)
 
 - **No SPIRE server / CA / AWS creds** live on the substrate side — only a SPIRE

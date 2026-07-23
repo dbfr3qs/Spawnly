@@ -183,6 +183,14 @@ func BootstrapCACert(signer *Signer, existingPEM []byte, ttl time.Duration) ([]b
 		return nil, errors.New("nil signer")
 	}
 	if len(bytes.TrimSpace(existingPEM)) > 0 {
+		// The trust check must cover the WHOLE stored bundle, not just its first
+		// cert: certMatchesSigner alone would let a rogue CA cert APPENDED after
+		// the legitimate one ride through idempotent re-runs (trust-anchor
+		// addition, where a swap is correctly refused). Exactly one cert, and it
+		// must be the KMS key's.
+		if n := countCertBlocks(existingPEM); n != 1 {
+			return nil, fmt.Errorf("existing CA cert bundle has %d CERTIFICATE blocks, want exactly 1 (refusing to carry extra trust anchors forward)", n)
+		}
 		match, err := certMatchesSigner(existingPEM, signer)
 		if err != nil {
 			return nil, fmt.Errorf("inspect existing CA cert: %w", err)
