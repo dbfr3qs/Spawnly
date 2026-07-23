@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spawnly/platform/internal/registry"
@@ -54,9 +55,24 @@ type substrateAPI struct {
 	// substrate-agent bootstrap entry. nil when no entry broker is configured ⇒
 	// the Entry API returns 503 and connect provisions no bootstrap entry (Phase 4
 	// reconcile re-drives it once the broker is wired).
-	entries *substrate.EntryService
+	//
+	// On the EDGE (gRPC broker) this is populated ASYNCHRONOUSLY: the orchestrator's
+	// own SVID may not exist yet at startup (the spire-controller-manager mints its
+	// entry per-POD, so every rollout re-runs the race, and the SPIRE agent then has
+	// to sync it). A one-shot init would latch the Entry API off until someone
+	// noticed and restarted the pod — a transient startup delay permanently
+	// disabling a feature. entriesMu guards the late publish; read via entrySvc().
+	entriesMu sync.RWMutex
+	entries   *substrate.EntryService
+	// initCancel stops the background edge initializers and initWG waits for them
+	// to exit. Without these newSubstrateAPI would leak goroutines that retry
+	// forever and outlive their owner (they also read package-level seams, which
+	// the race detector rightly flags once a test restores them underneath).
+	initCancel context.CancelFunc
+	initWG     sync.WaitGroup
 	// svidAuth authenticates an Entry API caller's substrate-agent SVID and
-	// returns its org. nil ⇒ Entry API 503.
+	// returns its org. nil ⇒ Entry API 503. Published under entriesMu together with
+	// entries (the Entry API requires both), read via svidAuthenticator().
 	svidAuth substrateSVIDAuthenticator
 
 	// bootstrap selectors for the substrate-agent's own entry (the bundle's known
@@ -225,18 +241,18 @@ func (api *substrateAPI) connect(w http.ResponseWriter, r *http.Request) {
 	//    fresh connect), then create the new one. Skipped when no broker is
 	//    configured (Phase-4 reconcile re-drives it); a provisioning ERROR with a
 	//    configured broker fails the connect so it isn't silently half-wired.
-	if api.entries != nil {
+	if entries := api.entrySvc(); entries != nil {
 		// Rotate hygiene: sweep EVERY entry under the org's x509pop node prefix
 		// (the superseded bootstrap entry AND any workload entries the substrate
 		// authored under the OLD node), so a replaced/compromised prior leaf can't
 		// keep issuing SVIDs. On a fresh connect this is a no-op. The substrate
 		// re-authors its workload entries under the NEW node on reconcile-on-connect.
-		if derr := api.entries.InvalidateOrgNodeEntries(ctx, normOrg); derr != nil {
+		if derr := entries.InvalidateOrgNodeEntries(ctx, normOrg); derr != nil {
 			// Fall back to at least clearing the bootstrap entry if the broker can't
 			// enumerate (keeps older brokers working); a hard failure fails the connect.
 			log.Printf("substrate connect %s: sweep prior org-node entries: %v (falling back to bootstrap-only)", normOrg, derr)
 			if agentID, berr := spiffe.BuildSubstrateAgentPath(api.trustDomain, normOrg); berr == nil {
-				if berr := api.entries.Broker.DeleteEntry(ctx, agentID); berr != nil {
+				if berr := entries.Broker.DeleteEntry(ctx, agentID); berr != nil {
 					log.Printf("substrate connect %s: clear prior bootstrap entry: %v", normOrg, berr)
 					http.Error(w, "failed to provision substrate identity", http.StatusBadGateway)
 					return
@@ -250,13 +266,13 @@ func (api *substrateAPI) connect(w http.ResponseWriter, r *http.Request) {
 		// org accumulates one attested node per connect. Best-effort: a broker that
 		// cannot enumerate agents, or a transient eviction failure, must not fail a
 		// connect whose security-relevant work (the entry sweep) already succeeded.
-		if n, eerr := api.entries.EvictSupersededOrgNodes(ctx, normOrg, issued.NodeID); eerr != nil {
+		if n, eerr := entries.EvictSupersededOrgNodes(ctx, normOrg, issued.NodeID); eerr != nil {
 			log.Printf("substrate connect %s: evict superseded org nodes: %v (continuing)", normOrg, eerr)
 		} else {
 			log.Printf("substrate connect %s: evicted %d superseded x509pop node(s)", normOrg, n)
 		}
 		selectors := []string{"k8s:ns:" + api.agentNamespace, "k8s:sa:" + api.agentSA}
-		if err := api.entries.ProvisionSubstrateAgentEntry(ctx, normOrg, issued.NodeID, selectors); err != nil {
+		if err := entries.ProvisionSubstrateAgentEntry(ctx, normOrg, issued.NodeID, selectors); err != nil {
 			log.Printf("substrate connect %s: provision bootstrap entry: %v", normOrg, err)
 			http.Error(w, "failed to provision substrate identity", http.StatusBadGateway)
 			return
@@ -368,11 +384,11 @@ func (api *substrateAPI) disconnect(w http.ResponseWriter, r *http.Request) {
 	// gate — is already gone; a stale entry issues an SVID that authenticates
 	// nothing without a record). Falls back to bootstrap-only if enumeration is
 	// unsupported.
-	if api.entries != nil {
-		if derr := api.entries.InvalidateOrgNodeEntries(ctx, normOrg); derr != nil {
+	if entries := api.entrySvc(); entries != nil {
+		if derr := entries.InvalidateOrgNodeEntries(ctx, normOrg); derr != nil {
 			log.Printf("substrate disconnect %s: sweep org-node entries: %v", normOrg, derr)
 			if id, berr := spiffe.BuildSubstrateAgentPath(api.trustDomain, normOrg); berr == nil {
-				if berr := api.entries.Broker.DeleteEntry(ctx, id); berr != nil {
+				if berr := entries.Broker.DeleteEntry(ctx, id); berr != nil {
 					log.Printf("substrate disconnect %s: delete bootstrap entry: %v", normOrg, berr)
 				}
 			}
@@ -380,7 +396,7 @@ func (api *substrateAPI) disconnect(w http.ResponseWriter, r *http.Request) {
 		// And evict the org's attested x509pop nodes — ALL of them (no keep): unlike
 		// a rotate, a disconnect revokes the credential outright, so no node of this
 		// org should remain attested. Same best-effort stance as the entry sweep.
-		if n, eerr := api.entries.EvictSupersededOrgNodes(ctx, normOrg, ""); eerr != nil {
+		if n, eerr := entries.EvictSupersededOrgNodes(ctx, normOrg, ""); eerr != nil {
 			log.Printf("substrate disconnect %s: evict org nodes: %v", normOrg, eerr)
 		} else {
 			log.Printf("substrate disconnect %s: evicted %d x509pop node(s)", normOrg, n)
@@ -394,7 +410,7 @@ func (api *substrateAPI) disconnect(w http.ResponseWriter, r *http.Request) {
 // org (every field validated in substrate.EntryService — fail closed).
 func (api *substrateAPI) createEntry(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	callerOrg, ok := api.authEntryCaller(w, r)
+	callerOrg, entries, ok := api.authEntryCaller(w, r)
 	if !ok {
 		return
 	}
@@ -408,7 +424,7 @@ func (api *substrateAPI) createEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec := substrate.EntrySpec{SPIFFEID: body.SPIFFEID, ParentID: body.ParentID, Selectors: body.Selectors}
-	if err := api.entries.CreateWorkloadEntry(ctx, callerOrg, spec); err != nil {
+	if err := entries.CreateWorkloadEntry(ctx, callerOrg, spec); err != nil {
 		api.writeEntryError(w, "create", callerOrg, err)
 		return
 	}
@@ -418,7 +434,7 @@ func (api *substrateAPI) createEntry(w http.ResponseWriter, r *http.Request) {
 // deleteEntry tears down a workload entry the caller owns (same org isolation).
 func (api *substrateAPI) deleteEntry(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	callerOrg, ok := api.authEntryCaller(w, r)
+	callerOrg, entries, ok := api.authEntryCaller(w, r)
 	if !ok {
 		return
 	}
@@ -427,7 +443,7 @@ func (api *substrateAPI) deleteEntry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "spiffeId is required", http.StatusBadRequest)
 		return
 	}
-	if err := api.entries.DeleteWorkloadEntry(ctx, callerOrg, spiffeID); err != nil {
+	if err := entries.DeleteWorkloadEntry(ctx, callerOrg, spiffeID); err != nil {
 		api.writeEntryError(w, "delete", callerOrg, err)
 		return
 	}
@@ -438,16 +454,20 @@ func (api *substrateAPI) deleteEntry(w http.ResponseWriter, r *http.Request) {
 // substrate SVID, and confirms the caller org still has a CONNECTED substrate
 // record — the authoritative gate. On any failure it writes the response and
 // returns ok=false.
-func (api *substrateAPI) authEntryCaller(w http.ResponseWriter, r *http.Request) (string, bool) {
-	if api.entries == nil || api.svidAuth == nil {
+func (api *substrateAPI) authEntryCaller(w http.ResponseWriter, r *http.Request) (string, *substrate.EntryService, bool) {
+	// Read both halves ONCE, under the lock, and hand the service back to the
+	// caller: on the edge they are published late (initEntryAPIWithRetry), so
+	// re-reading api.entries afterwards would be an unsynchronized read.
+	entries, auth := api.entrySvc(), api.svidAuthenticator()
+	if entries == nil || auth == nil {
 		http.Error(w, "substrate entry API is not configured", http.StatusServiceUnavailable)
-		return "", false
+		return "", nil, false
 	}
-	callerOrg, err := api.svidAuth.authenticate(r.Context(), r)
+	callerOrg, err := auth.authenticate(r.Context(), r)
 	if err != nil {
 		// Oracle-free: a bad/absent/non-substrate SVID is one 401.
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return "", false
+		return "", nil, false
 	}
 	// The substrate record is the authoritative gate: a DISCONNECTED org (record
 	// cleared) must not be able to author entries even if a stale bootstrap SVID
@@ -457,14 +477,14 @@ func (api *substrateAPI) authEntryCaller(w http.ResponseWriter, r *http.Request)
 	if ferr != nil {
 		log.Printf("substrate entry (org=%s): fetch org: %v", callerOrg, ferr)
 		http.Error(w, "registry unavailable", http.StatusBadGateway)
-		return "", false
+		return "", nil, false
 	}
 	if org.Substrate == nil {
 		log.Printf("substrate entry (org=%s): no connected substrate — refusing", callerOrg)
 		http.Error(w, "forbidden", http.StatusForbidden)
-		return "", false
+		return "", nil, false
 	}
-	return callerOrg, true
+	return callerOrg, entries, true
 }
 
 // writeEntryError renders an EntryService error: an authorization failure is an
@@ -881,11 +901,25 @@ func newSubstrateAPI(reg registry.Client, registryURL string, cpBearer func() st
 	case entryAddr != "" && sock != "":
 		return nil, fmt.Errorf("substrate: both SPIRE_ENTRY_API_ADDR and SPIRE_SERVER_SOCKET are set — configure exactly one entry broker")
 	case entryAddr != "":
-		if b, berr := spireBrokerFromEnv(context.Background(), entryAddr, os.Getenv("SPIRE_WORKLOAD_API_SOCKET"), td); berr != nil {
-			log.Printf("substrate: gRPC entry broker init failed (%v) — Entry API disabled", berr)
+		// EDGE: establish both halves in the BACKGROUND with retry. The orchestrator's
+		// own SVID is frequently not deliverable in the first seconds after a rollout
+		// (see initGRPCBrokerWithRetry), and the SPIRE OIDC discovery provider may not
+		// be serving yet. Until they converge the Entry API answers 503 exactly as an
+		// unconfigured broker would, then enables itself with no restart. `broker`
+		// stays nil here on purpose — the sync path below is the LOCAL-SIM exec broker.
+		log.Printf("substrate: gRPC entry broker configured (SPIRE entry API %s) — establishing in the background", entryAddr)
+		initCtx, cancelInit := context.WithCancel(context.Background())
+		api.initCancel = cancelInit
+		api.initWG.Add(1)
+		go func() {
+			defer api.initWG.Done()
+			api.initGRPCBrokerWithRetry(initCtx, entryAddr, os.Getenv("SPIRE_WORKLOAD_API_SOCKET"), td)
+		}()
+		if jwksURL := os.Getenv("SPIRE_JWKS_URL"); jwksURL != "" {
+			api.initWG.Add(1)
+			go func() { defer api.initWG.Done(); api.initSVIDAuthWithRetry(initCtx, jwksURL, td) }()
 		} else {
-			broker = b
-			log.Printf("substrate: gRPC entry broker enabled (SPIRE entry API %s)", entryAddr)
+			log.Printf("substrate: SPIRE_JWKS_URL is not set — Entry API stays disabled")
 		}
 	case sock != "":
 		broker = newExecEntryBroker(os.Getenv("SPIRE_SERVER_BIN"), sock)
@@ -894,6 +928,9 @@ func newSubstrateAPI(reg registry.Client, registryURL string, cpBearer func() st
 		log.Printf("substrate: no entry broker configured (SPIRE_ENTRY_API_ADDR or SPIRE_SERVER_SOCKET) — Entry API disabled")
 	}
 
+	// LOCAL-SIM (exec) path stays fully synchronous — the delegated-admin socket is
+	// a local file and the JWKS endpoint is in-cluster, so there is no startup race
+	// to absorb and kind behavior is unchanged.
 	if broker != nil {
 		api.entries = &substrate.EntryService{
 			Broker:      broker,
@@ -915,6 +952,113 @@ func newSubstrateAPI(reg registry.Client, registryURL string, cpBearer func() st
 	}
 
 	return api, nil
+}
+
+// entrySvc returns the Entry API service, or nil when the entry broker is not (yet)
+// wired. Callers MUST use this rather than reading api.entries directly: on the edge
+// the service is published late, from the background initializer.
+func (api *substrateAPI) entrySvc() *substrate.EntryService {
+	api.entriesMu.RLock()
+	defer api.entriesMu.RUnlock()
+	return api.entries
+}
+
+// svidAuthenticator returns the Entry API's SVID authenticator, or nil when not
+// (yet) wired. Same late-publish rule as entrySvc.
+func (api *substrateAPI) svidAuthenticator() substrateSVIDAuthenticator {
+	api.entriesMu.RLock()
+	defer api.entriesMu.RUnlock()
+	return api.svidAuth
+}
+
+// stopInit cancels the background edge initializers and waits for them to exit.
+// Safe to call when none were started. Callers that replace the package-level
+// seams (tests) MUST call this before restoring them.
+func (api *substrateAPI) stopInit() {
+	if api.initCancel != nil {
+		api.initCancel()
+	}
+	api.initWG.Wait()
+}
+
+// setEntrySvc / setSVIDAuth publish the two halves of the Entry API INDEPENDENTLY.
+// They are deliberately not coupled: entries also backs connect/disconnect entry
+// sweeps and bootstrap provisioning, which need no SVID authenticator, so a JWKS
+// problem must not withhold them (authEntryCaller still requires both, so the Entry
+// API itself stays 503 until each half is up).
+func (api *substrateAPI) setEntrySvc(es *substrate.EntryService) {
+	api.entriesMu.Lock()
+	defer api.entriesMu.Unlock()
+	api.entries = es
+}
+
+func (api *substrateAPI) setSVIDAuth(auth substrateSVIDAuthenticator) {
+	api.entriesMu.Lock()
+	defer api.entriesMu.Unlock()
+	api.svidAuth = auth
+}
+
+// entryAPIRetryInterval paces the background edge initializers. Package var so the
+// unit tests can drive them fast.
+var entryAPIRetryInterval = 10 * time.Second
+
+// initGRPCBrokerWithRetry establishes the EDGE gRPC entry broker in the background,
+// retrying until it succeeds or ctx is cancelled.
+//
+// Why retry rather than fail once: the orchestrator authenticates to the SPIRE
+// entry/agent admin API with its OWN SVID, which arrives over the Workload API only
+// after the spire-controller-manager has minted THIS POD's entry and the node's
+// SPIRE agent has synced it. That is inherently racy at startup and re-runs on every
+// rollout (the entry carries a k8s:pod-uid selector, so a new pod needs a new
+// entry). A one-shot init turned a few seconds of unlucky timing into an Entry API
+// that stayed 503 until a human restarted the pod. Failing CLOSED is right; failing
+// closed FOREVER is not — the surface stays 503 while this converges and enables
+// itself the moment the SVID lands. No insecure fallback is ever taken.
+func (api *substrateAPI) initGRPCBrokerWithRetry(ctx context.Context, entryAddr, workloadSocket, td string) {
+	for attempt := 1; ; attempt++ {
+		broker, err := spireBrokerFromEnv(ctx, entryAddr, workloadSocket, td)
+		if err == nil {
+			api.setEntrySvc(&substrate.EntryService{
+				Broker:      broker,
+				Resolver:    registryRecordOrgResolver{reg: api.reg},
+				TrustDomain: td,
+			})
+			log.Printf("substrate: gRPC entry broker enabled (SPIRE entry API %s, attempt %d)", entryAddr, attempt)
+			return
+		}
+		log.Printf("substrate: gRPC entry broker init attempt %d failed (%v) — Entry API 503, retrying in %s", attempt, err, entryAPIRetryInterval)
+		select {
+		case <-ctx.Done():
+			log.Printf("substrate: gRPC entry broker initializer stopped (%v)", ctx.Err())
+			return
+		case <-time.After(entryAPIRetryInterval):
+		}
+	}
+}
+
+// initSVIDAuthWithRetry establishes the Entry API's SVID authenticator in the
+// background. Same rationale as the broker: the JWKS endpoint is the SPIRE OIDC
+// discovery provider, which may not be serving yet when the orchestrator starts.
+func (api *substrateAPI) initSVIDAuthWithRetry(ctx context.Context, jwksURL, td string) {
+	for attempt := 1; ; attempt++ {
+		validator, err := spiffe.NewJWKSValidator(ctx, jwksURL)
+		if err == nil {
+			api.setSVIDAuth(&spiffeSubstrateAuth{
+				validator:   validator,
+				trustDomain: td,
+				audience:    getEnv("SUBSTRATE_SVID_AUDIENCE", "orchestrator"),
+			})
+			log.Printf("substrate: SVID JWKS validator enabled (%s, attempt %d)", jwksURL, attempt)
+			return
+		}
+		log.Printf("substrate: SVID JWKS validator init attempt %d failed (%v) — Entry API 503, retrying in %s", attempt, err, entryAPIRetryInterval)
+		select {
+		case <-ctx.Done():
+			log.Printf("substrate: SVID JWKS validator initializer stopped (%v)", ctx.Err())
+			return
+		case <-time.After(entryAPIRetryInterval):
+		}
+	}
 }
 
 // spireBrokerFromEnv builds the edge gRPC EntryBroker against the SPIRE server's
