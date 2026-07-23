@@ -17,6 +17,22 @@ var loadConfig = func(ctx context.Context) (aws.Config, error) {
 	return config.LoadDefaultConfig(ctx)
 }
 
+// countCertBlocks counts CERTIFICATE PEM blocks in pemBytes (other block types
+// are not counted here — parseCert/assert paths reject them separately).
+func countCertBlocks(pemBytes []byte) int {
+	n := 0
+	for {
+		var b *pem.Block
+		b, pemBytes = pem.Decode(pemBytes)
+		if b == nil {
+			return n
+		}
+		if b.Type == "CERTIFICATE" {
+			n++
+		}
+	}
+}
+
 // parseCert decodes the first CERTIFICATE PEM block to an x509 certificate.
 func parseCert(certPEM []byte) (*x509.Certificate, error) {
 	b, _ := pem.Decode(certPEM)

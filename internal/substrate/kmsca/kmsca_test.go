@@ -247,6 +247,13 @@ func TestBootstrapCACert_Idempotent(t *testing.T) {
 	if _, err := BootstrapCACert(signer, other.CertPEM, time.Hour); err == nil {
 		t.Fatal("expected refusal of a mismatched existing CA cert")
 	}
+	// Append attack: a rogue cert APPENDED after the legitimate one must be
+	// refused too — the SPKI check on the first cert alone would otherwise carry
+	// the extra trust anchor forward on every idempotent re-run.
+	appended := append(append([]byte{}, first...), other.CertPEM...)
+	if _, err := BootstrapCACert(signer, appended, time.Hour); err == nil {
+		t.Fatal("expected refusal of a bundle with an appended extra CA cert")
+	}
 }
 
 // TestBootstrapCACert_EmitsCertOnly proves the bootstrap output is public material
