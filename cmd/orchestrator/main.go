@@ -2002,8 +2002,25 @@ func buildMux(k8s client.Client, clientset kubernetes.Interface, sdb spicedb.Cli
 	// Remote-substrate connect surface + CP-mediated Entry API (Phase 3). Built
 	// from env; unconfigured components (no dev CA / no entry broker) leave the
 	// routes returning 503 rather than behaving insecurely.
-	substrateAPI := newSubstrateAPI(regClient, registryURL, controlPlaneBearer, substrateHub)
+	substrateAPI, serr := newSubstrateAPI(regClient, registryURL, controlPlaneBearer, substrateHub)
+	if serr != nil {
+		// A CA misconfiguration (e.g. both CAs configured at once) is a hard startup
+		// error — the operator must resolve the ambiguity rather than the process
+		// guessing which CA is live.
+		log.Fatalf("substrate API init: %v", serr)
+	}
 	registerSubstrateRoutes(mux, substrateAPI, validator, audience, readScope, writeScope, sdb)
+
+	// Dedicated public substrate listener (Phase 2, edge): when SUBSTRATE_PUBLIC_ADDR
+	// is set (AWS overlay), serve the substrate surface ALSO on a second port that
+	// the ALB host-rule (substrate.spawnly.run) targets — exposing ONLY the substrate
+	// routes to the internet, not the whole orchestrator mux (mobile-gateway
+	// two-port-split precedent). Unset on local kind ⇒ not started (single :8080
+	// listener, unchanged). The listener shares this substrateAPI instance (same
+	// dispatch hub), so a /spawn on :8080 still reaches a substrate's channel here.
+	if publicAddr := os.Getenv("SUBSTRATE_PUBLIC_ADDR"); publicAddr != "" {
+		startSubstratePublicListener(publicAddr, substratePublicMux(substrateAPI, validator, audience, readScope, writeScope, sdb))
+	}
 
 	return mux
 }

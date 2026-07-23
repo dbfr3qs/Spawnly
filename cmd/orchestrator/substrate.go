@@ -19,6 +19,8 @@ import (
 	"github.com/spawnly/platform/internal/spiffe"
 	"github.com/spawnly/platform/internal/substrate"
 	"github.com/spawnly/platform/internal/substrate/devca"
+	"github.com/spawnly/platform/internal/substrate/kmsca"
+	"github.com/spawnly/platform/internal/substrate/spirebroker"
 	"github.com/spawnly/platform/internal/tokenvalidator"
 )
 
@@ -44,9 +46,10 @@ type substrateAPI struct {
 	// treating it as dead (0 ⇒ the 90s default). Overridable in tests.
 	readTimeout time.Duration
 
-	// issuer mints the org-bound x509 identity off the dev CA. nil when the CA is
-	// not mounted (feature not configured) ⇒ connect returns 503.
-	issuer *substrate.Issuer
+	// issuer mints the org-bound x509 identity behind the CA-agnostic LeafIssuer
+	// seam — the dev CA locally, or the KMS-backed CA on the edge. nil when no CA
+	// is configured (feature off) ⇒ connect returns 503, never insecure.
+	issuer substrate.LeafIssuer
 	// entries authorizes+brokers CP-mediated SPIRE entries and provisions the
 	// substrate-agent bootstrap entry. nil when no entry broker is configured ⇒
 	// the Entry API returns 503 and connect provisions no bootstrap entry (Phase 4
@@ -99,6 +102,45 @@ func registerSubstrateRoutes(mux *http.ServeMux, api *substrateAPI, v tokenvalid
 	// substrate-agent holds; the list is its desired-state pull on (re)connect.
 	mux.HandleFunc("GET /v1/substrate/channel", api.channelHandler)
 	mux.HandleFunc("GET /v1/substrate/agents", api.listAgents)
+}
+
+// substratePublicMux builds a mux serving ONLY the substrate surface — the exact
+// registerSubstrateRoutes set, with the SAME handlers and guards. It backs the
+// dedicated internet-facing listener (SUBSTRATE_PUBLIC_ADDR): the ALB host-rule
+// (substrate.spawnly.run, Phase 5) targets this port so ONLY the substrate routes
+// (channel WS, Entry API, substrate agents list, org-admin connect endpoints) are
+// reachable from the internet — every other orchestrator route (/spawn, /v1/agents,
+// the admin family, …) is absent here and 404s, mirroring the mobile-gateway
+// public/internal two-port split. Auth is UNCHANGED: the routes authenticate
+// exactly as on the main mux (SVID for channel/entries/agents; OAuth org-admin/
+// member for connect). The api is the SAME instance the main mux uses (shared hub),
+// so a spawn pushed on :8080 reaches the channel a substrate holds on this port.
+func substratePublicMux(api *substrateAPI, v tokenvalidator.TokenValidator, audience, readScope, writeScope string, sdb spicedb.Client) *http.ServeMux {
+	m := http.NewServeMux()
+	registerSubstrateRoutes(m, api, v, audience, readScope, writeScope, sdb)
+	return m
+}
+
+// startSubstratePublicListener starts the dedicated internet-facing substrate
+// listener on addr in a goroutine, serving handler (the substrate-only mux). It is
+// invoked ONLY when SUBSTRATE_PUBLIC_ADDR is set — unset on local kind, so that
+// path keeps a single :8080 listener unchanged. Explicit read/idle timeouts harden
+// the internet-facing server (Slowloris defense); no WriteTimeout, because the
+// dispatch channel is a long-lived WebSocket (same stance as the main server). A
+// bind/serve failure is fatal, matching the mobile-gateway internal-listener
+// precedent — a substrate edge that cannot come up must not fail silently.
+func startSubstratePublicListener(addr string, handler http.Handler) {
+	go func() {
+		log.Printf("orchestrator substrate public listener on %s", addr)
+		srv := &http.Server{
+			Addr:              addr,
+			Handler:           handler,
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
+		log.Fatal(srv.ListenAndServe())
+	}()
 }
 
 // connectResponse is the one-time connect payload. identity (cert+key) is
@@ -744,7 +786,7 @@ func parseEntryIDs(out string) []string {
 // component that is not configured (no dev CA mounted, no entry broker) is left
 // nil and its routes return 503 rather than behaving insecurely. Wiring the real
 // broker + JWKS auth lands with the dispatch channel (Phase 4).
-func newSubstrateAPI(reg registry.Client, registryURL string, cpBearer func() string, hub *substrateHub) *substrateAPI {
+func newSubstrateAPI(reg registry.Client, registryURL string, cpBearer func() string, hub *substrateHub) (*substrateAPI, error) {
 	td := getEnv("SPIRE_TRUST_DOMAIN", "cluster.local")
 	api := &substrateAPI{
 		registryURL:    registryURL,
@@ -757,9 +799,33 @@ func newSubstrateAPI(reg registry.Client, registryURL string, cpBearer func() st
 		leafTTL:        90 * 24 * time.Hour,
 	}
 
-	// Dev CA (mounted from the substrate-dev-ca Secret) → issuer. Absent ⇒ connect
-	// is unavailable (503), never insecure.
-	if caCertFile, caKeyFile := os.Getenv("SUBSTRATE_CA_CERT_FILE"), os.Getenv("SUBSTRATE_CA_KEY_FILE"); caCertFile != "" && caKeyFile != "" {
+	// Select the CA behind the LeafIssuer seam. Exactly one CA may be configured:
+	//   - SUBSTRATE_KMS_KEY_ARN  ⇒ the edge KMS CA (CA cert-only, no key file), or
+	//   - SUBSTRATE_CA_KEY_FILE  ⇒ the LOCAL-SIM dev CA (cert + key), unchanged.
+	// Setting BOTH is a HARD startup error (no ambiguity about which CA is live).
+	// Any misconfig within a selected path leaves issuer nil ⇒ connect 503
+	// (fail-safe), never a weaker/insecure CA.
+	kmsARN := os.Getenv("SUBSTRATE_KMS_KEY_ARN")
+	caCertFile := os.Getenv("SUBSTRATE_CA_CERT_FILE")
+	caKeyFile := os.Getenv("SUBSTRATE_CA_KEY_FILE")
+	switch {
+	case kmsARN != "" && caKeyFile != "":
+		return nil, fmt.Errorf("substrate: both SUBSTRATE_KMS_KEY_ARN and SUBSTRATE_CA_KEY_FILE are set — configure exactly one CA")
+	case kmsARN != "":
+		// Edge KMS CA: the CA cert is public (cert-only mount); the private key is
+		// in KMS. A missing/unreadable cert or a mismatched key leaves issuer nil.
+		if caCertFile == "" {
+			log.Printf("substrate: SUBSTRATE_KMS_KEY_ARN set but no SUBSTRATE_CA_CERT_FILE — connect disabled")
+		} else if certPEM, cerr := os.ReadFile(caCertFile); cerr != nil {
+			log.Printf("substrate: KMS CA cert unreadable (%v) — connect disabled", cerr)
+		} else if issuer, ierr := kmsIssuerFromEnv(context.Background(), kmsARN, certPEM, td, api.leafTTL); ierr != nil {
+			log.Printf("substrate: KMS issuer init failed (%v) — connect disabled", ierr)
+		} else {
+			api.issuer = issuer
+			log.Printf("substrate: KMS CA loaded — connect enabled (trust domain %s)", td)
+		}
+	case caCertFile != "" && caKeyFile != "":
+		// Dev CA (mounted from the substrate-dev-ca Secret) → issuer. Unchanged.
 		certPEM, cerr := os.ReadFile(caCertFile)
 		keyPEM, kerr := os.ReadFile(caKeyFile)
 		if cerr != nil || kerr != nil {
@@ -772,14 +838,40 @@ func newSubstrateAPI(reg registry.Client, registryURL string, cpBearer func() st
 			api.issuer = issuer
 			log.Printf("substrate: dev CA loaded — connect enabled (trust domain %s)", td)
 		}
-	} else {
-		log.Printf("substrate: no dev CA configured (SUBSTRATE_CA_CERT_FILE/KEY_FILE) — connect disabled")
+	default:
+		log.Printf("substrate: no CA configured (SUBSTRATE_KMS_KEY_ARN or SUBSTRATE_CA_CERT_FILE/KEY_FILE) — connect disabled")
 	}
 
-	// Entry broker (spire-server CLI delegated admin) → EntryService + SVID auth.
+	// Select the entry broker behind the substrate.EntryBroker seam. Exactly one
+	// mechanism may be configured:
+	//   - SPIRE_ENTRY_API_ADDR ⇒ the EDGE gRPC broker (SPIRE entry/agent admin API
+	//     over mTLS with the orchestrator's own SVID), or
+	//   - SPIRE_SERVER_SOCKET  ⇒ the LOCAL-SIM delegated-admin CLI broker, unchanged.
+	// Setting BOTH is a HARD startup error (mirrors the CA both-set stance — no
+	// ambiguity about which mechanism is live). A misconfig within a selected path
+	// leaves the broker nil ⇒ Entry API 503 (fail-safe), never an insecure fallback.
 	// Absent ⇒ Entry API unavailable (503) and connect defers the bootstrap entry.
-	if sock := os.Getenv("SPIRE_SERVER_SOCKET"); sock != "" {
-		broker := newExecEntryBroker(os.Getenv("SPIRE_SERVER_BIN"), sock)
+	entryAddr := os.Getenv("SPIRE_ENTRY_API_ADDR")
+	sock := os.Getenv("SPIRE_SERVER_SOCKET")
+	var broker substrate.EntryBroker
+	switch {
+	case entryAddr != "" && sock != "":
+		return nil, fmt.Errorf("substrate: both SPIRE_ENTRY_API_ADDR and SPIRE_SERVER_SOCKET are set — configure exactly one entry broker")
+	case entryAddr != "":
+		if b, berr := spireBrokerFromEnv(context.Background(), entryAddr, os.Getenv("SPIRE_WORKLOAD_API_SOCKET"), td); berr != nil {
+			log.Printf("substrate: gRPC entry broker init failed (%v) — Entry API disabled", berr)
+		} else {
+			broker = b
+			log.Printf("substrate: gRPC entry broker enabled (SPIRE entry API %s)", entryAddr)
+		}
+	case sock != "":
+		broker = newExecEntryBroker(os.Getenv("SPIRE_SERVER_BIN"), sock)
+		log.Printf("substrate: exec entry broker configured (delegated-admin socket %s)", sock)
+	default:
+		log.Printf("substrate: no entry broker configured (SPIRE_ENTRY_API_ADDR or SPIRE_SERVER_SOCKET) — Entry API disabled")
+	}
+
+	if broker != nil {
 		api.entries = &substrate.EntryService{
 			Broker:      broker,
 			Resolver:    registryRecordOrgResolver{reg: reg},
@@ -794,12 +886,42 @@ func newSubstrateAPI(reg registry.Client, registryURL string, cpBearer func() st
 					trustDomain: td,
 					audience:    getEnv("SUBSTRATE_SVID_AUDIENCE", "orchestrator"),
 				}
-				log.Printf("substrate: Entry API enabled (delegated-admin socket %s)", sock)
+				log.Printf("substrate: Entry API enabled")
 			}
 		}
-	} else {
-		log.Printf("substrate: no entry broker configured (SPIRE_SERVER_SOCKET) — Entry API disabled")
 	}
 
-	return api
+	return api, nil
+}
+
+// spireBrokerFromEnv builds the edge gRPC EntryBroker against the SPIRE server's
+// entry/agent admin API. It is a package var so the broker-selection unit test can
+// exercise the env matrix with a fake — the real body constructs the mTLS gRPC
+// broker from the orchestrator's own SVID (SPIFFE Workload API) and authorizes the
+// SPIRE server as the mTLS peer. The dial is bounded so an unreachable Workload API
+// fails closed at startup (nil broker ⇒ Entry API 503) rather than hanging the
+// orchestrator; Phase 4 provides the orchestrator its SVID (CSI-mounted socket) and
+// pins its SPIFFE id in the server admin_ids.
+var spireBrokerFromEnv = func(ctx context.Context, entryAddr, workloadSocket, trustDomain string) (substrate.EntryBroker, error) {
+	dialCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return spirebroker.New(dialCtx, spirebroker.Config{
+		Addr:              entryAddr,
+		WorkloadAPISocket: workloadSocket,
+		TrustDomain:       trustDomain,
+	})
+}
+
+// kmsIssuerFromEnv builds the edge KMS-backed LeafIssuer. It is a package var so
+// the issuer-selection unit test can exercise the env matrix with a fake — the
+// real body constructs a KMS client from the default credential chain (EKS Pod
+// Identity) and hands it to the AWS-blind seam. Any error (unreachable KMS, a CA
+// cert whose SPKI doesn't match the KMS key) is returned so the selector fails
+// closed (nil issuer ⇒ connect 503), never falling back to a weaker CA.
+var kmsIssuerFromEnv = func(ctx context.Context, keyARN string, caCertPEM []byte, trustDomain string, leafTTL time.Duration) (substrate.LeafIssuer, error) {
+	api, err := kmsca.NewSigningClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return kmsca.NewIssuer(ctx, api, keyARN, caCertPEM, trustDomain, leafTTL)
 }

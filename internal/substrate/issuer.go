@@ -80,6 +80,20 @@ func (i *Issuer) IssueOrgIdentity(orgID string) (IssuedIdentity, error) {
 	if err != nil {
 		return IssuedIdentity{}, fmt.Errorf("issue org leaf: %w", err)
 	}
+	return NewIssuedIdentity(i.trustDomain, leaf)
+}
+
+// NewIssuedIdentity assembles the IssuedIdentity record fields from a freshly
+// issued leaf, computing the SHA-256 fingerprint, hex serial, x509pop NodeID, and
+// true NotAfter through the SINGLE shared derivations. BOTH CA issuers — the
+// dev-CA Issuer here and the edge KMS issuer (internal/substrate/kmsca) — funnel
+// through this, so the record fields and (via devca.NodeIDFromLeaf) the x509pop
+// node id are derived IDENTICALLY regardless of which CA signed the leaf. That is
+// what makes node→org attestation provably unchanged across the two CAs.
+func NewIssuedIdentity(trustDomain string, leaf *devca.Leaf) (IssuedIdentity, error) {
+	if leaf == nil {
+		return IssuedIdentity{}, errors.New("nil leaf")
+	}
 	cert, err := parseLeaf(leaf.CertPEM)
 	if err != nil {
 		return IssuedIdentity{}, err
@@ -88,7 +102,7 @@ func (i *Issuer) IssueOrgIdentity(orgID string) (IssuedIdentity, error) {
 	// NodeID via the shared devca helper — the SINGLE source of the x509pop
 	// SHA-1 node-fingerprint decision, so the connect flow and the substrate-agent
 	// derive the SAME parent id for org entries.
-	nodeID, err := devca.NodeIDFromLeaf(i.trustDomain, leaf.CertPEM)
+	nodeID, err := devca.NodeIDFromLeaf(trustDomain, leaf.CertPEM)
 	if err != nil {
 		return IssuedIdentity{}, fmt.Errorf("node id: %w", err)
 	}
