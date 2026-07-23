@@ -65,6 +65,16 @@ type substrateAPI struct {
 	agentSA        string
 	// leafTTL bounds the issued identity's validity (reported to the admin).
 	leafTTL time.Duration
+
+	// Optional REAL-endpoint install hints (Phase 5, edge). When set (AWS overlay),
+	// the connect response's Install map tells the org admin exactly where their
+	// substrate must dial: the SPIRE node-attestation endpoint (host:port, e.g.
+	// "spire.spawnly.run:443") and the public substrate base URL (the WS dispatch
+	// channel + Entry API origin, e.g. "https://substrate.spawnly.run"). Empty ⇒
+	// the keys are ABSENT — local kind behavior byte-identical. Informational
+	// only: nothing here is an authz input, so the hints are config, not contract.
+	spireEndpointHint string
+	publicURLHint     string
 }
 
 // substrateSVIDAuthenticator verifies an Entry API caller's substrate-agent SVID
@@ -256,6 +266,19 @@ func (api *substrateAPI) connect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("substrate connect %s: issued identity (fp=%s serial=%s node=%s)", normOrg, issued.CertFingerprint, issued.CertSerial, issued.NodeID)
+	install := map[string]string{
+		"namespace":      api.agentNamespace,
+		"serviceAccount": api.agentSA,
+		"note":           "Install the substrate bundle (deploy/substrate) with this identity as the SPIRE x509pop credential. The identity is shown ONCE — store it as a Secret in your cluster; Spawnly retains only its fingerprint.",
+	}
+	// Real-endpoint hints (edge only — see the field docs). Absent when unset so
+	// the local-kind response is unchanged byte-for-byte.
+	if api.spireEndpointHint != "" {
+		install["spireServerEndpoint"] = api.spireEndpointHint
+	}
+	if api.publicURLHint != "" {
+		install["substrateURL"] = api.publicURLHint
+	}
 	w.Header().Set("Content-Type", "application/json")
 	// One-time secret material — never cache it at any hop.
 	w.Header().Set("Cache-Control", "no-store")
@@ -273,11 +296,7 @@ func (api *substrateAPI) connect(w http.ResponseWriter, r *http.Request) {
 			KeyPEM:         string(issued.Leaf.KeyPEM),
 			TrustBundlePEM: string(api.issuer.TrustBundlePEM()),
 		},
-		Install: map[string]string{
-			"namespace":      api.agentNamespace,
-			"serviceAccount": api.agentSA,
-			"note":           "Install the substrate bundle (deploy/substrate) with this identity as the SPIRE x509pop credential. The identity is shown ONCE — store it as a Secret in your cluster; Spawnly retains only its fingerprint.",
-		},
+		Install: install,
 	})
 }
 
@@ -797,6 +816,10 @@ func newSubstrateAPI(reg registry.Client, registryURL string, cpBearer func() st
 		agentNamespace: getEnv("SUBSTRATE_AGENT_NAMESPACE", "substrate-sim"),
 		agentSA:        getEnv("SUBSTRATE_AGENT_SA", "substrate-agent"),
 		leafTTL:        90 * 24 * time.Hour,
+		// Optional real-endpoint install hints (edge overlay only; see the field
+		// docs). Unset ⇒ empty ⇒ the Install keys are absent (kind unchanged).
+		spireEndpointHint: os.Getenv("SUBSTRATE_SPIRE_ENDPOINT_HINT"),
+		publicURLHint:     os.Getenv("SUBSTRATE_PUBLIC_URL_HINT"),
 	}
 
 	// Select the CA behind the LeafIssuer seam. Exactly one CA may be configured:
