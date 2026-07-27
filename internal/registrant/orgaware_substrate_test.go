@@ -2,6 +2,7 @@ package registrant
 
 import (
 	"context"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/spawnly/platform/internal/registry"
@@ -116,6 +117,38 @@ func TestSubstrate_StsCred_StillTakesStsPath(t *testing.T) {
 	}
 	if spf.called {
 		t.Fatal("the spiffe branch must NEVER see an STS-shaped credential")
+	}
+}
+
+// REGRESSION GUARD (the coexistence trap): an stsweb web-identity JWT is non-STS-
+// *shaped* (looksLikeStsCredential matches only the presigned aws-sts envelope),
+// so it shares the non-STS branch with SPIFFE SVIDs. With a spiffe branch wired,
+// it MUST still route to the aws-stsweb `def` — its sub is NOT a spiffe:// ID — or
+// platform agent self-registration breaks (the exact AC-5a coexistence this fix
+// must not trade away). Routes to def, and the spiffe branch never sees it.
+func TestSubstrate_StswebJwt_RoutesToDefNotSpiffe(t *testing.T) {
+	def := &recordingDefault{identity: Identity{AgentID: "plat-1", Issuer: "aws-stsweb"}}
+	spf := &recordingDefault{} // the spiffe branch — must NOT be consulted
+	store := twoOrgStore()
+
+	v := NewOrgAwareVerifier(def, store, nil).WithSpiffe(spf)
+
+	// A JWT whose sub is the EKS/stsweb subject shape, NOT a spiffe:// ID.
+	req := httptest.NewRequest("POST", "/v1/agents", nil)
+	req.Header.Set("Authorization", "Bearer "+jwtWithSub("system:serviceaccount:default:spawnly-agent"))
+
+	id, err := v.Verify(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if !def.called {
+		t.Fatal("an stsweb JWT (non-spiffe sub) must be validated by the aws-stsweb default")
+	}
+	if spf.called {
+		t.Fatal("the spiffe branch must NOT see an stsweb JWT — that would break platform self-registration")
+	}
+	if id.AgentID != "plat-1" {
+		t.Fatalf("identity = %+v", id)
 	}
 }
 
