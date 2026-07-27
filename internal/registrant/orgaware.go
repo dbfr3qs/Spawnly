@@ -42,6 +42,7 @@ type orgStore interface {
 // no extra work, so platform agents behave exactly as before.
 type OrgAwareVerifier struct {
 	def        Verifier     // the configured default (SPIFFE/OIDC/mTLS/aws-sts)
+	spiffe     Verifier     // OPTIONAL substrate-edge SPIFFE verifier (see WithSpiffe); nil elsewhere
 	store      orgStore     // registry.Store — resolves record → org → anchor
 	httpClient *http.Client // STS replay client (bounded)
 }
@@ -54,6 +55,27 @@ func NewOrgAwareVerifier(def Verifier, store orgStore, httpClient *http.Client) 
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
 	return &OrgAwareVerifier{def: def, store: store, httpClient: httpClient}
+}
+
+// WithSpiffe installs a SEPARATE SPIFFE verifier used ONLY for the non-STS
+// (SPIFFE/OIDC/mTLS) branch of Verify, and returns the receiver for chaining.
+//
+// WHY this exists: the AWS substrate edge is the ONE deployment that needs BOTH
+// registrant verifiers at once. Platform EKS agents authenticate with
+// aws-stsweb — so REGISTRANT_VERIFIER defaults to aws-stsweb and `def` is the
+// stsweb verifier — but a substrate workload presents a SPIFFE JWT-SVID that is
+// NOT STS-shaped and that the stsweb verifier would reject (the confirmed 401
+// on self-register). Wiring a dedicated SPIFFE verifier here routes those SVIDs
+// to a real SPIFFE validator while leaving the STS path (and the org-less STS
+// fallback to `def`) untouched.
+//
+// When nil (every other deployment, including kind where `def` IS already the
+// spiffe-svid verifier) the non-STS branch keeps using `def`, so behaviour is
+// bit-identical to before. This is opt-in only, selected in cmd/registry/main.go
+// by REGISTRANT_SUBSTRATE_VERIFIER=spiffe-svid.
+func (v *OrgAwareVerifier) WithSpiffe(spiffe Verifier) *OrgAwareVerifier {
+	v.spiffe = spiffe
+	return v
 }
 
 // Verify routes by credential SHAPE: an AWS STS presigned GetCallerIdentity
@@ -69,8 +91,29 @@ func NewOrgAwareVerifier(def Verifier, store orgStore, httpClient *http.Client) 
 func (v *OrgAwareVerifier) Verify(ctx context.Context, r *http.Request) (Identity, error) {
 	cred := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !looksLikeStsCredential(cred) {
-		// Not an STS presentation → the default (SPIRE/OIDC/mTLS) verifier.
-		id, err := v.def.Verify(ctx, r)
+		// Not an STS presentation → a SPIFFE/OIDC/mTLS verifier.
+		//
+		// SUBSTRATE-EDGE COEXISTENCE (spec AC-5a): on the AWS substrate edge the
+		// DEFAULT verifier (v.def) is aws-stsweb — correct for platform EKS agents —
+		// but a substrate workload authenticates with a SPIFFE JWT-SVID that stsweb
+		// would reject. When a dedicated SPIFFE verifier has been wired (WithSpiffe),
+		// ROUTE within the non-STS branch by SPIFFE-ness: a SPIFFE JWT-SVID (its `sub`
+		// is a spiffe:// ID) → the SPIFFE verifier; everything else (the stsweb
+		// web-identity JWT the PLATFORM agents present, OIDC, mTLS) → v.def. Both the
+		// stsweb JWT and the SVID are non-STS-*shaped* (looksLikeStsCredential only
+		// matches the presigned aws-sts envelope), so a naive "non-STS ⇒ spiffe" would
+		// REJECT platform stsweb self-registration and break coexistence — the exact
+		// AC-5a regression this must NOT trade for. Routing on the UNVERIFIED sub is
+		// safe: each branch still cryptographically validates, so a forged spiffe://
+		// sub routed to the SPIFFE verifier fails signature/JWKS, and a forged
+		// non-spiffe sub routed to stsweb fails there. On kind v.spiffe stays nil and
+		// v.def already IS the spiffe verifier, so this is bit-identical to before.
+		// The STS path below, and the org-less STS fallback to v.def, are unaffected.
+		nonSts := v.def
+		if v.spiffe != nil && looksLikeSpiffeSVID(cred) {
+			nonSts = v.spiffe
+		}
+		id, err := nonSts.Verify(ctx, r)
 		if err != nil {
 			return Identity{}, err
 		}
@@ -224,4 +267,30 @@ func looksLikeStsCredential(cred string) bool {
 		return false
 	}
 	return pr.Method != "" && pr.URL != ""
+}
+
+// looksLikeSpiffeSVID reports whether cred is a JWT whose `sub` claim is a SPIFFE
+// ID (spiffe://…). It is a ROUTING signal ONLY — used to pick the SPIFFE verifier
+// over the stsweb default on the coexistence edge — and reads the claim WITHOUT
+// verifying the signature. That is safe because the chosen verifier then fully
+// validates the token: a forged spiffe:// sub still fails the SPIFFE verifier's
+// signature/JWKS + trust-domain checks. A non-JWT, an unparseable payload, or a
+// non-spiffe sub returns false so the credential routes to the default verifier
+// (the stsweb web-identity JWT platform agents present has a non-spiffe sub).
+func looksLikeSpiffeSVID(cred string) bool {
+	parts := strings.Split(cred, ".")
+	if len(parts) != 3 { // header.payload.signature
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		Sub string `json:"sub"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return false
+	}
+	return strings.HasPrefix(claims.Sub, "spiffe://")
 }

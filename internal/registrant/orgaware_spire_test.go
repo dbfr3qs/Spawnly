@@ -2,6 +2,7 @@ package registrant
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -30,9 +31,19 @@ func spireVerifier(spiffeID string, store orgStore) *OrgAwareVerifier {
 
 // svidRequest presents a non-STS bearer credential so OrgAwareVerifier routes
 // to the SPIRE (default) branch; the MockSVIDValidator ignores the token value.
+// jwtWithSub builds a minimal unsigned JWT (header.payload.signature) whose only
+// claim is `sub`. The MockSVIDValidator ignores token content, so it drives only
+// the OrgAwareVerifier's SPIFFE-vs-stsweb ROUTING (looksLikeSpiffeSVID).
+func jwtWithSub(sub string) string {
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"` + sub + `"}`))
+	return "eyJhbGciOiJFUzI1NiJ9." + payload + ".sig"
+}
+
 func svidRequest() *http.Request {
 	req := httptest.NewRequest("POST", "/v1/agents", nil)
-	req.Header.Set("Authorization", "Bearer header.payload.signature")
+	// A SPIFFE-SVID-shaped token (sub is a spiffe:// ID) so the coexistence router
+	// sends it to the spiffe branch when one is wired.
+	req.Header.Set("Authorization", "Bearer "+jwtWithSub("spiffe://"+spireTD+"/org/acme/agent/x"))
 	return req
 }
 
