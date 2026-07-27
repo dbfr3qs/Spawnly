@@ -1,6 +1,11 @@
 package run.spawnly.keycloak.attestor;
 
+import java.util.Base64;
+
+import com.fasterxml.jackson.databind.JsonNode;
+
 import org.jboss.logging.Logger;
+import org.keycloak.util.JsonSerialization;
 
 import run.spawnly.keycloak.registry.AgentRecord;
 import run.spawnly.keycloak.registry.AgentRegistryClient;
@@ -26,9 +31,28 @@ import run.spawnly.keycloak.registry.Organization;
  *   <li>there is NO fallback across verifiers — a failed org-STS resolution is a
  *       refusal, never a retry against the platform default;</li>
  *   <li>SPIRE (platform) agents are UNAFFECTED by any org's anchor — a non-STS
- *       credential is routed straight to the platform default verifier, so the
- *       SPIRE path is bit-identical to before.</li>
+ *       credential is validated by the platform default verifier (or, on the
+ *       substrate edge, ROUTED to the injected SPIFFE verifier — see below), so
+ *       the SPIRE path is bit-identical to before wherever no SPIFFE verifier is
+ *       wired.</li>
  * </ul>
+ *
+ * <h2>Substrate-edge coexistence (mint side, spec AC-5a)</h2>
+ * On the AWS substrate edge the platform default verifier is {@code aws-stsweb}
+ * (correct for platform EKS agents), yet a substrate workload mints with a SPIFFE
+ * JWT-SVID that stsweb would reject. When a dedicated SPIFFE verifier is wired via
+ * {@link #withSpiffe}, the non-STS branch ROUTES by SPIFFE-ness: a SPIFFE-SVID-
+ * shaped credential (its {@code sub} is a {@code spiffe://} ID, read UNVERIFIED
+ * for routing only) goes to the SPIFFE verifier; everything else — the stsweb
+ * web-identity JWT the PLATFORM agents present, OIDC — goes to the default. Both
+ * the stsweb JWT and the SVID are non-STS-<i>shaped</i>, so a naive "non-STS ⇒
+ * spiffe" would REJECT platform stsweb mints and break the very coexistence this
+ * preserves — the router (NOT spiffe-only) is the load-bearing choice. Reading
+ * the unverified {@code sub} is safe: each branch then fully validates (disjoint
+ * keys + audiences), so a forged {@code spiffe://} sub still fails the SPIFFE
+ * verifier's signature/JWKS/trust-domain checks. When no SPIFFE verifier is wired
+ * (every other deployment, including kind where the default IS already the SPIRE
+ * verifier) the non-STS branch keeps using the default — bit-identical.
  *
  * <h2>Oracle-free</h2>
  * Every failure — bad credential, unknown record, wrong org, unanchored org,
@@ -66,6 +90,10 @@ public final class OrgAwareVerifier {
     private final AgentCredentialVerifier defaultVerifier;
     private final AgentCredentialVerifier stsVerifier;
     private final AgentRegistryClient registry;
+    // OPTIONAL substrate-edge SPIFFE verifier used ONLY for the SPIFFE-SVID-shaped
+    // portion of the non-STS branch (see withSpiffe + the class javadoc). Null on
+    // every non-substrate deployment (including kind), so behaviour is unchanged.
+    private AgentCredentialVerifier spiffeVerifier;
 
     /**
      * Production ctor: the platform default verifier (from {@link AttestorFactory})
@@ -89,6 +117,23 @@ public final class OrgAwareVerifier {
         this.defaultVerifier = defaultVerifier;
         this.stsVerifier = stsVerifier;
         this.registry = registry;
+    }
+
+    /**
+     * Installs a SEPARATE SPIFFE verifier used ONLY for the SPIFFE-SVID-shaped
+     * portion of the non-STS branch (substrate-edge coexistence, spec AC-5a), and
+     * returns {@code this} for chaining — the mirror of the Go registrant
+     * {@code OrgAwareVerifier.WithSpiffe}. A {@code null} argument is a no-op (the
+     * unset toggle case), so callers can wire it unconditionally. When non-null,
+     * {@link #verifySpireOrgBound} routes a credential whose {@code sub} is a
+     * {@code spiffe://} ID to this verifier and everything else (the stsweb
+     * web-identity JWT platform agents present, OIDC) to the default. The STS path
+     * and the org-binding invariants are untouched. Opt-in only, selected by
+     * {@code ATTESTOR_SUBSTRATE_VERIFIER=spiffe} in {@link AttestorFactory}.
+     */
+    public OrgAwareVerifier withSpiffe(AgentCredentialVerifier spiffe) {
+        this.spiffeVerifier = spiffe;
+        return this;
     }
 
     /**
@@ -124,7 +169,17 @@ public final class OrgAwareVerifier {
      * token-exchange), since both route through {@code verify()}.
      */
     private AgentIdentity verifySpireOrgBound(String credential) {
-        AgentIdentity identity = defaultVerifier.verify(credential);
+        // SUBSTRATE-EDGE COEXISTENCE (spec AC-5a): route within the non-STS branch
+        // by SPIFFE-ness. A SPIFFE-SVID-shaped credential goes to the injected
+        // substrate verifier (when wired); the stsweb web-identity JWT platform
+        // agents present, OIDC, etc. go to the default. THIS IS A ROUTER, NOT a
+        // spiffe-only redirect: an stsweb JWT is ALSO non-STS-shaped, so pointing
+        // the branch spiffe-only would REJECT platform stsweb mints — trading one
+        // coexistence break for another. When spiffeVerifier is null (every
+        // non-substrate deployment) this is exactly defaultVerifier — bit-identical.
+        AgentCredentialVerifier v =
+                (spiffeVerifier != null && looksLikeSpiffeSvid(credential)) ? spiffeVerifier : defaultVerifier;
+        AgentIdentity identity = v.verify(credential);
         if (identity == null) {
             return null;
         }
@@ -251,5 +306,37 @@ public final class OrgAwareVerifier {
         StsCredentialVerifier.PresignedRequest pr = StsCredentialVerifier.decodePresigned(credential);
         return pr != null && pr.url != null && !pr.url.isEmpty()
                 && pr.method != null && !pr.method.isEmpty();
+    }
+
+    /**
+     * True when {@code credential} is a JWT whose {@code sub} claim is a SPIFFE ID
+     * ({@code spiffe://…}). Mirrors the Go {@code looksLikeSpiffeSVID}. This is a
+     * ROUTING signal ONLY — used to pick the substrate SPIFFE verifier over the
+     * stsweb default on the coexistence edge — and reads the claim WITHOUT
+     * verifying the signature. That is safe because the chosen verifier then fully
+     * validates the token: a forged {@code spiffe://} sub routed to the SPIFFE
+     * verifier still fails its signature/JWKS + trust-domain checks, and a forged
+     * non-spiffe sub routed to the stsweb default fails there. A non-JWT, an
+     * unparseable payload, or a non-spiffe sub returns {@code false} so the
+     * credential routes to the default (the stsweb web-identity JWT platform agents
+     * present has a non-spiffe sub — {@code arn:aws:sts::…}).
+     */
+    static boolean looksLikeSpiffeSvid(String credential) {
+        if (credential == null || credential.isEmpty()) {
+            return false;
+        }
+        String[] parts = credential.split("\\.", -1);
+        if (parts.length != 3) { // header.payload.signature
+            return false;
+        }
+        try {
+            byte[] payload = Base64.getUrlDecoder().decode(parts[1]);
+            JsonNode claims = JsonSerialization.readValue(payload, JsonNode.class);
+            JsonNode sub = claims.get("sub");
+            return sub != null && sub.isTextual() && sub.asText().startsWith("spiffe://");
+        } catch (RuntimeException | java.io.IOException e) {
+            // Not base64url / not JSON / no sub ⇒ route to the default verifier.
+            return false;
+        }
     }
 }
