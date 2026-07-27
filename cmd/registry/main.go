@@ -2628,6 +2628,45 @@ func main() {
 	// starts with none — and re-applies the same value to the in-memory store.
 	s.SetSchema(activeSchema, schemaVersion, schemaSource)
 
+	// SUBSTRATE-EDGE COEXISTENCE (spec AC-5a): the substrate edge is the ONE
+	// deployment that needs BOTH registrant verifiers at once. Platform EKS agents
+	// authenticate with aws-stsweb (the default `verifier` built above), while a
+	// substrate workload presents a SPIFFE JWT-SVID that stsweb would reject (the
+	// confirmed self-register 401). Opt in with REGISTRANT_SUBSTRATE_VERIFIER=
+	// spiffe-svid to build a SEPARATE SPIFFE verifier used ONLY for the non-STS
+	// branch of the OrgAwareVerifier below; the STS path is untouched. Unset (every
+	// other cluster, including kind) leaves the verifier chain byte-identical.
+	var substrateSpiffe registrant.Verifier
+	if sv := getEnv("REGISTRANT_SUBSTRATE_VERIFIER", ""); sv != "" {
+		switch sv {
+		case "spiffe-svid":
+			switch {
+			case getEnv("REGISTRANT_VERIFIER", attestorDefault) == "spiffe-svid":
+				// The default verifier IS already spiffe-svid (kind): the non-STS branch
+				// already validates SVIDs. Do NOT build a second one — keeps the SPIRE
+				// default deployment bit-identical.
+				log.Printf("REGISTRANT_SUBSTRATE_VERIFIER=spiffe-svid ignored: default REGISTRANT_VERIFIER is already spiffe-svid")
+			case spireJWKSURL == "":
+				// Misconfig: cannot validate substrate SVIDs without a JWKS. Fail CLOSED.
+				log.Fatalf("REGISTRANT_SUBSTRATE_VERIFIER=spiffe-svid requires SPIRE_JWKS_URL")
+			default:
+				jwksValidator, err := spiffe.NewJWKSValidator(ctx, spireJWKSURL)
+				if err != nil {
+					// Fail CLOSED: never start the registry silently unable to validate
+					// substrate SVIDs (identical discipline to the spiffe-svid case above).
+					log.Fatalf("substrate SVID validator init: %v", err)
+				}
+				ssv := registrant.NewSpiffeVerifier(jwksValidator)
+				ssv.TrustDomain = getEnv("SPIRE_TRUST_DOMAIN", "cluster.local")
+				substrateSpiffe = ssv
+				log.Printf("substrate-edge coexistence ENABLED: non-STS registrations validated by spiffe-svid (trust domain=%s jwks=%s)",
+					ssv.TrustDomain, spireJWKSURL)
+			}
+		default:
+			log.Fatalf("unknown REGISTRANT_SUBSTRATE_VERIFIER %q", sv)
+		}
+	}
+
 	// Per-org verifier resolution (multi-tenancy Phase 9): wrap the configured
 	// default registrant verifier so a consumer-hosted (remote) agent can
 	// self-register with its org's AWS STS credential — resolved to the org that
@@ -2636,7 +2675,12 @@ func main() {
 	// through, so platform SPIRE registration is bit-identical. The isolation
 	// invariant (an STS credential verifies ONLY against its record's org anchor)
 	// mirrors the Keycloak OrgAwareVerifier on the token-minting side.
-	verifier = registrant.NewOrgAwareVerifier(verifier, s, nil)
+	orgAware := registrant.NewOrgAwareVerifier(verifier, s, nil)
+	if substrateSpiffe != nil {
+		// Route the non-STS (SPIFFE) branch to the dedicated substrate verifier.
+		orgAware.WithSpiffe(substrateSpiffe)
+	}
+	verifier = orgAware
 	log.Printf("registry listening on :8080 (store=%s schema source=%s version=%s)",
 		getEnv("STORE", "memory"), schemaSource, schemaVersion)
 	srv := &http.Server{
