@@ -522,7 +522,16 @@ func (s *Store) PutOrg(ctx context.Context, org registry.Organization) error {
 
 // GetOrg returns the org and whether it exists; an unknown id is (zero, false).
 func (s *Store) GetOrg(ctx context.Context, id string) (registry.Organization, bool, error) {
-	out, err := s.db.GetItem(ctx, &dynamodb.GetItemInput{TableName: &s.table, Key: keyOf(orgPK(id), skMeta)})
+	// STRONGLY consistent: GetOrg backs read-your-write authorization gates — most
+	// sharply the substrate Entry API, which refuses to author a workload entry
+	// unless org.Substrate is set (cmd/orchestrator/substrate.go authEntryCaller).
+	// DynamoDB's default eventually-consistent reads are not monotonic, so a read
+	// moments after connect's PutOrg (or even after an earlier read already saw the
+	// substrate) can hit a lagging replica and return the org WITHOUT its substrate
+	// sub-record — silently refusing every spawn on a freshly-connected substrate.
+	// This never surfaced on kind (its in-memory store is strongly consistent); it
+	// is an AWS-only failure. Orgs are low-volume, so the 2x RCU cost is negligible.
+	out, err := s.db.GetItem(ctx, &dynamodb.GetItemInput{TableName: &s.table, Key: keyOf(orgPK(id), skMeta), ConsistentRead: aws.Bool(true)})
 	if err != nil {
 		return registry.Organization{}, false, err
 	}
