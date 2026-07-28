@@ -5,6 +5,7 @@ import org.keycloak.Config;
 import org.mockito.Mockito;
 
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
@@ -71,6 +72,56 @@ class AttestorFactoryTest {
         org.junit.jupiter.api.Assertions.assertEquals(
                 "https://oidc.eks.example/id/ABCD/.well-known/jwks.json", o.jwksUrl());
         org.junit.jupiter.api.Assertions.assertEquals("spawnly", o.audience());
+    }
+
+    // ── buildSubstrateSpiffe: the mint-side coexistence toggle (spec AC-5a) ───────
+    // Returns null unless ATTESTOR_SUBSTRATE_VERIFIER=spiffe; when enabled over an
+    // aws-stsweb/aws-sts default it builds a SEPARATE SPIRE verifier for the
+    // SPIFFE-SVID routing branch; fails CLOSED on misconfig; no double build when
+    // the default is already spiffe. Mirrors the Go REGISTRANT_SUBSTRATE_VERIFIER.
+
+    private Config.Scope substrateScope(String toggle, String attestor, String jwksUrl) {
+        Config.Scope scope = Mockito.mock(Config.Scope.class);
+        Mockito.when(scope.get(Mockito.anyString())).thenReturn(null);
+        Mockito.when(scope.get("attestorSubstrateVerifier")).thenReturn(toggle);
+        Mockito.when(scope.get("attestor")).thenReturn(attestor);
+        Mockito.when(scope.get("spireJwksUrl")).thenReturn(jwksUrl);
+        return scope;
+    }
+
+    @Test
+    void substrateSpiffe_unset_returnsNull() {
+        // No SPI key + no ATTESTOR_SUBSTRATE_VERIFIER env ⇒ toggle "" ⇒ null.
+        assertNull(AttestorFactory.buildSubstrateSpiffe(null));
+    }
+
+    @Test
+    void substrateSpiffe_enabledOverStsweb_buildsSpireVerifier() {
+        Config.Scope s = substrateScope("spiffe", "aws-stsweb",
+                "http://spire-oidc/.well-known/jwks.json");
+        assertInstanceOf(SpireCredentialVerifier.class, AttestorFactory.buildSubstrateSpiffe(s));
+    }
+
+    @Test
+    void substrateSpiffe_defaultAlreadySpiffe_returnsNull() {
+        // No double build on kind: the default verifier already validates SVIDs.
+        Config.Scope s = substrateScope("spiffe", "spiffe",
+                "http://spire-oidc/.well-known/jwks.json");
+        assertNull(AttestorFactory.buildSubstrateSpiffe(s));
+    }
+
+    @Test
+    void substrateSpiffe_enabledNoJwks_failsClosed() {
+        // Enabled over stsweb but no SPIRE_JWKS_URL ⇒ hard fail (never permissive).
+        Config.Scope s = substrateScope("spiffe", "aws-stsweb", null);
+        assertThrows(IllegalStateException.class, () -> AttestorFactory.buildSubstrateSpiffe(s));
+    }
+
+    @Test
+    void substrateSpiffe_unknownValue_hardFails() {
+        Config.Scope s = substrateScope("nonsense", "aws-stsweb",
+                "http://spire-oidc/.well-known/jwks.json");
+        assertThrows(IllegalStateException.class, () -> AttestorFactory.buildSubstrateSpiffe(s));
     }
 
     @Test

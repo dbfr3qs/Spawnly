@@ -326,6 +326,141 @@ class OrgAwareVerifierTest {
         assertEquals("ghost", id.agentId());
     }
 
+    // ── Substrate-edge coexistence (mint side, spec AC-5a) ───────────────────────
+    // The AWS edge default verifier is aws-stsweb (platform EKS agents), yet a
+    // substrate workload mints with a SPIFFE JWT-SVID. withSpiffe installs a
+    // SEPARATE SPIFFE verifier used ONLY for the SPIFFE-SVID-shaped non-STS
+    // credentials; the router (NOT spiffe-only) keeps platform stsweb mints working.
+    // Mirrors internal/registrant/orgaware_substrate_test.go.
+
+    /**
+     * A minimal unsigned JWT (header.payload.signature) whose only claim is
+     * {@code sub}. The verifier mocks ignore token content, so this drives ONLY
+     * the SPIFFE-vs-stsweb ROUTING ({@link OrgAwareVerifier#looksLikeSpiffeSvid}).
+     */
+    private static String jwtWithSub(String sub) {
+        String payload = Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(("{\"sub\":\"" + sub + "\"}").getBytes(StandardCharsets.UTF_8));
+        return "eyJhbGciOiJSUzI1NiJ9." + payload + ".sig";
+    }
+
+    // A SPIFFE-SVID-shaped credential (spiffe:// sub) routes to the substrate
+    // SPIFFE verifier, NOT the aws-stsweb default, and the org binding is applied.
+    @Test
+    void substrate_spiffeSvid_routedToSpiffeVerifier_orgBound() {
+        AgentCredentialVerifier spiffe = mock(AgentCredentialVerifier.class);
+        String cred = jwtWithSub("spiffe://spawnly.run/org/acme/agent/t/alice/worker/agent-a");
+        when(spiffe.verify(cred)).thenReturn(
+                new AgentIdentity("agent-a", "spiffe://spawnly.run/org/acme/agent/t/alice/worker/agent-a",
+                        "spiffe-svid", "acme"));
+        when(registry.getAgent("agent-a"))
+                .thenReturn(new AgentRecord("agent-a", "active", "alice", "worker", null, "acme"));
+
+        OrgAwareVerifier v = new OrgAwareVerifier(defaultVerifier, stsVerifier, registry).withSpiffe(spiffe);
+        AgentIdentity id = v.verify(cred);
+
+        assertNotNull(id);
+        assertEquals("agent-a", id.agentId());
+        assertEquals("acme", id.orgId());
+        verify(defaultVerifier, never()).verify(anyString());
+        verify(stsVerifier, never()).verify(anyString());
+    }
+
+    // THE REGRESSION GUARD (the platform-break trap): an stsweb web-identity JWT is
+    // ALSO non-STS-shaped, so it shares the non-STS branch. With a spiffe verifier
+    // wired it MUST still route to the aws-stsweb DEFAULT — its sub is an ARN, not a
+    // spiffe:// ID — or platform token minting breaks. The spiffe branch never sees it.
+    @Test
+    void substrate_stswebJwt_routesToDefaultNotSpiffe() {
+        AgentCredentialVerifier spiffe = mock(AgentCredentialVerifier.class);
+        String cred = jwtWithSub("arn:aws:sts::123456789012:assumed-role/eks-role/pod");
+        when(defaultVerifier.verify(cred))
+                .thenReturn(new AgentIdentity("plat-1", "arn:aws:sts::123456789012:assumed-role/eks-role/pod",
+                        "aws-stsweb"));
+
+        OrgAwareVerifier v = new OrgAwareVerifier(defaultVerifier, stsVerifier, registry).withSpiffe(spiffe);
+        AgentIdentity id = v.verify(cred);
+
+        assertNotNull(id);
+        assertEquals("plat-1", id.agentId());
+        verify(defaultVerifier).verify(cred);
+        verify(spiffe, never()).verify(anyString());
+    }
+
+    // An STS-presigned credential is UNAFFECTED by the spiffe branch: it still takes
+    // the org-bound STS path; NEITHER the default NOR the spiffe branch is consulted.
+    @Test
+    void substrate_stsCred_stillTakesStsPath_spiffeNeverConsulted() {
+        AgentCredentialVerifier spiffe = mock(AgentCredentialVerifier.class);
+        agentInOrg("remote-1", "acme");
+        org("acme", activeSts(ACME_ACCOUNT, ACME_ROLE));
+
+        OrgAwareVerifier v = new OrgAwareVerifier(defaultVerifier, stsVerifier, registry).withSpiffe(spiffe);
+        AgentIdentity id = v.verify(STS_CRED); // stsVerifier (setUp) attests remote-1
+
+        assertNotNull(id);
+        assertEquals("remote-1", id.agentId());
+        assertEquals("aws-sts", id.issuer());
+        verify(spiffe, never()).verify(anyString());
+        verify(defaultVerifier, never()).verify(anyString());
+    }
+
+    // ISOLATION through the spiffe branch: an org-A SVID naming an org-B record is
+    // refused (null), and there is NO fallback to the aws-stsweb default.
+    @Test
+    void substrate_spiffeBranch_crossOrgRecord_refused_noFallback() {
+        AgentCredentialVerifier spiffe = mock(AgentCredentialVerifier.class);
+        String cred = jwtWithSub("spiffe://spawnly.run/org/acme/agent/t/alice/worker/agent-b");
+        when(spiffe.verify(cred)).thenReturn(
+                new AgentIdentity("agent-b", "spiffe://spawnly.run/org/acme/agent/t/alice/worker/agent-b",
+                        "spiffe-svid", "acme"));
+        when(registry.getAgent("agent-b"))
+                .thenReturn(new AgentRecord("agent-b", "active", "alice", "worker", null, "globex"));
+
+        OrgAwareVerifier v = new OrgAwareVerifier(defaultVerifier, stsVerifier, registry).withSpiffe(spiffe);
+
+        assertNull(v.verify(cred));
+        verify(defaultVerifier, never()).verify(anyString());
+    }
+
+    // BACK-COMPAT: with NO spiffe verifier wired, even a spiffe:// -sub credential
+    // goes to the default — an unset toggle changes nothing.
+    @Test
+    void substrate_nilSpiffeBranch_spiffeSubCredGoesToDefault() {
+        String cred = jwtWithSub("spiffe://spawnly.run/agent/weather/agent-x");
+        when(defaultVerifier.verify(cred))
+                .thenReturn(new AgentIdentity("agent-x", "spiffe://spawnly.run/agent/weather/agent-x",
+                        "spiffe-svid"));
+
+        AgentIdentity id = orgAware.verify(cred); // orgAware from setUp has no withSpiffe
+
+        assertNotNull(id);
+        assertEquals("agent-x", id.agentId());
+        verify(defaultVerifier).verify(cred);
+    }
+
+    @Test
+    void looksLikeSpiffeSvid_detection() {
+        assertTrue(OrgAwareVerifier.looksLikeSpiffeSvid(
+                jwtWithSub("spiffe://spawnly.run/org/acme/agent/x")));
+        // stsweb / EKS subjects ⇒ NOT spiffe ⇒ route to default.
+        assertFalse(OrgAwareVerifier.looksLikeSpiffeSvid(
+                jwtWithSub("arn:aws:sts::123456789012:assumed-role/eks-role/pod")));
+        assertFalse(OrgAwareVerifier.looksLikeSpiffeSvid(
+                jwtWithSub("system:serviceaccount:default:spawnly-agent")));
+        // 2-part / garbage / empty / null ⇒ false.
+        assertFalse(OrgAwareVerifier.looksLikeSpiffeSvid("header.payload"));
+        assertFalse(OrgAwareVerifier.looksLikeSpiffeSvid("not-a-jwt"));
+        assertFalse(OrgAwareVerifier.looksLikeSpiffeSvid(""));
+        assertFalse(OrgAwareVerifier.looksLikeSpiffeSvid(null));
+        // 3 parts but the payload has no sub claim ⇒ false.
+        String noSub = "eyJhbGciOiJSUzI1NiJ9." + Base64.getUrlEncoder().withoutPadding()
+                .encodeToString("{\"foo\":\"bar\"}".getBytes(StandardCharsets.UTF_8)) + ".sig";
+        assertFalse(OrgAwareVerifier.looksLikeSpiffeSvid(noSub));
+        // 3 parts but the payload is not valid base64url/JSON ⇒ false.
+        assertFalse(OrgAwareVerifier.looksLikeSpiffeSvid("a.!!!.c"));
+    }
+
     @Test
     void looksLikeStsCredential_detection() {
         assertTrue(OrgAwareVerifier.looksLikeStsCredential(STS_CRED));

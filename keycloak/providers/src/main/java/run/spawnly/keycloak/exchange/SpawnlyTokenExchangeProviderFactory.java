@@ -83,8 +83,13 @@ public class SpawnlyTokenExchangeProviderFactory implements TokenExchangeProvide
         // (STS) agent's actor_token is verified against its org anchor when it
         // delegates.
         this.registry = new AgentRegistryClient();
+        // SUBSTRATE-EDGE COEXISTENCE (spec AC-5a), delegation side: keep the mint and
+        // token-exchange paths SYMMETRIC — a substrate agent must be able to delegate
+        // (actor_token) with its SPIFFE SVID too. buildSubstrateSpiffe returns null
+        // unless ATTESTOR_SUBSTRATE_VERIFIER=spiffe, so this is a no-op off the edge.
         this.verifier = new OrgAwareVerifier(
-                AttestorFactory.build(config), registry, AttestorFactory.resolveStsTrustedEndpoint(config));
+                AttestorFactory.build(config), registry, AttestorFactory.resolveStsTrustedEndpoint(config))
+                .withSpiffe(AttestorFactory.buildSubstrateSpiffe(config));
         log.debug("spawnly-token-exchange provider initialized");
     }
 

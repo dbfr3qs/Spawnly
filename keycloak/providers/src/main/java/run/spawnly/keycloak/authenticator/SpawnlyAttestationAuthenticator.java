@@ -117,8 +117,15 @@ public class SpawnlyAttestationAuthenticator extends AbstractClientAuthenticator
         // org-aware resolver, built with the STS_TRUSTED_ENDPOINT override so the
         // org-bound STS verifier honours the fake STS in e2e.
         this.registry = new AgentRegistryClient();
+        // SUBSTRATE-EDGE COEXISTENCE (spec AC-5a): on AWS the default is aws-stsweb,
+        // which rejects a JWT-SVID, so a substrate agent minting with a SPIFFE SVID
+        // got invalid_client. withSpiffe injects a SEPARATE SPIFFE verifier used ONLY
+        // for the SPIFFE-SVID-shaped non-STS credentials; buildSubstrateSpiffe returns
+        // null unless ATTESTOR_SUBSTRATE_VERIFIER=spiffe, so the call is a no-op
+        // everywhere else (kind / plain-stsweb) and the wiring stays bit-identical.
         this.verifier = new OrgAwareVerifier(
-                AttestorFactory.build(config), registry, AttestorFactory.resolveStsTrustedEndpoint(config));
+                AttestorFactory.build(config), registry, AttestorFactory.resolveStsTrustedEndpoint(config))
+                .withSpiffe(AttestorFactory.buildSubstrateSpiffe(config));
     }
 
     /** True for a client_assertion type one of this platform's attestors uses. */
