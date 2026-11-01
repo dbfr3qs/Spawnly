@@ -12,12 +12,12 @@ name: e2e
 # Excluded (need a real model — kept for a future key-gated / fake-model
 # lane): weather-chat.
 #
-# Heavy (~15 image builds + SPIRE + SpiceDB), so it does not run on every push.
-# The repo is private (Free plan = 2,000 private Actions minutes/month), so this
-# lane runs only on a weekly schedule, manual dispatch, and PRs labelled
-# `full-e2e` — a per-push trigger would burn most of the monthly budget.
+# Heavy (~15 image builds + SPIRE + SpiceDB), so it runs on pushes to main, a
+# weekly schedule, manual dispatch, and PRs labelled `full-e2e` (not every PR).
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: '17 5 * * 1'   # Mondays 05:17 UTC — weekly regression heartbeat
   pull_request:
@@ -36,8 +36,8 @@ jobs:
     name: bootstrap + model-free e2e
     runs-on: ubuntu-latest
     # On PRs, only run when explicitly opted in via the `full-e2e` label (this
-    # lane is slow). Non-PR events — the weekly schedule and manual dispatch —
-    # always run.
+    # lane is slow). Non-PR events — pushes to main, the weekly schedule and
+    # manual dispatch — always run.
     if: >-
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'full-e2e')

@@ -10,6 +10,13 @@
   <packaging>jar</packaging>
   <name>Spawnly Keycloak SPI providers</name>
 
+  <licenses>
+    <license>
+      <name>Apache-2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0</url>
+    </license>
+  </licenses>
+
   <!--
     Custom Keycloak SPI providers implementing Spawnly's identity behaviour,
     ported from identityserver/ (Duende C#). Phase 1 delivers the pluggable

@@ -2,8 +2,8 @@
 #
 # Exists so out-of-repo overlays (e.g. the private AWS deploy in spawnly-infra)
 # can consume this directory as a kustomize base. spawnly-infra vendors this
-# directory locally via its deploy/aws/sync-bases.sh (the repo is private, so it
-# is no longer consumed as a remote base). Resources are listed by relative path
+# directory locally via its deploy/aws/sync-bases.sh (pinned to a recorded
+# source commit rather than consumed as a remote base). Resources are listed by relative path
 # (no parent-escaping) so the base builds without needing LoadRestrictionsNone.
 #
 # Order mirrors scripts/bootstrap.sh: RBAC and SpiceDB first, then the control
