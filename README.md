@@ -1,14 +1,42 @@
 # Spawnly
 
-A proof-of-concept platform for running AI agents on Kubernetes with cryptographic identity, fine-grained authorisation, and full lifecycle observability. Agents may be **short-lived** (do one job and exit) or **long-lived** (serve until deleted — including chat). This project is aimed at those who are interested in running agents within an enterprise environment, or who just want to run agents in isolated container based environments on their own machines.
+[![CI](https://github.com/dbfr3qs/Spawnly/actions/workflows/ci.yml/badge.svg)](https://github.com/dbfr3qs/Spawnly/actions/workflows/ci.yml)
+[![e2e](https://github.com/dbfr3qs/Spawnly/actions/workflows/e2e.yml/badge.svg)](https://github.com/dbfr3qs/Spawnly/actions/workflows/e2e.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-docs.spawnly.run-informational)](https://docs.spawnly.run/)
 
-Each agent pod gets a unique SPIFFE identity (JWT-SVID) issued by SPIRE at start. A per-pod **sidecar** uses that identity to register the agent with the **agent registry** and to obtain scoped OAuth 2.0 access tokens; the agent then calls protected APIs and emits structured lifecycle events throughout — all visible in a real-time web dashboard.
+**Identity, authorisation, and lifecycle control for AI agents on Kubernetes.**
+Every agent pod gets its own cryptographic identity, trades it for narrowly
+scoped OAuth tokens, needs a human's approval before spawning sensitive
+sub-agents, and can be revoked — along with everything it spawned — in seconds.
 
-> **New here?** The easiest way to run, demo, and learn this platform is the
-> [Claude Code plugin](PLUGIN.md): `/spawnly:up` then `/spawnly:demo`, and ask
-> it how anything works.
+![The Spawnly dashboard — chatting with a long-lived agent while its event timeline streams below, with per-category filters.](spawnly-ui.jpg)
 
-**What it demonstrates** — identity and authorisation across the full agent lifecycle:
+📖 **Docs:** [docs.spawnly.run](https://docs.spawnly.run/) · 🚀 **Try it:** [Quickstart](#quickstart) · 🧠 **Why it's built this way:** [Key design decisions](#key-design-decisions)
+
+> **Status:** a working proof of concept, built and maintained by
+> [Christopher Keogh](https://github.com/dbfr3qs). It runs end-to-end locally on
+> kind and deploys to AWS EKS, with unit, acceptance, and Playwright e2e suites
+> in CI — but it is not production-hardened.
+
+---
+
+## Why Spawnly
+
+AI agents are increasingly given real authority — calling internal APIs,
+spending money, spawning other agents — yet most run on a shared, long-lived
+API key pasted into an environment variable. That makes it hard to answer the
+questions an enterprise security team will ask: *which* agent made this call,
+on whose behalf, with what permissions — and how do I stop it, and everything
+it started, **right now**?
+
+Spawnly answers those questions with established identity standards instead
+of bespoke plumbing: **SPIFFE/SPIRE** for workload identity, **OAuth 2.0**
+(RFC 7523 client assertions, RFC 8693 token exchange) for scoped credentials,
+**OpenID CIBA** for out-of-band human consent, and **SpiceDB** (Zanzibar-style
+ReBAC) for authorisation.
+
+## What it demonstrates
 
 - **Per-pod workload identity** — every agent gets a unique SPIFFE JWT-SVID from SPIRE at startup; no shared secrets or static API keys.
 - **Identity → scoped OAuth tokens** — a sidecar exchanges the SVID (RFC 7523 `client_assertion`) for scoped access tokens, so agent code carries zero identity plumbing.
@@ -23,11 +51,37 @@ Agents run on the same platform contract regardless of language or framework:
 - **TypeScript agents** (`agents/`) — built on the `@spawnly/sdk` (which lives in `sdks/typescript/`). These can chat over an LLM (OpenAI or Anthropic), call tools, and orchestrate child agents over A2A. Most use the [Flue](https://www.npmjs.com/package/@flue/runtime) runtime; `chain-worker` and the `travel-*` agents are plain (no-LLM) TypeScript, proving the contract is framework-agnostic — agent code depends only on the SDK, never on platform internals.
 - **The same contract is available in Go** via the Go SDK (`github.com/spawnly/sdk-go`, in `sdks/go/`); no example Go agent ships at the moment, but the token/HTTP/event helpers mirror the TypeScript SDK exactly.
 
+## Quickstart
+
+You need Docker, `kind`, `kubectl`, Helm, `jq`, Go 1.25+ and Node.js 20+ (or
+just open the repo in the included devcontainer). Then either:
+
+- **With [Claude Code](https://claude.com/claude-code):** install the
+  [plugin](PLUGIN.md) and run `/spawnly:up` then `/spawnly:demo` — a guided,
+  narrated tour you can ask questions of; or
+- **By hand:**
+  ```bash
+  cp .env.example .env   # add an Anthropic or OpenAI key for the LLM-backed agents
+  make bootstrap         # kind cluster + images + SPIRE + Keycloak + SpiceDB + seeded templates
+  make demo              # spawns an agent and prints its lifecycle timeline
+  ```
+  Then open <http://localhost:8090> and log in as `alice` / `alice`.
+
+Full details: [Prerequisites](#prerequisites) and [Setup](#setup).
+
 ---
 
-## Components at a glance
+## Architecture
 
-Spawnly is a handful of small, single-purpose services. Before the architecture diagram, here is what each one does — in a sentence.
+The diagram shows the full flow for a single agent — spawn request → CRD → pod, the sidecar-owned identity/token exchange, agent work, and the chat path.
+
+![Spawnly architecture](assets/architecture.svg)
+
+**The key thing the sidecar does:** the agent container never performs the SVID/registration/token dance itself. The `agent-sidecar` fetches the JWT-SVID from SPIRE, **self-registers the agent** with the agent registry (SVID as Bearer), exchanges the SVID at Keycloak for a scoped access token, and exposes a local `/token` endpoint (`:8089`). The agent asks the sidecar for tokens via the SDK's `TokenClient`. This keeps agent code framework- and language-agnostic.
+
+Keycloak doesn't mint a token blindly: during the grant its Spawnly attestation SPI **looks up the agent registry to confirm the agent exists and is `active`**, so a deregistered or unknown agent can't obtain credentials.
+
+### Components at a glance
 
 **Control plane — spawning & lifecycle**
 
@@ -49,21 +103,9 @@ Spawnly is a handful of small, single-purpose services. Before the architecture 
 **Observability**
 
 - **Agent Registry** — the system's memory. The sidecar registers each agent here, every component records lifecycle events here, agent templates live here, and Keycloak consults it to check an agent is active before issuing a token.
-- **Dashboard UI** — the real-time web view: spawn agents, watch their event timelines, and chat with long-lived ones ([screenshot](spawnly-ui.jpg)).
+- **Dashboard UI** — the real-time web view: spawn agents, watch their event timelines, and chat with long-lived ones (screenshot above).
 
 For the directory-level breakdown (paths, languages, internal packages), see [Repository layout](#repository-layout).
-
----
-
-## Architecture
-
-The diagram shows the full flow for a single agent — spawn request → CRD → pod, the sidecar-owned identity/token exchange, agent work, and the chat path.
-
-![Spawnly architecture](assets/architecture.svg)
-
-**The key thing the sidecar does:** the agent container never performs the SVID/registration/token dance itself. The `agent-sidecar` fetches the JWT-SVID from SPIRE, **self-registers the agent** with the agent registry (SVID as Bearer), exchanges the SVID at Keycloak for a scoped access token, and exposes a local `/token` endpoint (`:8089`). The agent asks the sidecar for tokens via the SDK's `TokenClient`. This keeps agent code framework- and language-agnostic.
-
-Keycloak doesn't mint a token blindly: during the grant its Spawnly attestation SPI **looks up the agent registry to confirm the agent exists and is `active`**, so a deregistered or unknown agent can't obtain credentials.
 
 ### Lifecycle events
 
@@ -87,7 +129,48 @@ As an agent moves through its life — spawned, given an identity, doing work, e
 
 The dashboard's event panel has **per-agent category filters** — click the chips to show/hide Tools, Model, Thinking, Run, Errors, Logs, System, etc. `heartbeat` (the long-lived liveness signal) is classified as **System** and hidden by default so it doesn't clog the timeline.
 
-![The Spawnly dashboard — chatting with a long-lived agent while its event timeline streams below, with per-category filters (System and Other hidden, "showing 22 of 1219").](spawnly-ui.jpg)
+---
+
+## Key design decisions
+
+- **SPIFFE/SPIRE for workload identity**: every agent pod gets a unique JWT-SVID (`spiffe://cluster.local/...`) via the CSI driver — no shared secrets or static API keys.
+- **A per-pod sidecar owns registration and token exchange**: the `agent-sidecar` self-registers the agent with the agent registry and turns the SVID into scoped OAuth tokens served at `:8089`, so agent code stays free of identity plumbing and works the same in Go or TypeScript.
+- **Keycloak as the OAuth 2.0 authority**: the sidecar uses the SVID as a `client_assertion` (RFC 7523 JWT Bearer) to obtain a scoped access token, validated by the Spawnly attestation SPI against SPIRE's JWKS endpoint — and Keycloak additionally checks the agent registry that the agent is `active` before issuing.
+- **SpiceDB for authorisation**: the registry writes the agent's relationships on registration (a `tenant:T#agent@agent:X` relation when tenanted, none when global). The sample API checks `work_on` permission before serving requests.
+- **Tenancy from presence**: an agent is tenanted if a tenant id is present; the same code path serves global agents by simply omitting the tenant segment, header, and relations.
+- **CIBA for human-in-the-loop spawn consent**: the consent-gated child's own sidecar runs the backchannel grant, so "user approves the spawn" is a standard OAuth flow rather than bespoke plumbing — stored consent auto-approves repeats, and revocation starves the child's token renewal.
+- **Revocation cascades, deletion doesn't**: revoke/resume walk the descendant subtree and drop/re-derive SpiceDB relations in real time (pods keep running and get 403s), while `DELETE` removes a single agent only.
+- **Shared-secret control plane**: the registry's template and consent-broker endpoints sit behind a bootstrap-generated shared secret (`CONTROL_PLANE_AUTH=shared-secret` by default), distinct from the SVID-authenticated agent-facing paths — so config-as-code tooling like the Terraform provider can manage the catalog without a workload identity.
+- **A `Store` seam behind the registry**: registry state lives behind a `Store` interface ([`internal/registry/store.go`](internal/registry/store.go)) whose default implementation is in-memory (resets on restart), leaving room for a durable backend without touching handlers.
+- **Append-only, filterable event log**: lifecycle events flow into the registry's store. The dashboard appends new events to the DOM without replacing existing rows (preserving expanded/collapsed state) and filters them per-agent by category (heartbeat hidden by default).
+
+---
+
+## Production deployment
+
+Beyond the local kind setup, Spawnly is deployed to **AWS EKS** from a separate
+(private) infrastructure repo. That deployment adds:
+
+- **Terraform-managed infrastructure** split into independently-applied roots
+  (network & data, DNS, container registry, email), with remote state.
+- **Durable persistence** — RDS PostgreSQL for Keycloak and SpiceDB; DynamoDB
+  (single-table) behind the registry's `Store` seam; point-in-time recovery on both.
+- **Least-privilege AWS IAM** via EKS Pod Identity per component, plus AWS STS
+  web-identity tokens as an alternative agent attestation to SPIFFE.
+- **Remote substrates** — customer-owned Kubernetes clusters join over
+  outbound-only connections to a hosted SPIRE server backed by a KMS-held CA,
+  so agents can run in a customer's environment while identity and policy stay
+  centrally managed ([how it works](https://docs.spawnly.run/operating/remote-agents/)).
+- **Public edge** — Route 53, ACM, and ALB/NLB ingress; SES for sign-up and
+  account-lifecycle email.
+
+## Tech stack
+
+**Go** (orchestrator, operator, registry, sidecar, dashboard; controller-runtime)
+· **TypeScript** (SDK, agents, MCP server; Expo/React Native mobile app)
+· **Java** (Keycloak SPI providers) · **Kubernetes** + kind · **SPIFFE/SPIRE**
+· **Keycloak** · **SpiceDB** · **Terraform** (including a custom provider)
+· **AWS** (EKS, RDS, DynamoDB, KMS, SES) · **Playwright** e2e · GitHub Actions
 
 ---
 
@@ -123,7 +206,8 @@ Every directory, by language and purpose:
 | `deploy/secrets/` | YAML | `ai-provider` Secret (`provider`, `api-key`, `model`) consumed by Flue agents |
 | `deploy/spire/` | YAML | SPIRE Helm values and `ClusterSPIFFEID` for automatic agent identity assignment |
 | `deploy/kind/` | YAML | Kind cluster config (single control-plane + worker node) |
-| `scripts/` | Bash | `bootstrap.sh` (one-shot cluster setup), `seed.sh` (template seeding), `demo.sh` (interactive demo), `acc-testbed.sh` (ephemeral registry for provider acceptance tests) || `terraform-provider-spawnly/` | Go | Terraform provider for managing agent templates as config-as-code, talking directly to the registry control-plane API ([README](terraform-provider-spawnly/README.md)) |
+| `scripts/` | Bash | `bootstrap.sh` (one-shot cluster setup), `seed.sh` (template seeding), `demo.sh` (interactive demo), `acc-testbed.sh` (ephemeral registry for provider acceptance tests) |
+| `terraform-provider-spawnly/` | Go | Terraform provider for managing agent templates as config-as-code, talking directly to the registry control-plane API ([README](terraform-provider-spawnly/README.md)) |
 
 ---
 
@@ -196,7 +280,7 @@ This will:
 - Tail its phase until `Completed` or `Failed`
 - Print the lifecycle event timeline
 
-Open `http://localhost:8090` to watch events, spin up agents, and chat with long-lived ones in real time — as in the [dashboard screenshot](#lifecycle-events) above.
+Open `http://localhost:8090` to watch events, spin up agents, and chat with long-lived ones in real time — as in the [screenshot](#spawnly) at the top.
 
 **Logging in.** The dashboard now requires a human login over OIDC. Visiting it without a session redirects to the Keycloak login page; sign in with the seeded demo user **`alice` / `alice`**. The logged-in identity becomes the `userId` on every agent you spawn (so the agent's access token carries `sub=user:alice`) — the spawn form no longer takes a free-text user. The **Log out** button in the header ends both the dashboard session and the Keycloak session. This is the machine-vs-human split: agents authenticate with SPIFFE JWT-SVIDs, while a person logs in with a username/password.
 
@@ -416,21 +500,6 @@ make logs-orchestrator
 # Or rebuild and load everything:
 make kind-load
 ```
-
----
-
-## Key design decisions
-
-- **SPIFFE/SPIRE for workload identity**: every agent pod gets a unique JWT-SVID (`spiffe://cluster.local/...`) via the CSI driver — no shared secrets or static API keys.
-- **A per-pod sidecar owns registration and token exchange**: the `agent-sidecar` self-registers the agent with the agent registry and turns the SVID into scoped OAuth tokens served at `:8089`, so agent code stays free of identity plumbing and works the same in Go or TypeScript.
-- **Keycloak as the OAuth 2.0 authority**: the sidecar uses the SVID as a `client_assertion` (RFC 7523 JWT Bearer) to obtain a scoped access token, validated by the Spawnly attestation SPI against SPIRE's JWKS endpoint — and Keycloak additionally checks the agent registry that the agent is `active` before issuing.
-- **SpiceDB for authorisation**: the registry writes the agent's relationships on registration (a `tenant:T#agent@agent:X` relation when tenanted, none when global). The sample API checks `work_on` permission before serving requests.
-- **Tenancy from presence**: an agent is tenanted if a tenant id is present; the same code path serves global agents by simply omitting the tenant segment, header, and relations.
-- **CIBA for human-in-the-loop spawn consent**: the consent-gated child's own sidecar runs the backchannel grant, so "user approves the spawn" is a standard OAuth flow rather than bespoke plumbing — stored consent auto-approves repeats, and revocation starves the child's token renewal.
-- **Revocation cascades, deletion doesn't**: revoke/resume walk the descendant subtree and drop/re-derive SpiceDB relations in real time (pods keep running and get 403s), while `DELETE` removes a single agent only.
-- **Shared-secret control plane**: the registry's template and consent-broker endpoints sit behind a bootstrap-generated shared secret (`CONTROL_PLANE_AUTH=shared-secret` by default), distinct from the SVID-authenticated agent-facing paths — so config-as-code tooling like the Terraform provider can manage the catalog without a workload identity.
-- **A `Store` seam behind the registry**: registry state lives behind a `Store` interface ([`internal/registry/store.go`](internal/registry/store.go)) whose default implementation is in-memory (resets on restart), leaving room for a durable backend without touching handlers.
-- **Append-only, filterable event log**: lifecycle events flow into the registry's store. The dashboard appends new events to the DOM without replacing existing rows (preserving expanded/collapsed state) and filters them per-agent by category (heartbeat hidden by default).
 
 ---
 
