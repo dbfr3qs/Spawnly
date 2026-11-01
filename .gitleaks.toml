@@ -1,0 +1,14 @@
+# gitleaks config: default rules plus an allowlist for known false positives.
+# Run: gitleaks git . --log-opts=--all   (or `gitleaks dir .` for the tree)
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic test fixtures and bundled third-party build output"
+paths = [
+  # Fake PEM keys / JWTs built in-test to exercise the substrate bundle.
+  '''cmd/orchestrator/substrate_bundle_test\.go''',
+  # Bundled build output (was committed historically; now gitignored).
+  '''agents/[^/]+/dist/''',
+  '''agents/[^/]+/node_modules/''',
+]

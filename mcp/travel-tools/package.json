@@ -2,6 +2,7 @@
   "name": "travel-tools-mcp",
   "version": "1.0.0",
   "private": true,
+  "license": "Apache-2.0",
   "description": "Spawnly travel-tools MCP server: scope-enforced, real-upstream tools (currency, flights, hotels) behind Spawnly access tokens.",
   "type": "module",
   "scripts": {

@@ -2,6 +2,7 @@
   "name": "dashboard-e2e",
   "version": "1.0.0",
   "private": true,
+  "license": "Apache-2.0",
   "description": "Browser-based E2E tests for the Spawnly dashboard UI",
   "scripts": {
     "test": "playwright test",

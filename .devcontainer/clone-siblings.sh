@@ -32,7 +32,8 @@ clone_if_missing() {
   fi
 }
 
-# spawnly-docs is public; spawnly-infra is private (needs valid gh auth).
+# spawnly-docs is public. spawnly-infra (the hosted AWS deploy) is private and
+# owner-only — for everyone else this clone is skipped with a warning, harmlessly.
 clone_if_missing dbfr3qs/spawnly-docs  "${WORKSPACES}/spawnly-docs"
 clone_if_missing dbfr3qs/spawnly-infra "${WORKSPACES}/spawnly-infra"
 

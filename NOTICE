@@ -1,0 +1,6 @@
+Spawnly
+Copyright 2026 Christopher Keogh
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+Third-party dependencies are licensed under their own terms; see each
+module's go.mod / package.json / pom.xml for the dependency list.

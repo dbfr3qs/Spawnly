@@ -2,6 +2,7 @@
   "name": "spawnly-mobile",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "description": "Spawnly mobile app — answer CIBA spawn-consent prompts (iOS + Android).",
   "main": "index.ts",
   "scripts": {
