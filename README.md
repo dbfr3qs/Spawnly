@@ -14,8 +14,7 @@ sub-agents, and can be revoked — along with everything it spawned — in secon
 
 📖 **Docs:** [docs.spawnly.run](https://docs.spawnly.run/) · 🚀 **Try it:** [Quickstart](#quickstart) · 🧠 **Why it's built this way:** [Key design decisions](#key-design-decisions)
 
-> **Status:** a working proof of concept, built and maintained by
-> [Christopher Keogh](https://github.com/dbfr3qs). It runs end-to-end locally on
+> **Status:** a working proof of concept. It runs end-to-end locally on
 > kind and deploys to AWS EKS, with unit, acceptance, and Playwright e2e suites
 > in CI — but it is not production-hardened.
 
